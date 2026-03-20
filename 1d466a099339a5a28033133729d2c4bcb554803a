@@ -1,0 +1,29 @@
+src/settings.c
+  429ec22c7a313b53 20-21,63-65
+include/irl-source.h
+  429ec22c7a313b53 37,58
+src/irl-source.c
+  429ec22c7a313b53 39-40
+src/receiver.c
+  429ec22c7a313b53 26,37-46,49-54,141-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "1d466a099339a5a28033133729d2c4bcb554803a",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 28,
+      "total_deletions": 3,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  }
+}
