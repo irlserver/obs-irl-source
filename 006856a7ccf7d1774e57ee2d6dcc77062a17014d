@@ -1,0 +1,25 @@
+src/audio-speed.c
+  ab5553702c17a9b7 30,33-39,42-46
+src/receiver.c
+  ab5553702c17a9b7 459-462,467-474
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "006856a7ccf7d1774e57ee2d6dcc77062a17014d",
+  "prompts": {
+    "ab5553702c17a9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "939f172f-0ad7-43c6-b7c5-a4058207e0eb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 29,
+      "total_deletions": 17,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  }
+}
