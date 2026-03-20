@@ -1,0 +1,39 @@
+.github/workflows/build.yml
+  e8b4ab813846004b 43-44,46,68,72,119-127,130,133,135,138-139,145
+  429ec22c7a313b53 39,48-59,61-67,70-71,74-118,131,134
+CMakeLists.txt
+  429ec22c7a313b53 11-13,15-17,19-21,25-38,46-48,55-56,169-176,184,189-194,196,198,220-223,255-259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "23ebe229b8fd3ff037b9c1429a565271dcfc0369",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 179,
+      "total_deletions": 119,
+      "accepted_lines": 126,
+      "overriden_lines": 0
+    },
+    "e8b4ab813846004b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45e45b71-f03d-470e-a446-90beb9c60990",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 52,
+      "total_deletions": 47,
+      "accepted_lines": 21,
+      "overriden_lines": 0
+    }
+  }
+}
