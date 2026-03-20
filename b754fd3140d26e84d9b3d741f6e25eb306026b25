@@ -1,0 +1,23 @@
+src/video-handler.c
+  429ec22c7a313b53 18-43,81-93,100-103,109-113,122-125,130-134,138-141,147-151,155,159,161,163-166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "b754fd3140d26e84d9b3d741f6e25eb306026b25",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 102,
+      "total_deletions": 57,
+      "accepted_lines": 76,
+      "overriden_lines": 0
+    }
+  }
+}
