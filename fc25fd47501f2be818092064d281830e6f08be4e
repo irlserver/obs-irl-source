@@ -1,0 +1,29 @@
+CMakeLists.txt
+  429ec22c7a313b53 48-50,208-211
+.github/workflows/build.yml
+  429ec22c7a313b53 55,74,82,119
+src/video-handler.c
+  429ec22c7a313b53 105,127
+src/receiver.c
+  429ec22c7a313b53 17-20,470
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "fc25fd47501f2be818092064d281830e6f08be4e",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 18,
+      "total_deletions": 7,
+      "accepted_lines": 18,
+      "overriden_lines": 0
+    }
+  }
+}
