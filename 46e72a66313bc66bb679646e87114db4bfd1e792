@@ -1,0 +1,23 @@
+CLAUDE.md
+  6445b75b6cb0987d 1-89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "46e72a66313bc66bb679646e87114db4bfd1e792",
+  "prompts": {
+    "6445b75b6cb0987d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f5bdfa07-f472-4132-8e0a-153c83dc1095",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 89,
+      "total_deletions": 0,
+      "accepted_lines": 89,
+      "overriden_lines": 0
+    }
+  }
+}
