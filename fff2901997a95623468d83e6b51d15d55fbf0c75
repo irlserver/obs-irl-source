@@ -1,0 +1,25 @@
+CMakeLists.txt
+  ab5553702c17a9b7 8
+include/irl-source.h
+  ab5553702c17a9b7 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "fff2901997a95623468d83e6b51d15d55fbf0c75",
+  "prompts": {
+    "ab5553702c17a9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "939f172f-0ad7-43c6-b7c5-a4058207e0eb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
