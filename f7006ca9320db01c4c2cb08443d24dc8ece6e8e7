@@ -1,0 +1,23 @@
+CMakeLists.txt
+  429ec22c7a313b53 55-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "f7006ca9320db01c4c2cb08443d24dc8ece6e8e7",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 15,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
