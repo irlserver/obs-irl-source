@@ -1,0 +1,27 @@
+.gitignore
+  e8b4ab813846004b 1-8
+CMakeLists.txt
+  e8b4ab813846004b 5
+.github/workflows/build.yml
+  e8b4ab813846004b 1-102
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "e319ef03513082bad5d3b3a9e26bc43e29f76050",
+  "prompts": {
+    "e8b4ab813846004b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45e45b71-f03d-470e-a446-90beb9c60990",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 139,
+      "total_deletions": 29,
+      "accepted_lines": 111,
+      "overriden_lines": 0
+    }
+  }
+}
