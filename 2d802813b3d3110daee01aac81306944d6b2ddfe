@@ -1,0 +1,27 @@
+README.md
+  429ec22c7a313b53 49-54,190
+src/receiver.c
+  429ec22c7a313b53 81-82,98
+.github/workflows/build.yml
+  429ec22c7a313b53 149-205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "2d802813b3d3110daee01aac81306944d6b2ddfe",
+  "prompts": {
+    "429ec22c7a313b53": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "388474b3-c59c-4966-b172-c88dba192dd5",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 72,
+      "total_deletions": 5,
+      "accepted_lines": 67,
+      "overriden_lines": 0
+    }
+  }
+}
