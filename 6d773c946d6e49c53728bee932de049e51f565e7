@@ -1,0 +1,23 @@
+src/receiver.c
+  ab5553702c17a9b7 413-419,424,428-430,433-436,439-446,449-455,457,459-473,476-480,484-500,502-506,654-655
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "6d773c946d6e49c53728bee932de049e51f565e7",
+  "prompts": {
+    "ab5553702c17a9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "939f172f-0ad7-43c6-b7c5-a4058207e0eb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 83,
+      "total_deletions": 85,
+      "accepted_lines": 75,
+      "overriden_lines": 0
+    }
+  }
+}
