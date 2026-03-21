@@ -68,17 +68,11 @@ The plugin uses a hybrid approach — an adaptive PLL (phase-locked loop):
 
 1. **Running PTS** — a counter anchored to the system clock on first output, then advanced by the exact sample count of each output chunk. This gives perfectly smooth inter-chunk timing with no jitter from network delivery variation.
 
-2. **Adaptive correction** — each output nudges the running PTS toward `os_gettime_ns()`. The correction strength scales with how far off we are:
-
-   | Error magnitude | Correction | Recovery time | Purpose |
-   |---|---|---|---|
-   | < 20ms | 2% per chunk | ~2 seconds | Smooth out normal jitter without artifacts |
-   | 20–100ms | 12.5% per chunk | ~1 second | Recover from brief stalls or network hiccups |
-   | > 100ms | 50% per chunk | Near-instant | Snap back after decode stalls or long gaps |
+2. **Soft correction** — each output nudges the running PTS 25% toward `os_gettime_ns()`. This keeps steady-state error under 5ms even with network jitter. If PTS falls more than 30ms behind the system clock (after a decode stall or long gap), it snaps directly to "now" — OBS restarts the source if timestamps lag by ~30-50ms, so a gradual ramp can't recover in time.
 
    The target is simply "now" — audio is handed to OBS at the current time, so timestamps should match the system clock. Buffer fill is an internal concern and is not factored into the target (previous versions subtracted buffer fill, which caused timestamps to always lag behind the system clock, triggering OBS's "audio is lagging" detection).
 
-A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The adaptive PLL gives the smoothness of the running counter with the accuracy of the system clock — small drift corrects gently, large drift corrects aggressively.
+A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The PLL gives the smoothness of the running counter with the accuracy of the system clock.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 

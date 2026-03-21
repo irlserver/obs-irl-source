@@ -468,24 +468,21 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 				(int64_t)os_gettime_ns();
 			ctx->audio_output_pts_init = true;
 		} else {
-			/* Adaptive PLL: correction strength scales
-			 * with error magnitude.  Small drift gets
-			 * gentle 2% nudges (no jitter), medium drift
-			 * corrects in ~1s, large drift (stalls)
-			 * snaps back near-instantly. */
+			/* Soft PLL: nudge running PTS toward the
+			 * system clock.  25% correction per chunk
+			 * keeps steady-state error under 5ms.  If
+			 * PTS falls > 30ms behind (stall recovery),
+			 * snap directly to now — OBS restarts the
+			 * source if timestamps lag by ~30-50ms, so
+			 * a smooth ramp can't recover in time. */
 			int64_t now = (int64_t)os_gettime_ns();
 			int64_t error =
 				now - ctx->audio_output_pts_ns;
-			int64_t abs_err =
-				error >= 0 ? error : -error;
-			int divisor;
-			if (abs_err > 100000000LL)      /* > 100ms */
-				divisor = 2;
-			else if (abs_err > 20000000LL)  /* > 20ms */
-				divisor = 8;
+			if (error > 30000000LL)         /* > 30ms behind */
+				ctx->audio_output_pts_ns = now;
 			else
-				divisor = 50;
-			ctx->audio_output_pts_ns += error / divisor;
+				ctx->audio_output_pts_ns +=
+					error / 4;
 		}
 
 		uint32_t frames_out =
