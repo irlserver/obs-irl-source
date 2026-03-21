@@ -407,6 +407,15 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
+	/* If output is suppressed after a PTS snap, skip EVERYTHING
+	 * (PLL + drain).  The PLL must also be skipped because PTS
+	 * doesn't advance during suppression — running the PLL would
+	 * see a growing error, trigger another snap+suppress, and
+	 * loop forever.  When suppression ends, the PLL's first
+	 * correction will snap PTS to the current time. */
+	if (os_gettime_ns() < ctx->audio_snap_suppress_until)
+		return;
+
 	/* PLL correction: run ONCE per drain cycle, before the loop.
 	 * Running inside the loop causes PTS to drift progressively
 	 * ahead during multi-chunk drains. */
@@ -426,27 +435,17 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		if (abs_err > 50000000LL) { /* > 50ms: snap */
 			ctx->audio_output_pts_ns = target;
 			/* Suppress output for 100ms after a snap.
-			 * OBS's smoothing (TS_SMOOTHING_THRESHOLD
-			 * = 70ms) overrides our timestamps with
-			 * stale next_audio_ts_min values when the
-			 * diff is < 70ms.  After a snap, rapid
-			 * pushes land within this window, causing
-			 * an infinite restart cascade.  The 100ms
-			 * gap ensures the first post-snap push
-			 * differs from the stale value by > 70ms,
-			 * bypassing the smoothing entirely. */
+			 * This creates a gap > OBS's 70ms smoothing
+			 * threshold, forcing OBS to bypass stale
+			 * next_audio_ts_min and use our actual PTS
+			 * on the first post-suppress push. */
 			ctx->audio_snap_suppress_until =
 				os_gettime_ns() + 100000000ULL;
+			return;
 		} else {
 			ctx->audio_output_pts_ns += error / 4;
 		}
 	}
-
-	/* If output is suppressed after a snap, skip the drain loop.
-	 * The jitter buffer accumulates data during suppression;
-	 * it'll be drained on the next cycle after the gap. */
-	if (os_gettime_ns() < ctx->audio_snap_suppress_until)
-		return;
 
 	/* Output audio to OBS in a loop until the buffer is at or below
 	 * target.  A single output per decoded frame cannot keep up when
