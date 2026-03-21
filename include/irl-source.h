@@ -124,6 +124,9 @@ struct irl_source {
 	 * OBS to see gaps and produce garbled/robotic audio. */
 	int64_t audio_output_pts_ns;
 	bool audio_output_pts_init;
+	uint64_t audio_snap_suppress_until; /* suppress output after PTS
+					     * snap to create >70ms gap,
+					     * bypassing OBS smoothing */
 
 	/* Keyframe gate */
 	bool first_keyframe_received;

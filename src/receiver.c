@@ -409,10 +409,7 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 
 	/* PLL correction: run ONCE per drain cycle, before the loop.
 	 * Running inside the loop causes PTS to drift progressively
-	 * ahead during multi-chunk drains (each chunk's PLL pulls
-	 * toward os_gettime_ns() while advancing by chunk_duration,
-	 * so chunk 2 is +15ms, chunk 3 is +26ms, etc.).  These
-	 * ahead-of-ts.end values cause discard_audio to stall. */
+	 * ahead during multi-chunk drains. */
 	if (!ctx->audio_output_pts_init) {
 		ctx->audio_output_pts_ns =
 			(int64_t)os_gettime_ns() -
@@ -426,11 +423,30 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 			target - ctx->audio_output_pts_ns;
 		int64_t abs_err =
 			error >= 0 ? error : -error;
-		if (abs_err > 50000000LL) /* > 50ms: snap */
+		if (abs_err > 50000000LL) { /* > 50ms: snap */
 			ctx->audio_output_pts_ns = target;
-		else
+			/* Suppress output for 100ms after a snap.
+			 * OBS's smoothing (TS_SMOOTHING_THRESHOLD
+			 * = 70ms) overrides our timestamps with
+			 * stale next_audio_ts_min values when the
+			 * diff is < 70ms.  After a snap, rapid
+			 * pushes land within this window, causing
+			 * an infinite restart cascade.  The 100ms
+			 * gap ensures the first post-snap push
+			 * differs from the stale value by > 70ms,
+			 * bypassing the smoothing entirely. */
+			ctx->audio_snap_suppress_until =
+				os_gettime_ns() + 100000000ULL;
+		} else {
 			ctx->audio_output_pts_ns += error / 4;
+		}
 	}
+
+	/* If output is suppressed after a snap, skip the drain loop.
+	 * The jitter buffer accumulates data during suppression;
+	 * it'll be drained on the next cycle after the gap. */
+	if (os_gettime_ns() < ctx->audio_snap_suppress_until)
+		return;
 
 	/* Output audio to OBS in a loop until the buffer is at or below
 	 * target.  A single output per decoded frame cannot keep up when
