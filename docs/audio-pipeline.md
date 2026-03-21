@@ -64,11 +64,13 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses **direct timestamps** — `os_gettime_ns() - 5ms` — with PLL correction that snaps for large errors. The PTS is advanced by the exact sample count of each output chunk.
+The plugin uses a hybrid approach — a soft PLL (phase-locked loop):
 
-**Why -5ms?** OBS's `discard_audio` has: `if (ts.end <= audio_ts) return;` — if `audio_ts` is at or ahead of `ts.end`, discard returns without advancing, and `audio_ts` gets stuck. With `ts.end ≈ os_gettime_ns()`, the -5ms ensures `audio_ts < ts.end` so discard can advance it normally. Meanwhile, `audio_ts` stays well ahead of `ts.start` (by ~16ms, since `ts.start ≈ os_gettime_ns() - 21.33ms`). Direct timestamps (`timing_adjust = 0`) are essential — non-direct timestamps absorb the offset via `timing_adjust`.
+1. **Running PTS** — a counter anchored to the system clock on first output, then advanced by the exact sample count of each output chunk. This gives perfectly smooth inter-chunk timing with no jitter from network delivery variation.
 
-**PLL with snap + suppress:** For normal jitter (<50ms), 25% correction per chunk keeps PTS smooth. For network stalls >50ms, PTS snaps to target and output is **suppressed for 100ms**. The suppression creates a gap that exceeds OBS's 70ms `TS_SMOOTHING_THRESHOLD` — when the first post-snap push arrives, its timestamp differs from the stale `next_audio_ts_min` by >100ms, forcing OBS to bypass its smoothing and use our actual (correct) PTS. Without this gap, rapid pushes after a snap land within the 70ms smoothing window, causing OBS to override our timestamps with stale values and triggering an infinite restart cascade. The PLL also maintains audio/video sync since video timestamps track the system clock.
+2. **Soft correction** — each output nudges the running PTS 1% toward where the system clock says it should be (`os_gettime_ns()` minus buffer fill time). This prevents drift without introducing the jitter that pure clock-based timestamps would have.
+
+A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The PLL gives the smoothness of the running counter with the accuracy of the system clock — a 100ms drift corrects itself within about 4 seconds.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 

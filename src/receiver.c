@@ -407,33 +407,6 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
-	/* If output is suppressed after a PTS snap, skip everything.
-	 * When suppression ends, snap PTS fresh and resume — the
-	 * 100ms gap already exceeds OBS's 70ms smoothing threshold. */
-	if (ctx->audio_snap_suppress_until) {
-		if (os_gettime_ns() < ctx->audio_snap_suppress_until)
-			return;
-		ctx->audio_output_pts_ns =
-			(int64_t)os_gettime_ns() - 5000000LL;
-		ctx->audio_snap_suppress_until = 0;
-	} else if (!ctx->audio_output_pts_init) {
-		ctx->audio_output_pts_ns =
-			(int64_t)os_gettime_ns() - 5000000LL;
-		ctx->audio_output_pts_init = true;
-	} else {
-		int64_t target =
-			(int64_t)os_gettime_ns() - 5000000LL;
-		int64_t error =
-			target - ctx->audio_output_pts_ns;
-		if (error > 50000000LL) { /* PTS >50ms behind */
-			ctx->audio_output_pts_ns = target;
-			ctx->audio_snap_suppress_until =
-				os_gettime_ns() + 100000000ULL;
-			return;
-		}
-		ctx->audio_output_pts_ns += error / 4;
-	}
-
 	/* Output audio to OBS in a loop until the buffer is at or below
 	 * target.  A single output per decoded frame cannot keep up when
 	 * the decoded frame is larger than the output chunk (e.g. AAC
@@ -478,6 +451,32 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 					s[f * out_channels + ch] *= gain;
 				ctx->fade_in_frames_remaining--;
 			}
+		}
+
+		/* Timestamp strategy: running PTS for smooth inter-chunk
+		 * timing, with soft correction toward the system clock
+		 * to prevent drift.  Pure running PTS drifts during
+		 * decode stalls (no output = PTS freezes, clock keeps
+		 * going).  Pure system clock jitters with network
+		 * delivery.  Blending gives smooth + drift-free. */
+		if (!ctx->audio_output_pts_init) {
+			ctx->audio_output_pts_ns =
+				(int64_t)os_gettime_ns();
+			ctx->audio_output_pts_init = true;
+		} else {
+			/* Soft PLL: nudge running PTS toward where the
+			 * system clock says we should be (now minus
+			 * buffer fill).  1% correction per output
+			 * smooths out jitter while correcting drift
+			 * within a few seconds. */
+			int fill_now =
+				audio_buffer_fill_ms(&ctx->audio_buf);
+			int64_t expected =
+				(int64_t)os_gettime_ns() -
+				(int64_t)fill_now * 1000000LL;
+			int64_t error =
+				expected - ctx->audio_output_pts_ns;
+			ctx->audio_output_pts_ns += error / 100;
 		}
 
 		uint32_t frames_out =
