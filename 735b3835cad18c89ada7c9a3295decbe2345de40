@@ -1,0 +1,25 @@
+docs/audio-pipeline.md
+  28dec36ebc0d8ad8 67,69,71,73,75
+src/receiver.c
+  28dec36ebc0d8ad8 456-457,459-464,466-476,479-480
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "735b3835cad18c89ada7c9a3295decbe2345de40",
+  "prompts": {
+    "28dec36ebc0d8ad8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0fade586-6463-49cc-9c66-0e7e14109eaa",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 27,
+      "total_deletions": 31,
+      "accepted_lines": 26,
+      "overriden_lines": 0
+    }
+  }
+}
