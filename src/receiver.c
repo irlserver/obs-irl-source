@@ -413,7 +413,8 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	 * 1024 samples = 21.3ms vs 20ms chunk), causing the buffer to
 	 * overflow and silently drop audio. */
 	while (audio_buffer_ready(&ctx->audio_buf)) {
-		int chunk_ms = 20;
+		int chunk_ms = 22; /* > 1024 samples at 48kHz after
+				    * OBS resampling (AUDIO_OUTPUT_FRAMES) */
 		size_t frame_bytes = audio_buffer_ms_to_bytes(
 			&ctx->audio_buf, chunk_ms);
 		uint8_t *out_buf = malloc(frame_bytes);

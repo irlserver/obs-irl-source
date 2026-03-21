@@ -28,7 +28,7 @@ A ring buffer sized in milliseconds, not bytes. Default settings:
 
 The buffer holds decoded audio (interleaved float PCM) regardless of the input codec. AAC, Opus, or anything else goes in; smooth PCM comes out.
 
-Audio is output in 20ms chunks. The output loop drains multiple chunks per decoded frame if needed, keeping the buffer near its target. Without this, a codec producing frames larger than 20ms (AAC's 1024 samples at 48kHz = 21.3ms) would cause the buffer to grow by 1.3ms per frame — eventually overflowing and silently dropping audio.
+Audio is output in 22ms chunks. The 22ms size is chosen to exceed OBS's `AUDIO_OUTPUT_FRAMES` (1024 samples at 48kHz = 21.3ms) — every push to OBS must provide at least one mixer tick's worth of data, or the source's input buffer runs dry and OBS reports "audio is lagging". The output loop drains multiple chunks per decoded frame if needed, keeping the buffer near its target.
 
 ### 2. Adaptive playback speed (prevents buffer drift)
 
