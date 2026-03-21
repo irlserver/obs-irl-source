@@ -453,35 +453,37 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 			}
 		}
 
-		/* Timestamp strategy: monotonic counter in a separate
-		 * epoch (+10s from os_gettime_ns()), with PLL
-		 * correction that snaps for large errors.
+		/* Timestamp strategy: direct timestamps 25ms ahead
+		 * of os_gettime_ns(), with PLL snap for stalls.
 		 *
-		 * Non-direct epoch: the +10s offset exceeds OBS's
-		 * MAX_TS_VAR (2s), so OBS uses its timing_adjust
-		 * mechanism instead of "direct timestamp" detection.
-		 * This prevents the restart cascade caused by stale
-		 * next_audio_ts_min values in OBS's smoothing.
+		 * Direct timestamps (within MAX_TS_VAR=2s of the
+		 * system clock) cause OBS to set timing_adjust=0,
+		 * which means the 25ms headroom is preserved in
+		 * OBS's audio_ts.  This headroom keeps audio_ts
+		 * ahead of ts.start even with ~0ms of OBS audio
+		 * buffering, preventing "audio is lagging".
 		 *
-		 * PLL with snap: for small errors (< 50ms), 25%
-		 * correction per chunk smooths jitter.  For large
-		 * errors (> 50ms, from network stalls where PTS
-		 * freezes while the clock keeps going), snap PTS
-		 * directly to target.  Without the snap, a 100ms
-		 * stall leaves PTS 75ms behind after one 25%
-		 * correction — enough to put audio_ts behind
-		 * ts.start and trigger OBS's lag detection.
-		 * The snap also ensures audio/video sync since
-		 * video timestamps track the system clock. */
+		 * Non-direct timestamps (our previous approach)
+		 * don't work for this: OBS computes timing_adjust
+		 * = os_time - timestamp on the first push, so any
+		 * constant offset in the timestamp cancels out.
+		 *
+		 * PLL with snap: for normal jitter (< 50ms), 25%
+		 * correction keeps PTS smooth.  For stalls > 50ms
+		 * (PTS freezes while clock advances), snap PTS to
+		 * target.  Stalls > ~45ms also exceed OBS's 70ms
+		 * TS_SMOOTHING_THRESHOLD (because the snap jumps
+		 * PTS forward), bypassing stale next_audio_ts_min
+		 * and preventing restart cascades. */
 		if (!ctx->audio_output_pts_init) {
 			ctx->audio_output_pts_ns =
 				(int64_t)os_gettime_ns() +
-				10000000000LL; /* +10s offset */
+				25000000LL; /* +25ms headroom */
 			ctx->audio_output_pts_init = true;
 		} else {
 			int64_t target =
 				(int64_t)os_gettime_ns() +
-				10000000000LL;
+				25000000LL;
 			int64_t error =
 				target - ctx->audio_output_pts_ns;
 			int64_t abs_err =

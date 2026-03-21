@@ -64,17 +64,11 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses a monotonic counter in a **separate epoch** — offset +10 seconds from `os_gettime_ns()`, advanced by the exact sample count of each output chunk, with PLL correction that snaps to `os_gettime_ns() + 10s` for errors > 50ms and applies 25% correction for smaller drift. OBS handles the mapping to its system clock domain via `timing_adjust`.
+The plugin uses **direct timestamps** — `os_gettime_ns() + 25ms` — with PLL correction that snaps for large errors. The PTS is advanced by the exact sample count of each output chunk.
 
-**Why a separate epoch?** OBS's `source_output_audio_data()` has two paths for incoming timestamps:
+**Why +25ms headroom?** OBS checks `audio_ts < ts.start` to detect lagging sources. With ~0ms of OBS audio buffering, `ts.start ≈ os_gettime_ns()`. Any push whose timestamp is even 1ms behind triggers the check. The 25ms headroom (one mixer tick) keeps `audio_ts` consistently ahead of `ts.start`. Direct timestamps (within 2 seconds of the system clock) are essential — OBS sets `timing_adjust = 0`, preserving the headroom. Non-direct timestamps don't work because OBS's `timing_adjust` absorbs any constant offset.
 
-1. **"Direct" timestamps** (within 2 seconds of `os_gettime_ns()`): OBS sets `timing_adjust = 0` and `timing_set = true`. This is the fast path but has a critical flaw — after OBS restarts a source's audio (setting `timing_set = false`), the direct detection sets `timing_set = true` *before* the `!timing_set` reset path runs. This causes stale `next_audio_ts_min` values to override the source's timestamps via OBS's 70ms smoothing window, producing an immediate re-trigger of "audio is lagging" in an infinite loop.
-
-2. **Non-direct timestamps** (>2 seconds from `os_gettime_ns()`): OBS uses `reset_audio_timing()` to compute a fresh `timing_adjust` when `timing_set` is false. This path correctly resets after a source audio restart — the `if (!timing_set)` branch runs (since direct detection didn't pre-empt it), `next_audio_ts_min` is set fresh, and the restart cascade is broken.
-
-By offsetting our timestamps +10 seconds, we force path 2. OBS's internal smoothing (70ms threshold) keeps inter-chunk timing sequential, and `timing_adjust` maps our epoch to the system clock domain.
-
-**Why the PLL snap is critical:** During network stalls, no audio is output, so PTS freezes while `os_gettime_ns()` keeps advancing. Without the snap, a 100ms stall leaves PTS 75ms behind target after one 25% correction. OBS sets `audio_ts` from this behind PTS, placing it behind `ts.start` — triggering "audio is lagging". The snap (>50ms → jump to target) ensures PTS returns to the correct position immediately, keeping `audio_ts` ahead of `ts.start`. The 25% soft correction handles normal jitter (< 50ms) smoothly. This also maintains audio/video sync — video timestamps are anchored to the system clock, so audio PTS must track it too.
+**PLL with snap:** For normal jitter (<50ms), 25% correction per chunk keeps PTS smooth. For network stalls >50ms (PTS freezes while the clock advances), PTS snaps directly to `os_gettime_ns() + 25ms`. This snap also exceeds OBS's 70ms `TS_SMOOTHING_THRESHOLD` (because PTS jumps forward past the stale expected position), forcing OBS to use our actual PTS instead of the drifted smoothed value — preventing restart cascades. The PLL also maintains audio/video sync since video timestamps track the system clock.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 
