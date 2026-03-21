@@ -64,11 +64,11 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses **direct timestamps** — `os_gettime_ns() + 25ms` — with PLL correction that snaps for large errors. The PTS is advanced by the exact sample count of each output chunk.
+The plugin uses **direct timestamps** — `os_gettime_ns() - 5ms` — with PLL correction that snaps for large errors. The PTS is advanced by the exact sample count of each output chunk.
 
-**Why +25ms headroom?** OBS checks `audio_ts < ts.start` to detect lagging sources. With ~0ms of OBS audio buffering, `ts.start ≈ os_gettime_ns()`. Any push whose timestamp is even 1ms behind triggers the check. The 25ms headroom (one mixer tick) keeps `audio_ts` consistently ahead of `ts.start`. Direct timestamps (within 2 seconds of the system clock) are essential — OBS sets `timing_adjust = 0`, preserving the headroom. Non-direct timestamps don't work because OBS's `timing_adjust` absorbs any constant offset.
+**Why -5ms?** OBS's `discard_audio` has: `if (ts.end <= audio_ts) return;` — if `audio_ts` is at or ahead of `ts.end`, discard returns without advancing, and `audio_ts` gets stuck. With `ts.end ≈ os_gettime_ns()`, the -5ms ensures `audio_ts < ts.end` so discard can advance it normally. Meanwhile, `audio_ts` stays well ahead of `ts.start` (by ~16ms, since `ts.start ≈ os_gettime_ns() - 21.33ms`). Direct timestamps (`timing_adjust = 0`) are essential — non-direct timestamps absorb the offset via `timing_adjust`.
 
-**PLL with snap:** For normal jitter (<50ms), 25% correction per chunk keeps PTS smooth. For network stalls >50ms (PTS freezes while the clock advances), PTS snaps directly to `os_gettime_ns() + 25ms`. This snap also exceeds OBS's 70ms `TS_SMOOTHING_THRESHOLD` (because PTS jumps forward past the stale expected position), forcing OBS to use our actual PTS instead of the drifted smoothed value — preventing restart cascades. The PLL also maintains audio/video sync since video timestamps track the system clock.
+**PLL with snap:** For normal jitter (<50ms), 25% correction per chunk keeps PTS smooth. For network stalls >50ms, PTS snaps to target. This snap also exceeds OBS's 70ms `TS_SMOOTHING_THRESHOLD`, bypassing stale smoothed values and preventing restart cascades. The PLL also maintains audio/video sync since video timestamps track the system clock.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 
