@@ -425,9 +425,7 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 			(int64_t)os_gettime_ns() - 5000000LL;
 		int64_t error =
 			target - ctx->audio_output_pts_ns;
-		int64_t abs_err =
-			error >= 0 ? error : -error;
-		if (abs_err > 50000000LL) {
+		if (error > 50000000LL) { /* PTS >50ms behind */
 			ctx->audio_output_pts_ns = target;
 			ctx->audio_snap_suppress_until =
 				os_gettime_ns() + 100000000ULL;
