@@ -1,0 +1,25 @@
+src/audio-speed.c
+  ab5553702c17a9b7 29
+include/irl-source.h
+  ab5553702c17a9b7 97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.15",
+  "base_commit_sha": "94ab66a9e243a2eab17fcb7a3bcd995a4fbb6055",
+  "prompts": {
+    "ab5553702c17a9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "939f172f-0ad7-43c6-b7c5-a4058207e0eb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 42,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
