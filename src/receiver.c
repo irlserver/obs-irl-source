@@ -453,36 +453,32 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 			}
 		}
 
-		/* Timestamp strategy: running PTS for smooth inter-chunk
-		 * timing, with adaptive correction toward the system
-		 * clock to prevent drift.  Pure running PTS drifts
-		 * during decode stalls (no output = PTS freezes, clock
-		 * keeps going).  Pure system clock jitters with network
-		 * delivery.  Blending gives smooth + drift-free.
+		/* Timestamp strategy: monotonic counter in a separate
+		 * epoch, advanced by exact sample count per chunk.
 		 *
-		 * Target is os_gettime_ns() — we hand audio to OBS
-		 * "now", so timestamps should match.  Buffer fill is
-		 * an internal concern that OBS doesn't need to see. */
+		 * The epoch is offset +10s from os_gettime_ns() so
+		 * OBS does NOT detect the timestamps as "direct"
+		 * (within MAX_TS_VAR=2s of the system clock).  This
+		 * forces OBS to use its timing_adjust mechanism,
+		 * which properly resets via reset_audio_timing()
+		 * after OBS restarts the source audio.
+		 *
+		 * With "direct" timestamps (~os_gettime_ns()), OBS
+		 * sets timing_adjust=0 and timing_set=true BEFORE
+		 * checking timing_set — so after a restart (where
+		 * OBS sets timing_set=false), the reset path is
+		 * skipped and stale next_audio_ts_min values cause
+		 * an immediate re-trigger of "audio is lagging".
+		 *
+		 * No PLL correction is needed: OBS's internal
+		 * smoothing (TS_SMOOTHING_THRESHOLD=70ms) keeps
+		 * inter-chunk timing sequential, and timing_adjust
+		 * maps our epoch to the system clock domain. */
 		if (!ctx->audio_output_pts_init) {
 			ctx->audio_output_pts_ns =
-				(int64_t)os_gettime_ns();
+				(int64_t)os_gettime_ns() +
+				10000000000LL; /* +10s offset */
 			ctx->audio_output_pts_init = true;
-		} else {
-			/* Soft PLL: nudge running PTS toward the
-			 * system clock.  25% correction per chunk
-			 * keeps steady-state error under 5ms.  If
-			 * PTS falls > 30ms behind (stall recovery),
-			 * snap directly to now — OBS restarts the
-			 * source if timestamps lag by ~30-50ms, so
-			 * a smooth ramp can't recover in time. */
-			int64_t now = (int64_t)os_gettime_ns();
-			int64_t error =
-				now - ctx->audio_output_pts_ns;
-			if (error > 30000000LL)         /* > 30ms behind */
-				ctx->audio_output_pts_ns = now;
-			else
-				ctx->audio_output_pts_ns +=
-					error / 4;
 		}
 
 		uint32_t frames_out =
