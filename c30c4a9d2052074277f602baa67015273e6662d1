@@ -1,0 +1,23 @@
+src/receiver.c
+  28dec36ebc0d8ad8 410-418,438-441,444
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "c30c4a9d2052074277f602baa67015273e6662d1",
+  "prompts": {
+    "28dec36ebc0d8ad8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0fade586-6463-49cc-9c66-0e7e14109eaa",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 14,
+      "total_deletions": 15,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    }
+  }
+}
