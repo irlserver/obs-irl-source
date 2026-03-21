@@ -26,6 +26,7 @@ static struct obs_source_info irl_source_info = {
 	.get_defaults = irl_source_get_defaults,
 	.get_properties = irl_source_get_properties,
 	.video_tick = irl_source_tick,
+	.audio_render = irl_audio_render,
 };
 
 bool obs_module_load(void)

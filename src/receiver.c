@@ -328,7 +328,7 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		}
 	} else if (action == PTS_ACTION_RESET) {
 		audio_buffer_flush(&ctx->audio_buf);
-		ctx->audio_output_pts_init = false;
+		ctx->audio_render_ts_init = false;
 		ctx->first_keyframe_received = false;
 		ctx->video_ts_init = false;
 		ctx->pre_kf_audio_size = 0;
@@ -407,110 +407,179 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
-	/* Output audio to OBS in a loop until the buffer is at or below
-	 * target.  A single output per decoded frame cannot keep up when
-	 * the decoded frame is larger than the output chunk (e.g. AAC
-	 * 1024 samples = 21.3ms vs 20ms chunk), causing the buffer to
-	 * overflow and silently drop audio. */
-	while (audio_buffer_ready(&ctx->audio_buf)) {
-		int chunk_ms = 20;
-		size_t frame_bytes = audio_buffer_ms_to_bytes(
-			&ctx->audio_buf, chunk_ms);
-		uint8_t *out_buf = malloc(frame_bytes);
-		if (!out_buf)
-			break;
+	/* Audio output is now pull-based via irl_audio_render().
+	 * The OBS mixer calls us directly — no push loop here. */
+}
 
-		size_t got = audio_buffer_read(&ctx->audio_buf, out_buf,
-					       frame_bytes);
-		if (got == 0) {
-			free(out_buf);
-			break;
-		}
+/* ── Pull-based audio output ─────────────────────────────── */
 
-		/* Fade-in after reconnect to avoid click */
-		if (ctx->fade_in_pending) {
-			ctx->fade_in_frames_remaining =
-				out_rate * IRL_FADE_DURATION_MS / 1000;
-			ctx->fade_in_pending = false;
-		}
-		if (ctx->fade_in_frames_remaining > 0) {
-			int total_fade =
-				out_rate * IRL_FADE_DURATION_MS / 1000;
-			float *s = (float *)out_buf;
-			int nf = (int)(got /
-				       (out_channels * bytes_per_sample));
-			for (int f = 0;
-			     f < nf &&
-			     ctx->fade_in_frames_remaining > 0;
-			     f++) {
-				int into = total_fade -
-					   ctx->fade_in_frames_remaining;
-				float gain =
-					(float)into / (float)total_fade;
-				for (int ch = 0; ch < out_channels; ch++)
-					s[f * out_channels + ch] *= gain;
-				ctx->fade_in_frames_remaining--;
-			}
-		}
+/* Called by OBS's audio mixer thread every ~21.33ms.
+ * Must provide exactly AUDIO_OUTPUT_FRAMES (1024) samples of
+ * planar float32 at the mixer's sample_rate.
+ *
+ * This bypasses all of OBS's push-based timestamp processing
+ * (smoothing, timing_adjust, discard_audio, lag detection) —
+ * we control audio_ts directly via *ts_out. */
+bool irl_audio_render(void *data, uint64_t *ts_out,
+		      struct obs_source_audio_mix *audio_data,
+		      uint32_t mixers, size_t channels,
+		      size_t sample_rate)
+{
+	struct irl_source *ctx = data;
 
-		/* Timestamp strategy: running PTS for smooth inter-chunk
-		 * timing, with soft correction toward the system clock
-		 * to prevent drift.  Pure running PTS drifts during
-		 * decode stalls (no output = PTS freezes, clock keeps
-		 * going).  Pure system clock jitters with network
-		 * delivery.  Blending gives smooth + drift-free. */
-		if (!ctx->audio_output_pts_init) {
-			ctx->audio_output_pts_ns =
-				(int64_t)os_gettime_ns();
-			ctx->audio_output_pts_init = true;
-		} else {
-			/* Soft PLL: nudge running PTS toward where the
-			 * system clock says we should be (now minus
-			 * buffer fill).  1% correction per output
-			 * smooths out jitter while correcting drift
-			 * within a few seconds. */
-			int fill_now =
-				audio_buffer_fill_ms(&ctx->audio_buf);
-			int64_t expected =
-				(int64_t)os_gettime_ns() -
-				(int64_t)fill_now * 1000000LL;
-			int64_t error =
-				expected - ctx->audio_output_pts_ns;
-			ctx->audio_output_pts_ns += error / 100;
-		}
+	if (!ctx->audio_buf.data || ctx->audio_buf.sample_rate == 0)
+		return false;
 
-		uint32_t frames_out =
-			(uint32_t)(got /
-				   (out_channels * bytes_per_sample));
+	int src_rate = ctx->audio_buf.sample_rate;
+	int src_ch = ctx->audio_buf.channels;
+	int frame_size = ctx->audio_buf.frame_size; /* bytes per frame */
 
-		struct obs_source_audio obs_audio = {0};
-		obs_audio.data[0] = out_buf;
-		obs_audio.frames = frames_out;
-		obs_audio.format = AUDIO_FORMAT_FLOAT;
-		obs_audio.speakers = (enum speaker_layout)out_channels;
-		obs_audio.timestamp =
-			(uint64_t)ctx->audio_output_pts_ns;
-		obs_audio.samples_per_sec = (uint32_t)out_rate;
+	/* Adaptive speed: vary how many source frames we read.
+	 * At speed 1.05x, read 1075 frames, resample to 1024 output.
+	 * At speed 0.95x, read 972 frames, resample to 1024 output. */
+	float speed = ctx->config.adaptive_speed ? irl_speed_get(ctx)
+						 : 1.0f;
+	size_t out_frames = AUDIO_OUTPUT_FRAMES; /* 1024 */
+	size_t read_frames = (size_t)((float)out_frames * speed *
+				      (float)src_rate / (float)sample_rate);
+	if (read_frames < 1)
+		read_frames = 1;
 
-		/* Adaptive speed: must run after samples_per_sec
-		 * is set so it can scale the value. */
-		if (ctx->config.adaptive_speed)
-			irl_speed_apply(ctx, &obs_audio);
+	size_t read_bytes = read_frames * frame_size;
 
-		obs_source_output_audio(ctx->source, &obs_audio);
+	/* Check if we have enough data */
+	if (ctx->audio_buf.fill < read_bytes)
+		return false;
 
-		/* Advance running PTS by actual samples output */
-		ctx->audio_output_pts_ns +=
-			(int64_t)frames_out * 1000000000LL / out_rate;
-		ctx->total_audio_frames++;
+	/* Read interleaved float from jitter buffer */
+	uint8_t *raw = malloc(read_bytes);
+	if (!raw)
+		return false;
 
-		free(out_buf);
-
-		/* Stop once buffer is at or below target */
-		if (audio_buffer_fill_ms(&ctx->audio_buf) <=
-		    ctx->config.buffer_target_ms)
-			break;
+	size_t got;
+	if (ctx->fade_out_pending) {
+		got = audio_buffer_read_with_fade_out(&ctx->audio_buf, raw,
+						      read_bytes);
+		ctx->fade_out_pending = false;
+	} else {
+		got = audio_buffer_read(&ctx->audio_buf, raw, read_bytes);
 	}
+
+	if (got == 0) {
+		free(raw);
+		return false;
+	}
+
+	size_t got_frames = got / frame_size;
+	float *src = (float *)raw;
+
+	/* Fade-in after reconnect */
+	if (ctx->fade_in_pending) {
+		ctx->fade_in_frames_remaining =
+			src_rate * IRL_FADE_DURATION_MS / 1000;
+		ctx->fade_in_pending = false;
+	}
+	if (ctx->fade_in_frames_remaining > 0) {
+		int total_fade = src_rate * IRL_FADE_DURATION_MS / 1000;
+		for (size_t f = 0;
+		     f < got_frames && ctx->fade_in_frames_remaining > 0;
+		     f++) {
+			int into = total_fade -
+				   ctx->fade_in_frames_remaining;
+			float gain = (float)into / (float)total_fade;
+			for (int ch = 0; ch < src_ch; ch++)
+				src[f * src_ch + ch] *= gain;
+			ctx->fade_in_frames_remaining--;
+		}
+	}
+
+	/* Resample source rate → mixer rate if needed.
+	 * Also handles the speed adjustment: we read N source frames
+	 * and resample to exactly out_frames (1024) output frames. */
+	float *resampled = src;
+	size_t resampled_frames = got_frames;
+
+	bool need_resample = ((int)sample_rate != src_rate) ||
+			     (got_frames != out_frames);
+	if (need_resample) {
+		/* Create or update resampler */
+		if (!ctx->audio_render_swr ||
+		    ctx->audio_render_src_rate != src_rate ||
+		    ctx->audio_render_src_ch != src_ch) {
+			if (ctx->audio_render_swr)
+				swr_free(&ctx->audio_render_swr);
+
+			AVChannelLayout src_layout, dst_layout;
+			av_channel_layout_default(&src_layout, src_ch);
+			av_channel_layout_default(&dst_layout, src_ch);
+
+			swr_alloc_set_opts2(&ctx->audio_render_swr,
+					    &dst_layout, AV_SAMPLE_FMT_FLT,
+					    (int)sample_rate, &src_layout,
+					    AV_SAMPLE_FMT_FLT, src_rate, 0,
+					    NULL);
+			swr_init(ctx->audio_render_swr);
+			ctx->audio_render_src_rate = src_rate;
+			ctx->audio_render_src_ch = src_ch;
+		}
+
+		float *out_buf = malloc(out_frames * src_ch * sizeof(float));
+		if (!out_buf) {
+			free(raw);
+			return false;
+		}
+
+		const uint8_t *in_data[1] = {(const uint8_t *)src};
+		uint8_t *out_data[1] = {(uint8_t *)out_buf};
+		int converted = swr_convert(ctx->audio_render_swr, out_data,
+					    (int)out_frames, in_data,
+					    (int)got_frames);
+		if (converted <= 0) {
+			free(out_buf);
+			free(raw);
+			return false;
+		}
+
+		resampled = out_buf;
+		resampled_frames = (size_t)converted;
+	}
+
+	/* Deinterleave to planar and copy to each active mix.
+	 * Handle mono→stereo upmix if source has fewer channels. */
+	for (size_t mix = 0; mix < MAX_AUDIO_MIXES; mix++) {
+		if (!(mixers & (1 << mix)))
+			continue;
+
+		for (size_t ch = 0; ch < channels; ch++) {
+			float *out = audio_data->output[mix].data[ch];
+			int src_idx = (ch < (size_t)src_ch) ? (int)ch : 0;
+
+			for (size_t f = 0; f < resampled_frames && f < out_frames; f++)
+				out[f] = resampled[f * src_ch + src_idx];
+
+			/* Zero-fill remainder if resampler produced less */
+			for (size_t f = resampled_frames; f < out_frames; f++)
+				out[f] = 0.0f;
+		}
+	}
+
+	if (resampled != src)
+		free(resampled);
+	free(raw);
+
+	/* Timestamp: simple monotonic counter.  Since this callback
+	 * IS the mixer tick, advancing by exactly one tick's duration
+	 * tracks the mixer's timeline perfectly — no PLL needed. */
+	if (!ctx->audio_render_ts_init) {
+		ctx->audio_render_ts = os_gettime_ns();
+		ctx->audio_render_ts_init = true;
+	}
+	*ts_out = ctx->audio_render_ts;
+	ctx->audio_render_ts +=
+		(uint64_t)out_frames * 1000000000ULL / sample_rate;
+
+	ctx->total_audio_frames++;
+	return true;
 }
 
 static void handle_video_frame(struct irl_source *ctx, AVFrame *frame)
@@ -601,51 +670,10 @@ void *irl_receiver_thread(void *data)
 			     (unsigned long long)ctx->total_video_frames,
 			     (unsigned long long)ctx->total_audio_frames);
 
-			/* Fade out remaining audio to avoid click/pop */
-			if (ctx->audio_buf.data && ctx->audio_buf.fill > 0) {
-				size_t fade_bytes = audio_buffer_ms_to_bytes(
-					&ctx->audio_buf,
-					IRL_FADE_DURATION_MS);
-				if (fade_bytes > ctx->audio_buf.fill)
-					fade_bytes = ctx->audio_buf.fill;
-				if (fade_bytes > 0) {
-					uint8_t *fade_buf = malloc(fade_bytes);
-					if (fade_buf) {
-						size_t got =
-							audio_buffer_read_with_fade_out(
-								&ctx->audio_buf,
-								fade_buf,
-								fade_bytes);
-						if (got > 0) {
-							struct obs_source_audio
-								a = {0};
-							a.data[0] = fade_buf;
-							a.frames = (uint32_t)(
-								got /
-								(ctx->audio_buf
-									 .channels *
-								 ctx->audio_buf
-									 .bytes_per_sample));
-							a.format =
-								AUDIO_FORMAT_FLOAT;
-							a.speakers =
-								(enum speaker_layout)
-									ctx->audio_buf
-										.channels;
-							a.samples_per_sec =
-								(uint32_t)
-									ctx->audio_buf
-										.sample_rate;
-							a.timestamp =
-								os_gettime_ns();
-							obs_source_output_audio(
-								ctx->source,
-								&a);
-						}
-						free(fade_buf);
-					}
-				}
-			}
+			/* Signal fade-out for the audio_render callback.
+			 * The next audio_render call will apply fade-out
+			 * to whatever remains in the buffer. */
+			ctx->fade_out_pending = true;
 
 			/* OBS_SOURCE_ASYNC_VIDEO holds the last frame on screen
 			 * when no new frames arrive.  This is intentional:
@@ -656,7 +684,7 @@ void *irl_receiver_thread(void *data)
 			close_ffmpeg(ctx);
 			pts_repair_reset(&ctx->pts_state);
 			audio_buffer_flush(&ctx->audio_buf);
-			ctx->audio_output_pts_init = false;
+			ctx->audio_render_ts_init = false;
 			ctx->current_speed = 1.0f;
 			ctx->last_speed_adjust_time = 0;
 			ctx->fade_in_pending = true;

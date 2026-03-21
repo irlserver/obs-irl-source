@@ -28,7 +28,7 @@ A ring buffer sized in milliseconds, not bytes. Default settings:
 
 The buffer holds decoded audio (interleaved float PCM) regardless of the input codec. AAC, Opus, or anything else goes in; smooth PCM comes out.
 
-Audio is output in 20ms chunks. The output loop drains multiple chunks per decoded frame if needed, keeping the buffer near its target. Without this, a codec producing frames larger than 20ms (AAC's 1024 samples at 48kHz = 21.3ms) would cause the buffer to grow by 1.3ms per frame — eventually overflowing and silently dropping audio.
+Audio is pulled from the buffer by OBS's mixer thread via the `audio_render` callback, which reads 1024 samples (21.3ms at 48kHz) per tick. The adaptive speed controller varies how many source frames are read per tick to keep the buffer near its target level.
 
 ### 2. Adaptive playback speed (prevents buffer drift)
 
@@ -64,13 +64,11 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses a hybrid approach — a soft PLL (phase-locked loop):
+The plugin uses OBS's **pull-based `audio_render` callback** instead of the push-based `obs_source_output_audio()`. The mixer thread calls `irl_audio_render()` every ~21.33ms, asking for exactly 1024 samples of planar float32 at the mixer's sample rate. The plugin reads from its jitter buffer, resamples if needed (source rate may differ from mixer rate), and provides a simple monotonic timestamp.
 
-1. **Running PTS** — a counter anchored to the system clock on first output, then advanced by the exact sample count of each output chunk. This gives perfectly smooth inter-chunk timing with no jitter from network delivery variation.
+**Why pull-based?** Push-based audio goes through OBS's `source_output_audio_data()` which applies timestamp smoothing (`TS_SMOOTHING_THRESHOLD = 70ms`), `timing_adjust`, and lag detection. The valid range for `audio_ts` is only ~21ms wide, but the smoothing window is 70ms — an architectural mismatch that causes persistent "audio is lagging" cascades on live streams with any timing jitter. The `audio_render` callback **bypasses all of this**: no smoothing, no `timing_adjust`, no `discard_audio`, no lag detection cascade. We set `audio_ts` directly.
 
-2. **Soft correction** — each output nudges the running PTS 1% toward where the system clock says it should be (`os_gettime_ns()` minus buffer fill time). This prevents drift without introducing the jitter that pure clock-based timestamps would have.
-
-A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The PLL gives the smoothness of the running counter with the accuracy of the system clock — a 100ms drift corrects itself within about 4 seconds.
+**Adaptive speed** works by varying how many source frames are read per callback. At speed 1.05x, 1075 frames are read and resampled to 1024 output frames. This is cleaner than the push-based approach of lying about `samples_per_sec`.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 

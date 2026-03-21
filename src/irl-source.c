@@ -130,6 +130,8 @@ void irl_source_destroy(void *data)
 
 	if (ctx->swr_ctx)
 		swr_free(&ctx->swr_ctx);
+	if (ctx->audio_render_swr)
+		swr_free(&ctx->audio_render_swr);
 	if (ctx->sws_ctx)
 		sws_freeContext(ctx->sws_ctx);
 	if (ctx->hw_device_ctx)
@@ -160,7 +162,7 @@ void irl_source_update(void *data, obs_data_t *settings)
 		audio_buffer_flush(&ctx->audio_buf);
 		pts_repair_reset(&ctx->pts_state);
 		ctx->current_speed = 1.0f;
-		ctx->audio_output_pts_init = false;
+		ctx->audio_render_ts_init = false;
 
 		ctx->thread_active = true;
 		pthread_create(&ctx->receiver_thread, NULL,

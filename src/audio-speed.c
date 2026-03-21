@@ -93,3 +93,8 @@ void irl_speed_apply(struct irl_source *ctx, struct obs_source_audio *audio)
 			(uint32_t)((float)audio->samples_per_sec * speed);
 	}
 }
+
+float irl_speed_get(struct irl_source *ctx)
+{
+	return irl_speed_calculate(ctx);
+}

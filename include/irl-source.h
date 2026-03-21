@@ -118,12 +118,13 @@ struct irl_source {
 	float current_speed;
 	uint64_t last_speed_adjust_time;
 
-	/* Running output PTS: tracks the actual playback position in the
-	 * jitter buffer rather than using the latest decoded frame's PTS.
-	 * Without this, the buffer decouples data from timestamps, causing
-	 * OBS to see gaps and produce garbled/robotic audio. */
-	int64_t audio_output_pts_ns;
-	bool audio_output_pts_init;
+	/* audio_render state (pull-based audio for OBS mixer) */
+	uint64_t audio_render_ts;
+	bool audio_render_ts_init;
+	bool fade_out_pending;
+	SwrContext *audio_render_swr; /* resampler: source rate → mixer rate */
+	int audio_render_src_rate;   /* source rate the resampler was built for */
+	int audio_render_src_ch;     /* source channels the resampler was built for */
 
 	/* Keyframe gate */
 	bool first_keyframe_received;
@@ -173,6 +174,14 @@ void irl_receiver_stop(struct irl_source *ctx);
 /* ── Adaptive speed (audio-speed.c) ───────────────────────── */
 
 void irl_speed_apply(struct irl_source *ctx, struct obs_source_audio *audio);
+float irl_speed_get(struct irl_source *ctx);
+
+/* ── Audio render callback (receiver.c) ───────────────────── */
+
+bool irl_audio_render(void *data, uint64_t *ts_out,
+		      struct obs_source_audio_mix *audio_data,
+		      uint32_t mixers, size_t channels,
+		      size_t sample_rate);
 
 /* ── Video handler (video-handler.c) ──────────────────────── */
 
