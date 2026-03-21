@@ -407,6 +407,31 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
+	/* PLL correction: run ONCE per drain cycle, before the loop.
+	 * Running inside the loop causes PTS to drift progressively
+	 * ahead during multi-chunk drains (each chunk's PLL pulls
+	 * toward os_gettime_ns() while advancing by chunk_duration,
+	 * so chunk 2 is +15ms, chunk 3 is +26ms, etc.).  These
+	 * ahead-of-ts.end values cause discard_audio to stall. */
+	if (!ctx->audio_output_pts_init) {
+		ctx->audio_output_pts_ns =
+			(int64_t)os_gettime_ns() -
+			5000000LL; /* -5ms: behind ts.end,
+				    * ahead of ts.start */
+		ctx->audio_output_pts_init = true;
+	} else {
+		int64_t target =
+			(int64_t)os_gettime_ns() - 5000000LL;
+		int64_t error =
+			target - ctx->audio_output_pts_ns;
+		int64_t abs_err =
+			error >= 0 ? error : -error;
+		if (abs_err > 50000000LL) /* > 50ms: snap */
+			ctx->audio_output_pts_ns = target;
+		else
+			ctx->audio_output_pts_ns += error / 4;
+	}
+
 	/* Output audio to OBS in a loop until the buffer is at or below
 	 * target.  A single output per decoded frame cannot keep up when
 	 * the decoded frame is larger than the output chunk (e.g. AAC
@@ -451,48 +476,6 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 					s[f * out_channels + ch] *= gain;
 				ctx->fade_in_frames_remaining--;
 			}
-		}
-
-		/* Timestamp strategy: direct timestamps at
-		 * os_gettime_ns() - 5ms, with PLL snap for stalls.
-		 *
-		 * OBS's discard_audio has: if (ts.end <= audio_ts)
-		 * return — if audio_ts is at or ahead of ts.end,
-		 * discard returns without advancing audio_ts.
-		 * With ts.end ≈ os_gettime_ns(), we need audio_ts
-		 * BEHIND ts.end so discard can advance it.  The
-		 * -5ms offset ensures audio_ts < ts.end (by 5ms)
-		 * while keeping audio_ts > ts.start (by ~16ms,
-		 * since ts.start ≈ os_gettime_ns() - 21.33ms).
-		 *
-		 * Direct timestamps (timing_adjust=0) are used so
-		 * the -5ms offset is preserved.  Non-direct
-		 * timestamps would cancel it via timing_adjust.
-		 *
-		 * PLL with snap: for jitter < 50ms, 25% correction.
-		 * For stalls > 50ms, snap to target.  Stalls >~45ms
-		 * also exceed OBS's TS_SMOOTHING_THRESHOLD (70ms),
-		 * bypassing stale smoothing and preventing restart
-		 * cascades. */
-		if (!ctx->audio_output_pts_init) {
-			ctx->audio_output_pts_ns =
-				(int64_t)os_gettime_ns() -
-				5000000LL; /* -5ms: behind ts.end,
-					    * ahead of ts.start */
-			ctx->audio_output_pts_init = true;
-		} else {
-			int64_t target =
-				(int64_t)os_gettime_ns() -
-				5000000LL;
-			int64_t error =
-				target - ctx->audio_output_pts_ns;
-			int64_t abs_err =
-				error >= 0 ? error : -error;
-			if (abs_err > 50000000LL)  /* > 50ms: snap */
-				ctx->audio_output_pts_ns = target;
-			else
-				ctx->audio_output_pts_ns +=
-					error / 4;
 		}
 
 		uint32_t frames_out =
