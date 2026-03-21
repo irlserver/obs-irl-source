@@ -1,0 +1,27 @@
+CLAUDE.md
+  b3a7d8d78b656a2e 52,55
+docs/audio-pipeline.md
+  b3a7d8d78b656a2e 31,67,69,71,73,75-83
+README.md
+  b3a7d8d78b656a2e 23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "a96e1b7393ce6fa84ca4ab2804f189a9b43ab1fd",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 9,
+      "accepted_lines": 17,
+      "overriden_lines": 0
+    }
+  }
+}
