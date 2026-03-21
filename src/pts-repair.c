@@ -13,19 +13,9 @@
  *   large  (>= large_gap_ms): full timestamp reset
  */
 
-#include <stdlib.h>
-
 #include "../include/pts-repair.h"
 
 /* ── Helpers ──────────────────────────────────────────────── */
-
-static int64_t ms_to_ts(const struct pts_repair *r, int ms)
-{
-	/* Convert ms to stream time-base units: ms * tb_den / (1000 * tb_num) */
-	if (r->tb_num == 0)
-		return 0;
-	return (int64_t)ms * r->tb_den / (1000 * r->tb_num);
-}
 
 static int ts_to_ms(const struct pts_repair *r, int64_t ts)
 {
@@ -46,7 +36,6 @@ void pts_repair_init(struct pts_repair *r, int small_gap_ms, int large_gap_ms,
 	r->small_gap_ms = small_gap_ms;
 	r->large_gap_ms = large_gap_ms;
 	r->initialised = false;
-	r->silence_ms = 0;
 }
 
 void pts_repair_reset(struct pts_repair *r)
@@ -54,7 +43,6 @@ void pts_repair_reset(struct pts_repair *r)
 	r->last_pts = 0;
 	r->last_duration = 0;
 	r->initialised = false;
-	r->silence_ms = 0;
 }
 
 enum pts_action pts_repair_evaluate(struct pts_repair *r, int64_t pts,
@@ -99,7 +87,6 @@ enum pts_action pts_repair_evaluate(struct pts_repair *r, int64_t pts,
 		/* Medium gap — insert silence, then use original PTS */
 		*corrected_pts = pts;
 		*silence_ms = gap_ms;
-		r->silence_ms = gap_ms;
 		action = PTS_ACTION_SILENCE;
 	} else {
 		/* Large gap — full reset */

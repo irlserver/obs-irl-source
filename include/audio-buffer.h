@@ -74,9 +74,6 @@ size_t audio_buffer_read(struct audio_buffer *buf, uint8_t *out,
 /** Current fill level in milliseconds. */
 int audio_buffer_fill_ms(const struct audio_buffer *buf);
 
-/** Current fill level as a fraction of target (1.0 = at target). */
-float audio_buffer_fill_ratio(const struct audio_buffer *buf);
-
 /** True when the buffer has at least `min_ms` worth of data. */
 bool audio_buffer_ready(const struct audio_buffer *buf);
 

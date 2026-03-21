@@ -9,7 +9,6 @@
  */
 
 #include <stdlib.h>
-#include <string.h>
 
 #include "../include/irl-source.h"
 
@@ -157,7 +156,6 @@ void irl_source_update(void *data, obs_data_t *settings)
 	if (ctx->config.url) {
 		/* Reset keyframe gate and buffers */
 		ctx->first_keyframe_received = false;
-		ctx->audio_buffering_pre_keyframe = false;
 		ctx->pre_kf_audio_size = 0;
 		audio_buffer_flush(&ctx->audio_buf);
 		pts_repair_reset(&ctx->pts_state);

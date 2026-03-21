@@ -44,9 +44,6 @@ struct pts_repair {
 
 	/* Whether we have a valid reference PTS yet */
 	bool initialised;
-
-	/* Amount of silence (ms) to insert for medium gaps */
-	int silence_ms;
 };
 
 /* ── API ──────────────────────────────────────────────────── */

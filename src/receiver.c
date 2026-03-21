@@ -331,7 +331,6 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		ctx->audio_output_pts_init = false;
 		ctx->first_keyframe_received = false;
 		ctx->video_ts_init = false;
-		ctx->audio_buffering_pre_keyframe = false;
 		ctx->pre_kf_audio_size = 0;
 	}
 
@@ -355,8 +354,6 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 					    frame->format, frame->sample_rate,
 					    0, NULL);
 			swr_init(ctx->swr_ctx);
-			ctx->swr_src_rate = frame->sample_rate;
-			ctx->swr_dst_rate = out_rate;
 		}
 
 		int max_out = swr_get_out_samples(ctx->swr_ctx,

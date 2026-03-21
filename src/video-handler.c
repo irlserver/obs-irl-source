@@ -11,7 +11,6 @@
  */
 
 #include <stdlib.h>
-#include <string.h>
 
 #include "../include/irl-source.h"
 

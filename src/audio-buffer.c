@@ -146,14 +146,6 @@ int audio_buffer_fill_ms(const struct audio_buffer *buf)
 	return (int)(samples * 1000 / buf->sample_rate);
 }
 
-float audio_buffer_fill_ratio(const struct audio_buffer *buf)
-{
-	size_t target_bytes = ms_to_bytes(buf, buf->target_ms);
-	if (target_bytes == 0)
-		return 0.0f;
-	return (float)buf->fill / (float)target_bytes;
-}
-
 bool audio_buffer_ready(const struct audio_buffer *buf)
 {
 	return audio_buffer_fill_ms(buf) >= buf->min_ms;

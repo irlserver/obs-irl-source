@@ -26,7 +26,7 @@
  * Prevents constant oscillation that causes OBS resampler pops. */
 #define SPEED_DEAD_ZONE_MS 15
 
-float irl_speed_calculate(struct irl_source *ctx)
+static float irl_speed_calculate(struct irl_source *ctx)
 {
 	if (!ctx->config.adaptive_speed)
 		return 1.0f;

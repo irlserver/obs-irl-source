@@ -16,13 +16,10 @@
 
 #include <obs-module.h>
 #include <util/platform.h>
-#include <media-io/audio-resampler.h>
-
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
-#include <libavutil/opt.h>
 #include <libavutil/time.h>
 #include <libavutil/hwcontext.h>
 
@@ -97,10 +94,8 @@ struct irl_source {
 	int video_stream_idx;
 	bool using_hw_decode;
 
-	/* Resampler for adaptive speed */
+	/* Resampler (planar → interleaved float) */
 	SwrContext *swr_ctx;
-	int swr_src_rate;
-	int swr_dst_rate;
 
 	/* Video scaler (for format conversion to OBS) */
 	struct SwsContext *sws_ctx;
@@ -132,7 +127,6 @@ struct irl_source {
 
 	/* Keyframe gate */
 	bool first_keyframe_received;
-	bool audio_buffering_pre_keyframe;
 
 	/* Pre-keyframe audio staging (circular buffer of decoded frames) */
 	uint8_t *pre_kf_audio_data;
@@ -178,7 +172,6 @@ void irl_receiver_stop(struct irl_source *ctx);
 
 /* ── Adaptive speed (audio-speed.c) ───────────────────────── */
 
-float irl_speed_calculate(struct irl_source *ctx);
 void irl_speed_apply(struct irl_source *ctx, struct obs_source_audio *audio);
 
 /* ── Video handler (video-handler.c) ──────────────────────── */
