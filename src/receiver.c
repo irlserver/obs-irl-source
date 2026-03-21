@@ -407,23 +407,18 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
-	/* If output is suppressed after a PTS snap, skip EVERYTHING
-	 * (PLL + drain).  The PLL must also be skipped because PTS
-	 * doesn't advance during suppression — running the PLL would
-	 * see a growing error, trigger another snap+suppress, and
-	 * loop forever.  When suppression ends, the PLL's first
-	 * correction will snap PTS to the current time. */
-	if (os_gettime_ns() < ctx->audio_snap_suppress_until)
-		return;
-
-	/* PLL correction: run ONCE per drain cycle, before the loop.
-	 * Running inside the loop causes PTS to drift progressively
-	 * ahead during multi-chunk drains. */
-	if (!ctx->audio_output_pts_init) {
+	/* If output is suppressed after a PTS snap, skip everything.
+	 * When suppression ends, snap PTS fresh and resume — the
+	 * 100ms gap already exceeds OBS's 70ms smoothing threshold. */
+	if (ctx->audio_snap_suppress_until) {
+		if (os_gettime_ns() < ctx->audio_snap_suppress_until)
+			return;
 		ctx->audio_output_pts_ns =
-			(int64_t)os_gettime_ns() -
-			5000000LL; /* -5ms: behind ts.end,
-				    * ahead of ts.start */
+			(int64_t)os_gettime_ns() - 5000000LL;
+		ctx->audio_snap_suppress_until = 0;
+	} else if (!ctx->audio_output_pts_init) {
+		ctx->audio_output_pts_ns =
+			(int64_t)os_gettime_ns() - 5000000LL;
 		ctx->audio_output_pts_init = true;
 	} else {
 		int64_t target =
@@ -432,19 +427,13 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 			target - ctx->audio_output_pts_ns;
 		int64_t abs_err =
 			error >= 0 ? error : -error;
-		if (abs_err > 50000000LL) { /* > 50ms: snap */
+		if (abs_err > 50000000LL) {
 			ctx->audio_output_pts_ns = target;
-			/* Suppress output for 100ms after a snap.
-			 * This creates a gap > OBS's 70ms smoothing
-			 * threshold, forcing OBS to bypass stale
-			 * next_audio_ts_min and use our actual PTS
-			 * on the first post-suppress push. */
 			ctx->audio_snap_suppress_until =
 				os_gettime_ns() + 100000000ULL;
 			return;
-		} else {
-			ctx->audio_output_pts_ns += error / 4;
 		}
+		ctx->audio_output_pts_ns += error / 4;
 	}
 
 	/* Output audio to OBS in a loop until the buffer is at or below
