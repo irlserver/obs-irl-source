@@ -1,0 +1,63 @@
+src/video-handler.c
+  b3a7d8d78b656a2e 104-110,114-124,137-149,152
+src/audio-speed.c
+  ab5553702c17a9b7 29
+docs/audio-pipeline.md
+  b3a7d8d78b656a2e 31,67,69,71,73,75-83
+src/receiver.c
+  b3a7d8d78b656a2e 380-385,466,468-474,476-477,483-493
+  28dec36ebc0d8ad8 396-404,406-428,467,475,495-499,521-524,526
+README.md
+  b3a7d8d78b656a2e 23
+include/irl-source.h
+  ab5553702c17a9b7 97
+  28dec36ebc0d8ad8 121-127
+CLAUDE.md
+  b3a7d8d78b656a2e 52,55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "443c660e7c0cab4b7267ab3138447016d585fa64",
+  "prompts": {
+    "28dec36ebc0d8ad8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0fade586-6463-49cc-9c66-0e7e14109eaa",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 51,
+      "overriden_lines": 0
+    },
+    "ab5553702c17a9b7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "939f172f-0ad7-43c6-b7c5-a4058207e0eb",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 76,
+      "overriden_lines": 0
+    }
+  }
+}
