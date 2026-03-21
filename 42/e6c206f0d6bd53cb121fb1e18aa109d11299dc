@@ -1,0 +1,29 @@
+include/irl-source.h
+  b3a7d8d78b656a2e 37-39
+src/receiver.c
+  b3a7d8d78b656a2e 48
+docs/audio-pipeline.md
+  b3a7d8d78b656a2e 3,25-27,39,43,89,92,96
+README.md
+  b3a7d8d78b656a2e 19,84-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "42e6c206f0d6bd53cb121fb1e18aa109d11299dc",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 17,
+      "accepted_lines": 17,
+      "overriden_lines": 0
+    }
+  }
+}
