@@ -407,14 +407,12 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 	if (interleaved != frame->data[0])
 		free(interleaved);
 
-	/* Output audio to OBS in a loop until the buffer is at or below
-	 * target.  A single output per decoded frame cannot keep up when
-	 * the decoded frame is larger than the output chunk (e.g. AAC
-	 * 1024 samples = 21.3ms vs 20ms chunk), causing the buffer to
-	 * overflow and silently drop audio. */
+	/* Output audio to OBS in a loop.  Push at least 2 chunks per
+	 * drain cycle so OBS's input buffer always has >= 1024 samples
+	 * (AUDIO_OUTPUT_FRAMES) for its mixer tick. */
+	int chunks_pushed = 0;
 	while (audio_buffer_ready(&ctx->audio_buf)) {
-		int chunk_ms = 22; /* > 1024 samples at 48kHz after
-				    * OBS resampling (AUDIO_OUTPUT_FRAMES) */
+		int chunk_ms = 20;
 		size_t frame_bytes = audio_buffer_ms_to_bytes(
 			&ctx->audio_buf, chunk_ms);
 		uint8_t *out_buf = malloc(frame_bytes);
@@ -455,31 +453,38 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		}
 
 		/* Timestamp strategy: monotonic counter in a separate
-		 * epoch, advanced by exact sample count per chunk.
+		 * epoch (+10s from os_gettime_ns()), with soft PLL
+		 * correction to prevent drift.
 		 *
-		 * The epoch is offset +10s from os_gettime_ns() so
-		 * OBS does NOT detect the timestamps as "direct"
-		 * (within MAX_TS_VAR=2s of the system clock).  This
-		 * forces OBS to use its timing_adjust mechanism,
-		 * which properly resets via reset_audio_timing()
-		 * after OBS restarts the source audio.
+		 * Non-direct epoch: the +10s offset exceeds OBS's
+		 * MAX_TS_VAR (2s), so OBS uses its timing_adjust
+		 * mechanism instead of "direct timestamp" detection.
+		 * This is critical because after OBS restarts a
+		 * source's audio, the timing_adjust path properly
+		 * resets via reset_audio_timing(), while the direct
+		 * path pre-empts the reset and uses stale
+		 * next_audio_ts_min values — causing an infinite
+		 * restart cascade.
 		 *
-		 * With "direct" timestamps (~os_gettime_ns()), OBS
-		 * sets timing_adjust=0 and timing_set=true BEFORE
-		 * checking timing_set — so after a restart (where
-		 * OBS sets timing_set=false), the reset path is
-		 * skipped and stale next_audio_ts_min values cause
-		 * an immediate re-trigger of "audio is lagging".
-		 *
-		 * No PLL correction is needed: OBS's internal
-		 * smoothing (TS_SMOOTHING_THRESHOLD=70ms) keeps
-		 * inter-chunk timing sequential, and timing_adjust
-		 * maps our epoch to the system clock domain. */
+		 * Soft PLL: corrects our PTS toward the current
+		 * target (os_gettime_ns() + 10s) at 25% per chunk.
+		 * Without this, output timing jitter accumulates
+		 * as drift.  OBS's internal smoothing (70ms window)
+		 * overrides our per-chunk adjustments for sequencing,
+		 * but when drift exceeds 70ms, OBS falls through to
+		 * our actual PTS — which the PLL keeps correct. */
 		if (!ctx->audio_output_pts_init) {
 			ctx->audio_output_pts_ns =
 				(int64_t)os_gettime_ns() +
 				10000000000LL; /* +10s offset */
 			ctx->audio_output_pts_init = true;
+		} else {
+			int64_t target =
+				(int64_t)os_gettime_ns() +
+				10000000000LL;
+			int64_t error =
+				target - ctx->audio_output_pts_ns;
+			ctx->audio_output_pts_ns += error / 4;
 		}
 
 		uint32_t frames_out =
@@ -506,12 +511,16 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		ctx->audio_output_pts_ns +=
 			(int64_t)frames_out * 1000000000LL / out_rate;
 		ctx->total_audio_frames++;
+		chunks_pushed++;
 
 		free(out_buf);
 
-		/* Stop once buffer is at or below target */
-		if (audio_buffer_fill_ms(&ctx->audio_buf) <=
-		    ctx->config.buffer_target_ms)
+		/* Always push >= 2 chunks (>= 1920 samples at 48kHz)
+		 * so OBS's mixer has enough for one 1024-sample tick.
+		 * After that, stop once buffer is at or below target. */
+		if (chunks_pushed >= 2 &&
+		    audio_buffer_fill_ms(&ctx->audio_buf) <=
+			    ctx->config.buffer_target_ms)
 			break;
 	}
 }

@@ -28,7 +28,7 @@ A ring buffer sized in milliseconds, not bytes. Default settings:
 
 The buffer holds decoded audio (interleaved float PCM) regardless of the input codec. AAC, Opus, or anything else goes in; smooth PCM comes out.
 
-Audio is output in 22ms chunks. The 22ms size is chosen to exceed OBS's `AUDIO_OUTPUT_FRAMES` (1024 samples at 48kHz = 21.3ms) — every push to OBS must provide at least one mixer tick's worth of data, or the source's input buffer runs dry and OBS reports "audio is lagging". The output loop drains multiple chunks per decoded frame if needed, keeping the buffer near its target.
+Audio is output in 20ms chunks, with a minimum of 2 chunks per drain cycle (1920 samples at 48kHz). The double-push ensures OBS's internal input buffer always has at least 1024 samples (`AUDIO_OUTPUT_FRAMES`) for one mixer tick. A single 20ms push gives only 960 samples — 64 short of OBS's 1024-sample requirement — so the source's input buffer would run dry between mixer ticks. The output loop drains additional chunks per decoded frame if needed, keeping the buffer near its target.
 
 ### 2. Adaptive playback speed (prevents buffer drift)
 
@@ -64,7 +64,7 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses a monotonic counter in a **separate epoch** — offset +10 seconds from `os_gettime_ns()` at initialization, then advanced by the exact sample count of each output chunk. No PLL or clock correction is applied; OBS handles the mapping to its system clock domain internally.
+The plugin uses a monotonic counter in a **separate epoch** — offset +10 seconds from `os_gettime_ns()`, advanced by the exact sample count of each output chunk, with soft PLL correction toward `os_gettime_ns() + 10s` at 25% per chunk. OBS handles the mapping to its system clock domain via `timing_adjust`.
 
 **Why a separate epoch?** OBS's `source_output_audio_data()` has two paths for incoming timestamps:
 
@@ -72,7 +72,9 @@ The plugin uses a monotonic counter in a **separate epoch** — offset +10 secon
 
 2. **Non-direct timestamps** (>2 seconds from `os_gettime_ns()`): OBS uses `reset_audio_timing()` to compute a fresh `timing_adjust` when `timing_set` is false. This path correctly resets after a source audio restart — the `if (!timing_set)` branch runs (since direct detection didn't pre-empt it), `next_audio_ts_min` is set fresh, and the restart cascade is broken.
 
-By offsetting our timestamps +10 seconds, we force path 2. OBS's internal smoothing (70ms threshold) keeps inter-chunk timing sequential, and `timing_adjust` maps our epoch to the system clock domain. Drift between our counter and real-time is bounded by the 70ms smoothing threshold before OBS passes our actual timestamp through, resetting the base.
+By offsetting our timestamps +10 seconds, we force path 2. OBS's internal smoothing (70ms threshold) keeps inter-chunk timing sequential, and `timing_adjust` maps our epoch to the system clock domain.
+
+**Why the PLL is still needed:** OBS's smoothing overrides our per-chunk PLL adjustments (replacing them with sequential values). However, when the smoothed sequence drifts >70ms from our actual PTS, OBS falls through to our timestamp directly. If our PTS has drifted (no PLL), the new base is wrong and drift continues. With the PLL keeping our PTS near `os_gettime_ns() + 10s`, each threshold breach resets the base correctly. This also prevents audio/video desync — video timestamps are anchored to the system clock, so audio PTS must track it too.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 
