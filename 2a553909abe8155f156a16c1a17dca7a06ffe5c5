@@ -1,0 +1,33 @@
+src/audio-speed.c
+  28dec36ebc0d8ad8 96-100
+include/irl-source.h
+  28dec36ebc0d8ad8 121-127,177-184
+src/receiver.c
+  28dec36ebc0d8ad8 331,410-492,494,496-514,516-523,525-529,532-540,543-544,546-562,564,566-575,577-582,673-676,687
+src/plugin.c
+  28dec36ebc0d8ad8 29
+src/irl-source.c
+  28dec36ebc0d8ad8 133-134,165
+docs/audio-pipeline.md
+  28dec36ebc0d8ad8 31,67,69,71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "2a553909abe8155f156a16c1a17dca7a06ffe5c5",
+  "prompts": {
+    "28dec36ebc0d8ad8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0fade586-6463-49cc-9c66-0e7e14109eaa",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 199,
+      "total_deletions": 156,
+      "accepted_lines": 199,
+      "overriden_lines": 0
+    }
+  }
+}
