@@ -1,0 +1,27 @@
+src/video-handler.c
+  b3a7d8d78b656a2e 104-114,119,137-140,146
+include/irl-source.h
+  b3a7d8d78b656a2e 127-128
+src/receiver.c
+  b3a7d8d78b656a2e 465,467-471,473-483,494
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "6f0f3b06c9ae016637ccc5f87e27e968c69a54d3",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 37,
+      "total_deletions": 66,
+      "accepted_lines": 37,
+      "overriden_lines": 0
+    }
+  }
+}
