@@ -64,13 +64,21 @@ When the stream drops, the last audio chunk in the buffer gets a 50ms linear fad
 
 OBS expects audio timestamps in its system clock domain (`os_gettime_ns()`). Live streams use MPEG-TS PTS values that can be hours or days into an arbitrary epoch — passing these raw causes OBS to report "audio is lagging by millions of ms" and restart the source repeatedly.
 
-The plugin uses a hybrid approach — a soft PLL (phase-locked loop):
+The plugin uses a hybrid approach — an adaptive PLL (phase-locked loop):
 
 1. **Running PTS** — a counter anchored to the system clock on first output, then advanced by the exact sample count of each output chunk. This gives perfectly smooth inter-chunk timing with no jitter from network delivery variation.
 
-2. **Soft correction** — each output nudges the running PTS 1% toward where the system clock says it should be (`os_gettime_ns()` minus buffer fill time). This prevents drift without introducing the jitter that pure clock-based timestamps would have.
+2. **Adaptive correction** — each output nudges the running PTS toward `os_gettime_ns()`. The correction strength scales with how far off we are:
 
-A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The PLL gives the smoothness of the running counter with the accuracy of the system clock — a 100ms drift corrects itself within about 4 seconds.
+   | Error magnitude | Correction | Recovery time | Purpose |
+   |---|---|---|---|
+   | < 20ms | 2% per chunk | ~2 seconds | Smooth out normal jitter without artifacts |
+   | 20–100ms | 12.5% per chunk | ~1 second | Recover from brief stalls or network hiccups |
+   | > 100ms | 50% per chunk | Near-instant | Snap back after decode stalls or long gaps |
+
+   The target is simply "now" — audio is handed to OBS at the current time, so timestamps should match the system clock. Buffer fill is an internal concern and is not factored into the target (previous versions subtracted buffer fill, which caused timestamps to always lag behind the system clock, triggering OBS's "audio is lagging" detection).
+
+A pure running PTS drifts during decode stalls (no output = PTS freezes, but wall-clock time keeps advancing). A pure system clock timestamp jitters with every network hiccup. The adaptive PLL gives the smoothness of the running counter with the accuracy of the system clock — small drift corrects gently, large drift corrects aggressively.
 
 Video uses a similar rebasing approach (anchoring stream PTS to the system clock via `video_sys_base` / `video_pts_base`).
 

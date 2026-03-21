@@ -454,29 +454,38 @@ static void handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 		}
 
 		/* Timestamp strategy: running PTS for smooth inter-chunk
-		 * timing, with soft correction toward the system clock
-		 * to prevent drift.  Pure running PTS drifts during
-		 * decode stalls (no output = PTS freezes, clock keeps
-		 * going).  Pure system clock jitters with network
-		 * delivery.  Blending gives smooth + drift-free. */
+		 * timing, with adaptive correction toward the system
+		 * clock to prevent drift.  Pure running PTS drifts
+		 * during decode stalls (no output = PTS freezes, clock
+		 * keeps going).  Pure system clock jitters with network
+		 * delivery.  Blending gives smooth + drift-free.
+		 *
+		 * Target is os_gettime_ns() — we hand audio to OBS
+		 * "now", so timestamps should match.  Buffer fill is
+		 * an internal concern that OBS doesn't need to see. */
 		if (!ctx->audio_output_pts_init) {
 			ctx->audio_output_pts_ns =
 				(int64_t)os_gettime_ns();
 			ctx->audio_output_pts_init = true;
 		} else {
-			/* Soft PLL: nudge running PTS toward where the
-			 * system clock says we should be (now minus
-			 * buffer fill).  1% correction per output
-			 * smooths out jitter while correcting drift
-			 * within a few seconds. */
-			int fill_now =
-				audio_buffer_fill_ms(&ctx->audio_buf);
-			int64_t expected =
-				(int64_t)os_gettime_ns() -
-				(int64_t)fill_now * 1000000LL;
+			/* Adaptive PLL: correction strength scales
+			 * with error magnitude.  Small drift gets
+			 * gentle 2% nudges (no jitter), medium drift
+			 * corrects in ~1s, large drift (stalls)
+			 * snaps back near-instantly. */
+			int64_t now = (int64_t)os_gettime_ns();
 			int64_t error =
-				expected - ctx->audio_output_pts_ns;
-			ctx->audio_output_pts_ns += error / 100;
+				now - ctx->audio_output_pts_ns;
+			int64_t abs_err =
+				error >= 0 ? error : -error;
+			int divisor;
+			if (abs_err > 100000000LL)      /* > 100ms */
+				divisor = 2;
+			else if (abs_err > 20000000LL)  /* > 20ms */
+				divisor = 8;
+			else
+				divisor = 50;
+			ctx->audio_output_pts_ns += error / divisor;
 		}
 
 		uint32_t frames_out =
