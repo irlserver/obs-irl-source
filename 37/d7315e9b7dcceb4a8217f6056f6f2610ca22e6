@@ -1,0 +1,29 @@
+include/audio-buffer.h
+  b3a7d8d78b656a2e 8,10-17,27-32,34-39,49-54,87,90-96,101-106,109
+include/irl-source.h
+  b3a7d8d78b656a2e 113,115-131
+src/audio-buffer.c
+  b3a7d8d78b656a2e 8,10-13,31-101,146-148,152-153,160-171,174-175,178-182,184-185,187,190-191,198-218,221-223,225-227,229-233,235-238,240
+src/receiver.c
+  b3a7d8d78b656a2e 399-406,410-411,477-485,517-520,522-524,526-527,531-536,538-569,655-663,769
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "37d7315e9b7dcceb4a8217f6056f6f2610ca22e6",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 294,
+      "total_deletions": 105,
+      "accepted_lines": 283,
+      "overriden_lines": 0
+    }
+  }
+}
