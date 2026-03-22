@@ -1,0 +1,25 @@
+src/irl-source.c
+  b3a7d8d78b656a2e 80-98,124-125
+README.md
+  b3a7d8d78b656a2e 137,167,174-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "7effb6774fd390a8a341e2e56ab97e4b65264a13",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 25,
+      "total_deletions": 3,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  }
+}
