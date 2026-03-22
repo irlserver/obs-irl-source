@@ -1,0 +1,25 @@
+src/receiver.c
+  b3a7d8d78b656a2e 625-633
+include/irl-source.h
+  b3a7d8d78b656a2e 124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "aff73b3c4fcfd013e13697101ab05344824ca11a",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 52,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    }
+  }
+}
