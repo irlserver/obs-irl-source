@@ -1,0 +1,25 @@
+src/video-handler.c
+  b3a7d8d78b656a2e 148-156
+src/receiver.c
+  b3a7d8d78b656a2e 517,519-539,545-546,548-553,556-561,563-565
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "daa18d0f555d9ff351c137b1be3a3cc160b12a43",
+  "prompts": {
+    "b3a7d8d78b656a2e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8779693b-5df7-41c6-898f-1c911ae23e6e",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 49,
+      "total_deletions": 45,
+      "accepted_lines": 49,
+      "overriden_lines": 0
+    }
+  }
+}
