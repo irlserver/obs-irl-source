@@ -1,0 +1,37 @@
+src/audio-buffer.c
+  968ac9fc997288cc 31-38,86-100,185-187,190-191,287-342,350-358,362-372,374-375,377-379,382,387
+include/irl-source.h
+  968ac9fc997288cc 47-48,77-78,103-105,179-180
+src/audio-speed.c
+  968ac9fc997288cc 34
+src/irl-source.c
+  968ac9fc997288cc 60-65,68-74,83,114-119,137,147-148,194,203-205
+src/receiver.c
+  968ac9fc997288cc 160-162,302-346,364-366,382-391,398-399,411,413-417,426-434,465-466,497,513-514,523,556-569,571-572,588,635-636,661,762,791-793,797-800,851,935
+src/video-handler.c
+  968ac9fc997288cc 148-154
+include/audio-buffer.h
+  968ac9fc997288cc 122-137,144-148
+src/settings.c
+  968ac9fc997288cc 45-48,113-116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.17",
+  "base_commit_sha": "ad5172fced172d3fa35d4ee98d6915254e358629",
+  "prompts": {
+    "968ac9fc997288cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d1d00-6722-7fe2-abcb-3cc57a0b91f0",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 307,
+      "total_deletions": 95,
+      "accepted_lines": 307,
+      "overriden_lines": 0
+    }
+  }
+}
