@@ -1,0 +1,29 @@
+src/irl-source.c
+  b39858b94e820f61 100
+src/video-handler.c
+  b39858b94e820f61 156,158-164
+include/irl-source.h
+  b39858b94e820f61 54-58,181
+src/receiver.c
+  b39858b94e820f61 357,372,393-403,430-431,463-470,903-904
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "90ecf2b97798ea2b67edf67b62e72dce2a3b69d3",
+  "prompts": {
+    "b39858b94e820f61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d276b-d3b4-76e0-8b45-93291d4325f0",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 41,
+      "total_deletions": 3,
+      "accepted_lines": 41,
+      "overriden_lines": 0
+    }
+  }
+}
