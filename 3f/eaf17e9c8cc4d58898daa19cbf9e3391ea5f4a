@@ -1,0 +1,25 @@
+include/pts-repair.h
+  b39858b94e820f61 48
+src/pts-repair.c
+  b39858b94e820f61 20,31-41,55,65,82,102,110-136,139-157,161,169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.19",
+  "base_commit_sha": "3feaf17e9c8cc4d58898daa19cbf9e3391ea5f4a",
+  "prompts": {
+    "b39858b94e820f61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d276b-d3b4-76e0-8b45-93291d4325f0",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 65,
+      "total_deletions": 25,
+      "accepted_lines": 65,
+      "overriden_lines": 0
+    }
+  }
+}
