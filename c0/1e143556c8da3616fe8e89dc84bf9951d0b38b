@@ -1,0 +1,27 @@
+include/irl-source.h
+  ff1b8d213bf486e9 225
+src/receiver.c
+  ff1b8d213bf486e9 651-654,656,767-773
+src/audio-speed.c
+  ff1b8d213bf486e9 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.22",
+  "base_commit_sha": "c01e143556c8da3616fe8e89dc84bf9951d0b38b",
+  "prompts": {
+    "ff1b8d213bf486e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d3466-fe4b-7610-8503-178791f5e1d3",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 16,
+      "total_deletions": 32,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    }
+  }
+}
