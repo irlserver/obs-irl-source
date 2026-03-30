@@ -1,0 +1,27 @@
+include/irl-source.h
+  ff1b8d213bf486e9 157-167
+src/receiver.c
+  ff1b8d213bf486e9 327,333,340,346,351-384,389-395,414-420,648,738-739,845,848-859,861-862,1201-1204,1211-1222
+src/irl-source.c
+  ff1b8d213bf486e9 88-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.22",
+  "base_commit_sha": "24aabe13c51ff294c94bcade25fef4f89c66c1d6",
+  "prompts": {
+    "ff1b8d213bf486e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d3466-fe4b-7610-8503-178791f5e1d3",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 108,
+      "total_deletions": 1,
+      "accepted_lines": 108,
+      "overriden_lines": 0
+    }
+  }
+}
