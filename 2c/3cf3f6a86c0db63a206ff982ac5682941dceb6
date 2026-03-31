@@ -1,0 +1,23 @@
+src/receiver.c
+  ff1b8d213bf486e9 308,529-531
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.22",
+  "base_commit_sha": "2c3cf3f6a86c0db63a206ff982ac5682941dceb6",
+  "prompts": {
+    "ff1b8d213bf486e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d3466-fe4b-7610-8503-178791f5e1d3",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 3,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    }
+  }
+}
