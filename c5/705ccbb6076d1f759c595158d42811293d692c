@@ -1,0 +1,31 @@
+src/receiver-stream.c
+  3cd8a2064e26fa91 1-400
+src/receiver-internal.h
+  3cd8a2064e26fa91 9-13,15-18,21
+src/receiver.c
+  3cd8a2064e26fa91 57-59,62,67,73,76,80,83
+CMakeLists.txt
+  3cd8a2064e26fa91 265-266
+src/receiver-decode.c
+  3cd8a2064e26fa91 1-173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "c5705ccbb6076d1f759c595158d42811293d692c",
+  "prompts": {
+    "3cd8a2064e26fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d8276-21f6-7f83-92c3-b02daece1983",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 594,
+      "total_deletions": 625,
+      "accepted_lines": 594,
+      "overriden_lines": 0
+    }
+  }
+}
