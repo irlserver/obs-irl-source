@@ -1,0 +1,33 @@
+README.md
+  3cd8a2064e26fa91 22,33,40,53,91,104-105,144,190,210
+docs/audio-pipeline.md
+  3cd8a2064e26fa91 16,25,41,43,45,47-49,51,83,104
+src/plugin.c
+  3cd8a2064e26fa91 44
+src/receiver-audio.c
+  3cd8a2064e26fa91 16-17,65,95,292,320-351,424,428-429,436
+src/settings.c
+  3cd8a2064e26fa91 88,93-96,161-162
+include/irl-source.h
+  3cd8a2064e26fa91 10,152,166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "45ce23949ae937f56633ab7995915bdee698eb44",
+  "prompts": {
+    "3cd8a2064e26fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d8276-21f6-7f83-92c3-b02daece1983",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 79,
+      "total_deletions": 705,
+      "accepted_lines": 74,
+      "overriden_lines": 0
+    }
+  }
+}
