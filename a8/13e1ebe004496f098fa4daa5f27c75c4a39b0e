@@ -1,0 +1,33 @@
+src/audio-speed.c
+  3cd8a2064e26fa91 35-38,51-56,59,65-66,68,72,85,90
+src/receiver-audio.c
+  3cd8a2064e26fa91 15-16,62,91,102-108,111-117,312,360,410-411,413-418,420-425,427-432,466,580,583,585-586
+include/irl-source.h
+  3cd8a2064e26fa91 184
+src/receiver-decode.c
+  3cd8a2064e26fa91 100-101
+src/receiver-internal.h
+  3cd8a2064e26fa91 9-10
+src/receiver-stream.c
+  3cd8a2064e26fa91 352
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "a813e1ebe004496f098fa4daa5f27c75c4a39b0e",
+  "prompts": {
+    "3cd8a2064e26fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d8276-21f6-7f83-92c3-b02daece1983",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 78,
+      "total_deletions": 149,
+      "accepted_lines": 70,
+      "overriden_lines": 0
+    }
+  }
+}
