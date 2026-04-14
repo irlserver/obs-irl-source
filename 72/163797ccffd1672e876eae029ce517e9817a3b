@@ -1,0 +1,23 @@
+src/receiver-audio.c
+  3cd8a2064e26fa91 317,319-327,329,334-340,342-343,345-351,353-354,356,358-360,395-399
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "72163797ccffd1672e876eae029ce517e9817a3b",
+  "prompts": {
+    "3cd8a2064e26fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d8276-21f6-7f83-92c3-b02daece1983",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 26,
+      "accepted_lines": 38,
+      "overriden_lines": 0
+    }
+  }
+}
