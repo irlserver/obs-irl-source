@@ -1,0 +1,29 @@
+include/irl-source.h
+  3cd8a2064e26fa91 103
+src/irl-source.c
+  3cd8a2064e26fa91 140-141,201-202
+README.md
+  3cd8a2064e26fa91 145,180,192-193,212,230
+src/receiver-stream.c
+  3cd8a2064e26fa91 108,168,215,226,229-236,385,394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "7348f03d3a70a5f1f65d4821d3bd67fcde2fd71b",
+  "prompts": {
+    "3cd8a2064e26fa91": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019d8276-21f6-7f83-92c3-b02daece1983",
+        "model": "gpt-5.4"
+      },
+      "human_author": "datagutt",
+      "messages": [],
+      "total_additions": 25,
+      "total_deletions": 8,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  }
+}
