@@ -1,0 +1,24 @@
+src/receiver-audio.c
+  s_22f3237e81f71f::t_9665893095c29c 716-719
+  s_22f3237e81f71f::t_6d0bbd374eff42 625-628
+src/video-handler.c
+  s_22f3237e81f71f::t_5d11c6a880bea5 132-133
+src/receiver-video.c
+  s_22f3237e81f71f::t_6cfa5c7ad7ecb2 80-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "3c99d27af5e21be1548d4b0dbea20ffdd5019a9b",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
