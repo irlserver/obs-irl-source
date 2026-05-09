@@ -1,0 +1,28 @@
+src/receiver-audio.c
+  s_22f3237e81f71f::t_5031db05c490a9 19-38
+  s_22f3237e81f71f::t_0729fd173fbfdc 644-646,648,658
+  s_22f3237e81f71f::t_9e7738a3b35eb0 12
+  s_22f3237e81f71f::t_92b3a69ce95766 722-725,732
+  s_22f3237e81f71f::t_b08433157d65df 462-465,468
+  s_22f3237e81f71f::t_ee334b8e601e22 511-512,518
+src/irl-source.c
+  s_22f3237e81f71f::t_b4ef07b3276256 257-259
+include/irl-source.h
+  s_22f3237e81f71f::t_f3efe33df03975 150-158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "f712b550ea538ff3ee9f43f885f45fbd99b50217",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
