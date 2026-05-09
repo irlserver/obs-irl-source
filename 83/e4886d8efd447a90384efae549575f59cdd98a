@@ -1,0 +1,20 @@
+src/pts-repair.c
+  s_22f3237e81f71f::t_e47f4e530e54e5 16-17
+  s_22f3237e81f71f::t_dd78869af90bed 18-20,31,33-39,47-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "83e4886d8efd447a90384efae549575f59cdd98a",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
