@@ -1,0 +1,20 @@
+src/irl-source.c
+  s_22f3237e81f71f::t_20dacef5ded114 149-168,174,176-177,179,186-189,191
+  s_22f3237e81f71f::t_1233dd856df26d 201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "2ba685c6759b6afa5a8b19784a6cec6d22714c8b",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
