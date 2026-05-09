@@ -1,0 +1,23 @@
+src/receiver.c
+  s_22f3237e81f71f::t_ffd3fe014744e0 51-58
+src/receiver-stream.c
+  s_22f3237e81f71f::t_84f9a18145d5f3 48-49
+src/receiver-audio.c
+  s_22f3237e81f71f::t_840d76869b63f4 662-671
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "373604c6bb3694ad4b54dea80763c2091b67cb9f",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
