@@ -1,0 +1,19 @@
+src/pts-repair.c
+  s_22f3237e81f71f::t_b746fcb59412e7 107-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "3bc62a0be24f787b105494db9bfd4d7f986cbaab",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
