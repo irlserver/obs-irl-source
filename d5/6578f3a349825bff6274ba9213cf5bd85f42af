@@ -1,0 +1,23 @@
+include/irl-source.h
+  s_22f3237e81f71f::t_27e07697509c6f 107-111
+src/video-handler.c
+  s_22f3237e81f71f::t_b40ad4764277f7 196-207,213-235,237-244
+src/receiver-stream.c
+  s_22f3237e81f71f::t_06629e575f7ecd 171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "d56578f3a349825bff6274ba9213cf5bd85f42af",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
