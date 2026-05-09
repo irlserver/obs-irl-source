@@ -1,0 +1,30 @@
+src/video-handler.c
+  s_22f3237e81f71f::t_c53c89058f34f3 136-150,177-178
+src/receiver-audio.c
+  s_22f3237e81f71f::t_b0f5633c80f7f0 733,736
+  s_22f3237e81f71f::t_9d4c81ee5ba98a 643,648-652
+src/receiver-video.c
+  s_22f3237e81f71f::t_4d13765ab76a32 80-84
+src/receiver-decode.c
+  s_22f3237e81f71f::t_fe6e3ad7075bb5 100
+src/receiver-stream.c
+  s_22f3237e81f71f::t_55832753b7e568 367
+  s_22f3237e81f71f::t_59de73def1b55c 287,291
+  s_22f3237e81f71f::t_7e43388e897c44 366
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "a30ac24590585ddebce0dd352625d3ab7699bd22",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
