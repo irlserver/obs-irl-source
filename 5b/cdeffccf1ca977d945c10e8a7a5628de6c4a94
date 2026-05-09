@@ -1,0 +1,23 @@
+src/audio-buffer.c
+  s_22f3237e81f71f::t_bf53dd9f3c724c 19-20
+  s_22f3237e81f71f::t_809eaafee881bc 260
+  s_22f3237e81f71f::t_1b3a5dbc2d0c48 232
+  s_22f3237e81f71f::t_c9cd69bc533456 209
+  s_22f3237e81f71f::t_a86974fe55a17e 237,266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "5bcdeffccf1ca977d945c10e8a7a5628de6c4a94",
+  "prompts": {},
+  "sessions": {
+    "s_22f3237e81f71f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8194664a-095b-49ef-a1da-e90e2bdb6f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
