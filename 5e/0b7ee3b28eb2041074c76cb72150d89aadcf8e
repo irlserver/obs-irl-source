@@ -1,0 +1,36 @@
+include/irl-source.h
+  s_ec2cbfba0a8a74::t_41e8833a0a21b5 222
+src/receiver-stream.c
+  s_ec2cbfba0a8a74::t_41e8833a0a21b5 376,397,408
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_1d51cf5114f919 77
+  s_ec2cbfba0a8a74::t_7c279ce1503e99 16
+README.md
+  s_ec2cbfba0a8a74::t_1d51cf5114f919 158-160,226
+  s_ec2cbfba0a8a74::t_7c279ce1503e99 13
+docs/viewer-quality-plan.md
+  s_ec2cbfba0a8a74::t_7c279ce1503e99 11-13
+  s_ec2cbfba0a8a74::t_1d51cf5114f919 18-19,46-48
+.gitattributes
+  s_ec2cbfba0a8a74::t_b911c588a9039b 1-17
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_41e8833a0a21b5 61,76,680-691
+src/irl-source.c
+  s_ec2cbfba0a8a74::t_41e8833a0a21b5 96,164,188-189,247-250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "5e0b7ee3b28eb2041074c76cb72150d89aadcf8e",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
