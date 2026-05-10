@@ -1,0 +1,30 @@
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_62becbca3d537c 491
+  s_ec2cbfba0a8a74::t_86d4c64d23ca58 492
+  s_ec2cbfba0a8a74::t_a03a5c1ced0943 203,205-209
+README.md
+  s_ec2cbfba0a8a74::t_533f4a883e77bb 14,153
+  s_ec2cbfba0a8a74::t_ba69d5fd495155 13,31,100,113
+docs/viewer-quality-plan.md
+  s_ec2cbfba0a8a74::t_ba69d5fd495155 11,21,28-30,51-52
+src/settings.c
+  s_ec2cbfba0a8a74::t_ba69d5fd495155 94
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_ba69d5fd495155 52,54,115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "81fb77b2c5fc5c2ac13346e390f3498e9891446c",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
