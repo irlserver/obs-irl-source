@@ -1,0 +1,25 @@
+include/irl-source.h
+  s_ec2cbfba0a8a74::t_4c6394abaf6c2a 218-221
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_4c6394abaf6c2a 109-111,143-145,233-277,571,715-719,735-736
+src/irl-source.c
+  s_ec2cbfba0a8a74::t_4c6394abaf6c2a 92-94
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_4c6394abaf6c2a 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "ef47f486fb272cada832e89cb65be83238df7c74",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
