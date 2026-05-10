@@ -1,0 +1,25 @@
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_76caf8b1d3efa5 57
+src/receiver-stream.c
+  s_ec2cbfba0a8a74::t_76caf8b1d3efa5 396,405
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_76caf8b1d3efa5 62,68-69,550-558,560,564-565
+README.md
+  s_ec2cbfba0a8a74::t_76caf8b1d3efa5 226
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "4bbb77e0e59ec44f9f53e0059fcc23e0cda454b3",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
