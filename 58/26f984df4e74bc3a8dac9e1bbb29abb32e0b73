@@ -1,0 +1,19 @@
+src/video-handler.c
+  s_ec2cbfba0a8a74::t_63e0442fc542a7 153-157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "5826f984df4e74bc3a8dac9e1bbb29abb32e0b73",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
