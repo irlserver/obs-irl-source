@@ -1,0 +1,23 @@
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_530c21d4f696f5 116
+README.md
+  s_ec2cbfba0a8a74::t_530c21d4f696f5 113,166,168
+docs/viewer-quality-plan.md
+  s_ec2cbfba0a8a74::t_530c21d4f696f5 54-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "b006820dddcc581fad9fe975fd61d04c68df57f2",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
