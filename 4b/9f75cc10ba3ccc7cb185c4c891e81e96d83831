@@ -1,0 +1,41 @@
+src/receiver-stream.c
+  s_ec2cbfba0a8a74::t_8af9d0a25ce71d 403
+docs/viewer-quality-plan.md
+  s_ec2cbfba0a8a74::t_c6e337d6be8bc3 32-33,56-57,60-61
+  s_ec2cbfba0a8a74::t_c7666993e0be46 29-31,58-59
+src/audio-buffer.c
+  s_ec2cbfba0a8a74::t_0e1a8533665fa4 182-184,207
+  s_ec2cbfba0a8a74::t_d554fb44bdf8a1 41,43,110-113,115-116,119,122-123,131,274-275,326-327
+irl-stats.lua
+  s_ec2cbfba0a8a74::t_95185c661f9a39 39,42
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_7bea60d0b7250a 18-19,487-488,490,495-499,502-513,516-538,540-545,547-549,589
+  s_ec2cbfba0a8a74::t_42facb39e480f7 63
+include/audio-buffer.h
+  s_ec2cbfba0a8a74::t_ae4c3432b5154f 73-74
+src/settings.c
+  s_ec2cbfba0a8a74::t_8af9d0a25ce71d 95
+README.md
+  s_ec2cbfba0a8a74::t_c6e337d6be8bc3 113,166,168
+  s_ec2cbfba0a8a74::t_ddfb5dd5f10acf 99
+  s_ec2cbfba0a8a74::t_17ffc4db7fbc40 100,219,222,241
+docs/audio-pipeline.md
+  s_ec2cbfba0a8a74::t_c6e337d6be8bc3 58,117
+  s_ec2cbfba0a8a74::t_f70393671e8972 57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "4b9f75cc10ba3ccc7cb185c4c891e81e96d83831",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
