@@ -1,0 +1,20 @@
+src/receiver-audio.c
+  s_ec2cbfba0a8a74::t_ab1bc350ac85da 21,588-603,611-612,618
+  s_ec2cbfba0a8a74::t_8f491d1a05cb1c 604-609,617,619
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "0b528e31b2ae82b5d42fd1ff97da933d968d8b71",
+  "prompts": {},
+  "sessions": {
+    "s_ec2cbfba0a8a74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e1389-9b84-7d82-ae68-9ff6fffac0ba",
+        "model": "gpt-5.5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
