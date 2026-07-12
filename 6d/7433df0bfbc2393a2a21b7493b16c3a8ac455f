@@ -1,0 +1,41 @@
+include/irl-source.h
+  s_5e582cb0c0bb07::t_cdf83f610a7bc0 16
+  s_5e582cb0c0bb07::t_529d781793b0b2 132-158
+src/irl-source.c
+  s_5e582cb0c0bb07::t_40ba3520fa8e2a 307,312-313
+  s_5e582cb0c0bb07::t_147a2ec8147ee6 85
+CLAUDE.md
+  s_5e582cb0c0bb07::t_328b79652e9588 87-88
+  s_5e582cb0c0bb07::t_628c125a3769c1 47-51,54-63,66-76
+docs/audio-pipeline.md
+  s_5e582cb0c0bb07::t_21cb63452572f6 93,95,97,99-100,102,104
+  s_5e582cb0c0bb07::t_1e2cd675181cbf 118
+  s_5e582cb0c0bb07::t_36925c9c576430 34,42-44,48,52,54,56-62
+src/receiver-audio.c
+  s_5e582cb0c0bb07::t_4c267085360c25 7-35,42-43,49-65,68-71,92,94-99,118,120-127,177-179,181-183,190-192,210-215,223,229-230,266-299,304,309-311,314-324,341,343-345,347-359,361,363-368,371-374,376-385,387-410,413-414,450,455,459-462,473,475,477,483-492,513-554,569-571,573-595,602-603,605,607-622,625-630,632-634,636-640,643-656,660-664,667-668,673-689,696,700,710-713,717,721-723,726-731,735-736,765-768,823-829,948-951
+  s_5e582cb0c0bb07::t_f1239a1893f58e 386
+src/receiver-internal.h
+  s_5e582cb0c0bb07::t_fac007d45203e0 5-6
+src/receiver-stream.c
+  s_5e582cb0c0bb07::t_913cf5986f91e9 366,374
+  s_5e582cb0c0bb07::t_4da05ee3671c29 345
+  s_5e582cb0c0bb07::t_ff34e4e004e38f 407,409
+  s_5e582cb0c0bb07::t_b0fbaedb47ca83 311-312,316-317
+  s_5e582cb0c0bb07::t_c27642dca494e7 434
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "6d7433df0bfbc2393a2a21b7493b16c3a8ac455f",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
