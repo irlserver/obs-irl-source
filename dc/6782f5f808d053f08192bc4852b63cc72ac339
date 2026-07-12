@@ -1,0 +1,29 @@
+README.md
+  s_5e582cb0c0bb07::t_9366d6f955d8fe 31
+  s_5e582cb0c0bb07::t_fcc8a195710f13 135,139,144
+  s_5e582cb0c0bb07::t_714b0e891a28e5 12,14
+  s_5e582cb0c0bb07::t_c9014e6456d71e 51-54,56-57
+  s_5e582cb0c0bb07::t_38424f3b3abba7 245,248
+  s_5e582cb0c0bb07::t_a41253c8087b71 262,268-272
+  s_5e582cb0c0bb07::t_ef6310f9785e67 170-171
+  s_5e582cb0c0bb07::t_519d208afe2709 36
+  s_5e582cb0c0bb07::t_bf68aee618e396 109
+  s_5e582cb0c0bb07::t_2fe289bee963e7 249
+  s_5e582cb0c0bb07::t_5706a868f7c253 273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "dc6782f5f808d053f08192bc4852b63cc72ac339",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
