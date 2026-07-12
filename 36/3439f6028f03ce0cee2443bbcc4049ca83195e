@@ -1,0 +1,33 @@
+src/receiver-stream.c
+  s_5e582cb0c0bb07::t_faf238d5c73efc 228
+  s_5e582cb0c0bb07::t_8cd9e3035af1ff 242
+  s_5e582cb0c0bb07::t_486fc44dbc5ccf 200-208
+  s_5e582cb0c0bb07::t_45b21c0fc357ef 24
+src/receiver.c
+  s_5e582cb0c0bb07::t_19376c643e0214 93
+src/irl-source.c
+  s_5e582cb0c0bb07::t_997e81443f72c3 279
+  s_5e582cb0c0bb07::t_fed4d43718443c 217-219
+  s_5e582cb0c0bb07::t_d04e0ac48baeb3 178-179
+README.md
+  s_5e582cb0c0bb07::t_384f3ad05ae057 168-169
+include/irl-source.h
+  s_5e582cb0c0bb07::t_8f13fcd51caaea 76-81
+  s_5e582cb0c0bb07::t_46843eae9ee7e3 125-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "363439f6028f03ce0cee2443bbcc4049ca83195e",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
