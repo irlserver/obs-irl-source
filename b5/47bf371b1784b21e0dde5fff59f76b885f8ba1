@@ -1,0 +1,27 @@
+src/receiver-stream.c
+  s_5e582cb0c0bb07::t_9079de675293a7 298-299
+include/irl-source.h
+  s_5e582cb0c0bb07::t_e08dd8adb719f5 230-233,235-236
+src/irl-source.c
+  s_5e582cb0c0bb07::t_fe54b23ed24df0 79-80
+src/receiver-decode.c
+  s_5e582cb0c0bb07::t_6f05c2b434c23a 122-140
+src/receiver-video.c
+  s_5e582cb0c0bb07::t_262ee718301aad 43-45,47-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "b547bf371b1784b21e0dde5fff59f76b885f8ba1",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
