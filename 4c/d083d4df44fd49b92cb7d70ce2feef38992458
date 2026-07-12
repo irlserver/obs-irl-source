@@ -1,0 +1,19 @@
+src/receiver-stream.c
+  s_5e582cb0c0bb07::t_4f8f5fcf5adbb2 185-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "4cd083d4df44fd49b92cb7d70ce2feef38992458",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
