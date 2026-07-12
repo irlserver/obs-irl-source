@@ -1,0 +1,40 @@
+CLAUDE.md
+  s_5e582cb0c0bb07::t_21c282b43ace33 87-88
+src/irl-source.c
+  s_5e582cb0c0bb07::t_943b6ff7c0f4bd 272-273
+  s_5e582cb0c0bb07::t_e4b149a2d587f9 134-141,147-150
+  s_5e582cb0c0bb07::t_cb980efe52b4b4 321-322
+src/receiver-video.c
+  s_5e582cb0c0bb07::t_e74d286e0b35e9 11-86
+  s_5e582cb0c0bb07::t_f31a1919bb79d9 155-158,162-163,169,172
+include/irl-source.h
+  s_5e582cb0c0bb07::t_f5c2534c045829 119,124-138
+  s_5e582cb0c0bb07::t_1180ce90d2db3b 139
+src/video-handler.c
+  s_5e582cb0c0bb07::t_cfe1cc0f2487c6 131-134
+src/receiver-internal.h
+  s_5e582cb0c0bb07::t_874c9f4a7e3bd2 23-25
+src/receiver-stream.c
+  s_5e582cb0c0bb07::t_f266ea6c6e3971 449
+  s_5e582cb0c0bb07::t_be202074405fd3 172-174
+  s_5e582cb0c0bb07::t_8d2c707d8cde2a 471
+  s_5e582cb0c0bb07::t_8702cace38055a 109-113
+src/receiver.c
+  s_5e582cb0c0bb07::t_9c7214a0baa460 124-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "a4b4b8daec24aa4a113bddc31e72f8a85b87b3d5",
+  "prompts": {},
+  "sessions": {
+    "s_5e582cb0c0bb07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a6da5d35-7122-459e-9120-d8dda3449d58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
