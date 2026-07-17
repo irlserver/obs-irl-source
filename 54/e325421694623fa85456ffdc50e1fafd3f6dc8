@@ -1,0 +1,24 @@
+.github/workflows/build.yml
+  s_0056064abcddbe::t_7184eb2c54ee08 36,38-55
+  s_0056064abcddbe::t_6c32cac5a58024 161
+  s_0056064abcddbe::t_e61b8ae8d1b447 84
+  s_0056064abcddbe::t_fba0704d2b91b5 71
+  s_0056064abcddbe::t_5cef11777ebb97 167,169-178,182-188,194-205,209,230,236-239,245-246,255
+  s_0056064abcddbe::t_8725f6d64a222d 78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "54e325421694623fa85456ffdc50e1fafd3f6dc8",
+  "prompts": {},
+  "sessions": {
+    "s_0056064abcddbe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e01ce99b-78ec-4127-a5aa-849d87a30e15",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
