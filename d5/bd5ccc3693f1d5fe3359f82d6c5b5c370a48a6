@@ -1,0 +1,29 @@
+include/irl-source.h
+  s_860c52d173782c::t_8e808d7f2b6760 190-200
+src/receiver-audio.c
+  s_860c52d173782c::t_a511a49dcb45e9 61-69
+  s_860c52d173782c::t_dca38317184d3d 566-576,583-607,622-633,635,637-638
+  s_860c52d173782c::t_21ff338b2bbefb 577-582,608-621,634,636
+  s_860c52d173782c::t_ea49d8db6ce56f 661-666
+  s_860c52d173782c::t_00b089a0e6cfdb 112-113
+src/receiver-stream.c
+  s_860c52d173782c::t_0ec4d380f3e3e3 493-494
+  s_860c52d173782c::t_3ce05d841caa27 466
+  s_860c52d173782c::t_5debbeb303e9f8 443-456
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d5bd5ccc3693f1d5fe3359f82d6c5b5c370a48a6",
+  "prompts": {},
+  "sessions": {
+    "s_860c52d173782c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "802932ee-be70-41bc-b26f-84b48a71ee15",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
