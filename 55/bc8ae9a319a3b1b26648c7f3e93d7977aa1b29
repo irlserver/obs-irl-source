@@ -1,0 +1,28 @@
+src/irl-source.c
+  s_3ac3402c787307::t_d76b6d227157fb 137-190
+  s_3ac3402c787307::t_63639b5ffc901b 538-545
+  s_3ac3402c787307::t_a0ca49886b1a62 396-399
+include/irl-source.h
+  s_3ac3402c787307::t_4df233416735f8 304-307
+README.md
+  s_3ac3402c787307::t_6f6b7eaa67e1e6 61
+  s_3ac3402c787307::t_d6bb959e38c6c0 95-96
+CLAUDE.md
+  s_3ac3402c787307::t_300c2905823931 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "55bc8ae9a319a3b1b26648c7f3e93d7977aa1b29",
+  "prompts": {},
+  "sessions": {
+    "s_3ac3402c787307": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2ee14c04-da63-4ba9-a62d-a9116d00a205",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
