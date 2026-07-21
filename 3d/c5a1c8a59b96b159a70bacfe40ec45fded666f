@@ -1,0 +1,21 @@
+src/receiver-audio.c
+  s_3ac3402c787307::t_36284e74242cd9 613-614
+include/irl-source.h
+  s_3ac3402c787307::t_5c1f3b72ba049d 54-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3dc5a1c8a59b96b159a70bacfe40ec45fded666f",
+  "prompts": {},
+  "sessions": {
+    "s_3ac3402c787307": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2ee14c04-da63-4ba9-a62d-a9116d00a205",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
