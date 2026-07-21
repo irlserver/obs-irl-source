@@ -1,0 +1,42 @@
+src/receiver.c
+  s_3ac3402c787307::t_6d4c6ae1b10247 81-84
+CLAUDE.md
+  s_3ac3402c787307::t_26a264020bc8cf 98-99
+src/receiver-stream.c
+  s_3ac3402c787307::t_6a7ab45fb4b1d8 471,473
+  s_3ac3402c787307::t_73fa2844038d1f 342-347
+src/receiver-audio.c
+  s_3ac3402c787307::t_759da4750e9c3a 843-848,853,857
+  s_3ac3402c787307::t_3a9a3f2d086531 523
+  s_3ac3402c787307::t_95f99997481d7b 480
+  s_3ac3402c787307::t_e58d73ea4cf482 316-317,322-324
+  s_3ac3402c787307::t_35395d75f9309e 501-502
+  s_3ac3402c787307::t_52bf009f84234f 774
+  s_3ac3402c787307::t_7173b9f833103f 1031-1032
+src/video-handler.c
+  s_3ac3402c787307::t_fb3def22ffcdb3 182-183
+include/irl-source.h
+  s_3ac3402c787307::t_d2aa153a79838a 84-87,91,96-99
+  s_3ac3402c787307::t_962b29cad6433e 109,111
+src/irl-source.c
+  s_3ac3402c787307::t_f228f4dc3afd2c 268
+  s_3ac3402c787307::t_92c9cb19ee7071 102-110,113,119-124
+src/receiver-decode.c
+  s_3ac3402c787307::t_f6ebe258b87dd1 127-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ae65a73da05f2ebfebf1000266fbd0129dddecb7",
+  "prompts": {},
+  "sessions": {
+    "s_3ac3402c787307": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2ee14c04-da63-4ba9-a62d-a9116d00a205",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
