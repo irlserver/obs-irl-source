@@ -1,0 +1,38 @@
+CLAUDE.md
+  s_3ac3402c787307::t_062971f9f576f6 73
+src/irl-source.c
+  s_3ac3402c787307::t_93616bd03490ef 403-416,418-419
+  s_3ac3402c787307::t_02815e9c8457de 95,97-99,101-113
+  s_3ac3402c787307::t_5471d8b8ab4a18 67-94,100,114-123
+  s_3ac3402c787307::t_4157c8657b0f11 96
+  s_3ac3402c787307::t_51703c5fbaedd6 12
+src/audio-buffer.c
+  s_3ac3402c787307::t_a4b2e7c5555e87 235-237,239-240,246-279,281
+  s_3ac3402c787307::t_09eca94a5e13d7 238
+  s_3ac3402c787307::t_534f04d7aeefa2 241-245
+  s_3ac3402c787307::t_28ccd09c5246ea 280
+  s_3ac3402c787307::t_b32cf5a781b6dd 282-284
+  s_3ac3402c787307::t_0481e9b7c35850 285-288
+include/audio-buffer.h
+  s_3ac3402c787307::t_9bd29784d45042 91-100
+docs/audio-pipeline.md
+  s_3ac3402c787307::t_a2bfde398eea9c 48-49
+README.md
+  s_3ac3402c787307::t_fd079155079909 108-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "ff62689b3f89a37faa52f6127e509d7cce499e87",
+  "prompts": {},
+  "sessions": {
+    "s_3ac3402c787307": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2ee14c04-da63-4ba9-a62d-a9116d00a205",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
