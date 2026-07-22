@@ -1,0 +1,19 @@
+CMakeLists.txt
+  s_b9369894bfd5e2::t_275776d8987ca0 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "4fd8e6f05eec09aee2758f8188ff381ce3589c67",
+  "prompts": {},
+  "sessions": {
+    "s_b9369894bfd5e2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f27cf1e0-2c36-4929-bbd5-a248602f88da",
+        "model": "claude-fable-5"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
