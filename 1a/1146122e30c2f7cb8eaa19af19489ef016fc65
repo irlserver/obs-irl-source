@@ -1,0 +1,22 @@
+deps/build-deps.sh
+  s_04d1fe0f945045::t_d093e80ef35100 631-639
+  s_04d1fe0f945045::t_e0bdf46586072e 711-713,715-716
+  s_04d1fe0f945045::t_d72833dc4a8b1c 689,692-696
+  s_04d1fe0f945045::t_5e57c20ac5fb85 644-648,653
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "1a1146122e30c2f7cb8eaa19af19489ef016fc65",
+  "prompts": {},
+  "sessions": {
+    "s_04d1fe0f945045": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e838c3a1-c113-4730-bdbe-c81df666eb66",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
