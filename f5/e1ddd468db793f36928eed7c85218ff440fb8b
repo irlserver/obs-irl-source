@@ -1,0 +1,24 @@
+CMakeLists.txt
+  s_04d1fe0f945045::t_49a40a1cad0be0 129-132,141
+scripts/verify-plugin.sh
+  s_04d1fe0f945045::t_b7db66f96cb480 63-68
+  s_04d1fe0f945045::t_4fb9045c8ecd5d 55-58
+deps/build-deps.sh
+  s_04d1fe0f945045::t_0d41d290c3f6b6 65-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f5e1ddd468db793f36928eed7c85218ff440fb8b",
+  "prompts": {},
+  "sessions": {
+    "s_04d1fe0f945045": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e838c3a1-c113-4730-bdbe-c81df666eb66",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "datagutt <datagutt@lekanger.no>"
+    }
+  }
+}
