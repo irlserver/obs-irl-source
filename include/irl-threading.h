@@ -169,7 +169,13 @@ typedef pthread_t irl_thread_t;
 
 static inline int irl_mutex_init(irl_mutex_t *m)
 {
-	return pthread_mutex_init(m, NULL);
+	pthread_mutexattr_t attr;
+	if (pthread_mutexattr_init(&attr) != 0)
+		return pthread_mutex_init(m, NULL);
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	int ret = pthread_mutex_init(m, &attr);
+	pthread_mutexattr_destroy(&attr);
+	return ret;
 }
 
 static inline void irl_mutex_destroy(irl_mutex_t *m)
