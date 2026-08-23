@@ -240,6 +240,8 @@ static void reset_runtime_state(struct irl_source *ctx)
 	ctx->audio_quality_events = 0;
 	ctx->audio_decoder_flushes = 0;
 	ctx->video_decoder_flushes = 0;
+	ctx->video_corrupt_frames = 0;
+	ctx->video_corrupt_held = 0;
 	ctx->fade_in_pending = false;
 	ctx->fade_in_frames_remaining = 0;
 	ctx->startup_audio_warmup_remaining_ms = 0;
@@ -345,6 +347,8 @@ static void irl_source_get_stats(void *data, calldata_t *cd)
 	int64_t obs_lead_ms = ctx->audio_last_obs_lead_ns / 1000000LL;
 	uint64_t audio_decoder_flushes = ctx->audio_decoder_flushes;
 	uint64_t video_decoder_flushes = ctx->video_decoder_flushes;
+	uint64_t video_corrupt_frames = ctx->video_corrupt_frames;
+	uint64_t video_corrupt_held = ctx->video_corrupt_held;
 	uint64_t reconnect_count = ctx->reconnect_count;
 	bool video_ts_init = ctx->video_ts_init;
 	uint64_t video_sys_base = ctx->video_sys_base;
@@ -389,6 +393,10 @@ static void irl_source_get_stats(void *data, calldata_t *cd)
 			 (long long)audio_decoder_flushes);
 	calldata_set_int(cd, "video_decoder_flushes",
 			 (long long)video_decoder_flushes);
+	calldata_set_int(cd, "video_corrupt_frames",
+			 (long long)video_corrupt_frames);
+	calldata_set_int(cd, "video_corrupt_held",
+			 (long long)video_corrupt_held);
 	calldata_set_int(cd, "video_lead_ms", (long long)video_lead_ms);
 	calldata_set_int(cd, "video_lead_excess",
 			 (long long)video_lead_excess);
@@ -482,6 +490,7 @@ void *irl_source_create(obs_data_t *settings, obs_source_t *source)
 		"out int audio_output_restarts, out int obs_lead_ms, "
 		"out int audio_decoder_flushes, "
 		"out int video_decoder_flushes, "
+		"out int video_corrupt_frames, out int video_corrupt_held, "
 		"out int video_lead_ms, out int video_lead_excess, "
 		"out int stream_delay_ms, out bool low_latency_audio, "
 		"out int reconnect_count)",

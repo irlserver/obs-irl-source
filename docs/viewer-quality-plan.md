@@ -7,8 +7,10 @@ and video cadence freezes.
 ## Policy
 
 - Prefer silence over jittery, glitchy, metallic, or artifacty audio.
-- Prefer timestamped damaged frames over cadence freezes; avoid gray/blank
-  frames and decoder reset storms.
+- Prefer timestamped damaged frames over cadence freezes when the damaged
+  frame is still a picture (H.264 concealment); prefer a freeze on the last
+  good frame over gray (HEVC missing references). Avoid gray/blank frames and
+  decoder reset storms.
 - Prefer bounded latency movement over continuous audio stretching, while
   preserving the plugin's latency advantage over multi-second Media Source
   buffering.
@@ -38,11 +40,16 @@ so a single log line describes the health of the whole path.
 ## Video behavior
 
 - First-keyframe gating is on by default.
-- Timestamped damaged frames are passed through during decoder corruption so
-  video cadence stays smooth.
-- Damaged decoder state is flushed conservatively (only after repeated
-  consecutive errors, with a cooldown) so one bad packet does not cause a reset
-  storm.
+- Timestamped damaged H.264 frames are passed through during decoder
+  corruption so video cadence stays smooth: H.264 concealment patches a damaged
+  frame from the previous one, which is a usable picture.
+- HEVC frames predicted from a missing reference are held back. HEVC has no
+  concealment; FFmpeg synthesizes the missing reference as flat gray, so the
+  choice is between a gray GOP and a freeze on the last good frame, and the
+  freeze wins. Resumes at the next keyframe; `video_corrupt_held` counts them.
+- The video decoder is never flushed. A flush clears the reference buffer and
+  the decoder's recovery state, which is a guaranteed gray GOP on both codecs;
+  repeated errors are counted and logged instead.
 - Smooth frame cadence is preferred over last-good-frame freezes; gray frame
   output is avoided.
 
@@ -63,3 +70,8 @@ When validating against live lossy SRT logs:
   audible.
 - Video corruption logs do not imply audio corruption unless audio decoder or
   PTS diagnostics also show damage.
+- `corrupt=` in the stats line (`video_corrupt_frames`) is frames the decoder
+  flagged as damaged; `held=` (`video_corrupt_held`) is the HEVC subset that
+  was kept off screen. A `held` count that keeps climbing on an HEVC stream
+  means references are being lost faster than keyframes arrive: shorten the
+  encoder's keyframe interval or give SRT more latency to retransmit.

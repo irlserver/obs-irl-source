@@ -7,7 +7,7 @@ How the plugin keeps audio stable on unreliable mobile connections, and how the 
 The output policy is viewer-first:
 
 - Prefer short silence over jittery, glitchy, metallic, or artifacty audio.
-- Prefer smooth video cadence; timestamped damaged frames are better than freezes, while gray/blank frames and decoder reset storms should be avoided.
+- Prefer smooth video cadence; timestamped damaged frames are better than freezes when they are still a picture (H.264 concealment), while gray frames (HEVC missing references, which are held back instead), blank frames and decoder reset storms should be avoided.
 - Prefer bounded latency movement over aggressive time-stretching.
 - Expose every recovery mechanism in stats, so tuning runs off counters instead of guesswork.
 
@@ -125,7 +125,7 @@ When there is no audio playout mapping yet (audio-less start), video falls back 
 | Sender clock drift / slow latency creep | Buffer grows forever, latency increases | Bounded speed correction drains the creep gradually while video stays synced to audio |
 | RTMP congestion with a buffering encoder | Stream skips ahead or dies | Stream pauses, resumes exactly where it stopped, and bleeds the extra delay off at up to +5% speed |
 | Connection drops and reconnects | Loud click on disconnect, possibly corrupted frames on reconnect | Fade out, clean reconnect, keyframe gate, fade in |
-| Decoder corruption | Gray/corrupt flicker until manual restart | Timestamped damaged frames are passed through to preserve cadence; decoder state is flushed only on repeated hard errors |
+| Decoder corruption | Gray/corrupt flicker until manual restart | H.264: timestamped concealed frames are passed through to preserve cadence. HEVC: frames predicted from a missing reference (rendered gray by FFmpeg) are held back until the next keyframe. The video decoder is never flushed; only the audio decoder is, on repeated hard errors |
 | Long stream (hours) | Timestamp epoch causes OBS sync issues | Timestamps are repaired and anchored to system clock |
 
 The tradeoff: buffered mode is more resilient to short stalls, but adds intentional latency. Low-latency mode reacts faster and works better with OBS async unbuffered audio, but it gives up most of that jitter cushion. For rough SRTLA field conditions, buffered mode should still be the default. Low-latency mode is there when absolute latency matters more than smoothing over short network wobble.

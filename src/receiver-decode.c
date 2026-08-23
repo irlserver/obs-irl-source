@@ -133,6 +133,37 @@ void irl_handle_audio_packet(struct irl_source *ctx, AVPacket *pkt,
 	drain_audio_frames(ctx, frame);
 }
 
+/* The video decoder is never flushed on a corruption burst, unlike the audio
+ * one above. avcodec_flush_buffers() empties the reference picture buffer
+ * and clears the decoder's recovery state, and neither the H.264 nor the
+ * HEVC decoder can produce a real picture again until the next IDR/CRA:
+ * h264dec paints every frame gray until it sees a recovery point
+ * (h264_slice.c, `!h->frame_recovered`), and the HEVC decoder synthesizes
+ * each missing reference as a flat mid-gray frame (hevc/refs.c
+ * generate_missing_ref) that every later P-frame is predicted from. So the
+ * flush turned "a few damaged frames" into a whole GOP of gray — one to two
+ * seconds at the keyframe intervals IRL encoders use — on exactly the lossy
+ * streams it was meant to help. A decoder error on a live stream is a
+ * property of the packet, not of the decoder's state; the next intact
+ * packet decodes fine without any reset, and the reference chain heals at
+ * the next keyframe either way. The burst is still counted and logged so it
+ * shows up in diagnostics. */
+static void note_video_decode_error(struct irl_source *ctx, const char *stage)
+{
+	ctx->video_decode_errors++;
+	ctx->video_corrupted = true;
+	if (ctx->video_decode_errors < 3)
+		return;
+	uint64_t now_us = (uint64_t)av_gettime();
+	if (should_log_decoder_warning(&ctx->video_last_decoder_warning_time_us,
+				       now_us)) {
+		blog(LOG_WARNING,
+		     "[irl-source] Video decoder %s: corruption burst (%d consecutive errors), waiting for the next keyframe",
+		     stage, ctx->video_decode_errors);
+	}
+	ctx->video_decode_errors = 0;
+}
+
 /* Video counterpart of drain_audio_frames(): same loop as before, moved so
  * the EAGAIN retry can reuse it. */
 static void drain_video_frames(struct irl_source *ctx, AVFrame *frame)
@@ -142,28 +173,7 @@ static void drain_video_frames(struct irl_source *ctx, AVFrame *frame)
 		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
 			break;
 		if (ret < 0) {
-			ctx->video_decode_errors++;
-			ctx->video_corrupted = true;
-			if (ctx->video_decode_errors >= 3) {
-				uint64_t now_us = (uint64_t)av_gettime();
-				bool do_flush = should_flush_decoder(
-					&ctx->video_last_decoder_flush_time_us,
-					now_us);
-				if (should_log_decoder_warning(
-					    &ctx->video_last_decoder_warning_time_us,
-					    now_us)) {
-					blog(LOG_WARNING,
-					     "[irl-source] Video decoder receive: corruption burst (%d consecutive errors)%s",
-					     ctx->video_decode_errors,
-					     do_flush ? ", flushing"
-						      : ", flush cooldown active");
-				}
-				if (do_flush) {
-					avcodec_flush_buffers(ctx->video_dec_ctx);
-					ctx->video_decoder_flushes++;
-				}
-				ctx->video_decode_errors = 0;
-			}
+			note_video_decode_error(ctx, "receive");
 			break;
 		}
 
@@ -218,27 +228,7 @@ void irl_handle_video_packet(struct irl_source *ctx, AVPacket *pkt,
 			ctx->video_pkt_dropped++;
 	}
 	if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
-		ctx->video_decode_errors++;
-		ctx->video_corrupted = true;
-		if (ctx->video_decode_errors >= 3) {
-			uint64_t now_us = (uint64_t)av_gettime();
-			bool do_flush = should_flush_decoder(
-				&ctx->video_last_decoder_flush_time_us, now_us);
-			if (should_log_decoder_warning(
-				    &ctx->video_last_decoder_warning_time_us,
-				    now_us)) {
-				blog(LOG_WARNING,
-				     "[irl-source] Video decoder: corruption burst (%d consecutive errors)%s",
-				     ctx->video_decode_errors,
-				     do_flush ? ", flushing"
-					      : ", flush cooldown active");
-			}
-			if (do_flush) {
-				avcodec_flush_buffers(ctx->video_dec_ctx);
-				ctx->video_decoder_flushes++;
-			}
-			ctx->video_decode_errors = 0;
-		}
+		note_video_decode_error(ctx, "send");
 	} else {
 		ctx->video_decode_errors = 0;
 	}

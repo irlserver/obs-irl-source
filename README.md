@@ -193,7 +193,7 @@ The plugin optimizes for what viewers hear and see, not for preserving every dam
 
 - Audio must not sound jittery, glitchy, metallic, or artifacty. If audio cannot be reconstructed cleanly, short silence is preferred over audible corruption.
 - Audio content is never skipped once playback has started. Backlog from a stall is played back slightly sped up (up to +5%) until latency returns to target.
-- Video cadence should stay smooth. During decoder damage, timestamped damaged frames are preferable to freezes; avoid gray/blank frames and decoder reset storms.
+- Video cadence should stay smooth. During decoder damage, timestamped damaged frames are preferable to freezes as long as they are a picture: H.264 concealment produces one, so those pass through; HEVC has no concealment and renders a missing reference as flat gray, so those frames are held and the last good frame stays up until the next keyframe. Avoid gray/blank frames and decoder reset storms.
 - Latency may drift if that protects viewer quality, but it should stay far below the 2 to 3 second live delay typical of an IRL SRT stream through the OBS Media Source. The source must never fall behind the OBS mix window, because that is what makes OBS add global audio buffering it never gives back.
 - Diagnostics should make the recovery path visible: interpolation, silence insertion, resets, trims, underruns, and playback mode are tracked separately.
 
@@ -230,12 +230,14 @@ The 70ms and 2000ms thresholds are fixed internally and match the libobs behavio
 - Low-delay decode: no B-frame reorder buffering, capped decode threading.
 - Zero-copy for supported pixel formats, planes go straight to OBS. Native 10-bit passthrough for YUV420P10LE (I010) and P010. Unsupported formats fall back to swscale.
 - Mid-stream resolution changes are detected and handled without recreating the source.
-- Damaged frames are passed through with their timestamps rather than dropped, which preserves cadence instead of freezing on every corrupt frame.
+- Damaged H.264 frames are passed through with their timestamps rather than dropped, which preserves cadence instead of freezing on every corrupt frame. HEVC frames predicted from a reference that never arrived are held back instead: HEVC has no error concealment, so FFmpeg synthesizes the missing reference as flat gray and everything predicted from it is gray until the next keyframe. The last good frame stays on screen for that stretch (`video_corrupt_held` counts them).
 - Video PTS is mapped through the audio playout offset for lip sync.
 
 ## Decoder recovery
 
-Repeated send or receive errors trigger a throttled decoder flush and a reset of bad timing state, for both audio and video. This is what stops SRT bitrate starvation from permanently breaking audio, which is the failure mode the built-in Media Source hits.
+Repeated audio decode errors trigger a throttled audio decoder flush and a reset of bad timing state. This is what stops SRT bitrate starvation from permanently breaking audio, which is the failure mode the built-in Media Source hits.
+
+The video decoder is deliberately never flushed. Flushing empties the reference picture buffer and clears the decoder's recovery state, and neither the H.264 nor the HEVC decoder produces a real picture again until the next keyframe: H.264 paints frames gray until a recovery point, HEVC synthesizes each missing reference as flat gray. On a lossy stream that turned a few damaged frames into a whole GOP of gray. A decode error on a live stream is a property of the packet, not of the decoder, so the next intact packet decodes fine without a reset. Bursts are still counted and logged (`video_corrupt_frames`, and the `corrupt=`/`held=` fields of the stats line).
 
 ## Compared with the Media Source
 
@@ -307,7 +309,9 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 | `audio_output_restarts` | int | Output clock restarts after the audio thread stalled (should stay 0) |
 | `obs_lead_ms` | int | How far ahead of real time audio is queued inside OBS (healthy is roughly 60 to 100ms) |
 | `audio_decoder_flushes` | int | Number of audio decoder flushes after repeated decode errors |
-| `video_decoder_flushes` | int | Number of video decoder flushes after repeated decode errors |
+| `video_decoder_flushes` | int | Always 0. The video decoder is no longer flushed (see Decoder recovery); kept so existing scripts keep working |
+| `video_corrupt_frames` | int | Decoded frames the decoder flagged as damaged (concealed slice errors on H.264, missing-reference prediction on HEVC) |
+| `video_corrupt_held` | int | HEVC frames held back instead of shown because they were predicted from a missing reference and would have rendered gray; the last good frame stays on screen until the next keyframe |
 | `video_lead_ms` | int | How far ahead of real time the last video frame was timestamped. Tracks the audio buffer; a value climbing well past Target Buffer and staying there means concealment has inflated the A/V mapping |
 | `video_lead_excess` | int | Frames whose lead exceeded what OBS's async queue can absorb. Harmless while the lead is steady; sustained growth is what makes OBS drop queued video |
 | `stream_delay_ms` | int | End-to-end stream delay (SRT latency + decode + buffering) |
@@ -319,7 +323,7 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 The plugin also logs stats to the OBS log every 30 seconds:
 
 ```
-[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 video_flushes=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
+[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 video_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
 ```
 
 A healthy stream shows `speed=1.000`, `underruns=0`, `restarts=0`, and a constant `chunk` size. `buf` plus `obs_lead` is your plugin-side latency (fill wanders inside a deadband around the target by design).
