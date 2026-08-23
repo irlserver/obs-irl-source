@@ -671,6 +671,8 @@ void irl_handle_stream_read_error(struct irl_source *ctx, int read_ret)
 	irl_reset_stream_timing_state(ctx);
 	irl_mark_audio_recovery(ctx, 2500000ULL);
 	ctx->fade_in_pending = true;
+	ctx->video_corrupt_frames = 0;
+	ctx->video_corrupt_held = 0;
 	irl_mutex_unlock(&ctx->audio_state_lock);
 
 	ctx->current_speed = 1.0f;
@@ -681,8 +683,6 @@ void irl_handle_stream_read_error(struct irl_source *ctx, int read_ret)
 	ctx->audio_quality_events = 0;
 	ctx->audio_decoder_flushes = 0;
 	ctx->video_decoder_flushes = 0;
-	ctx->video_corrupt_frames = 0;
-	ctx->video_corrupt_held = 0;
 	ctx->pts_repairs = 0;
 	ctx->pts_normalizations = 0;
 	ctx->pts_interpolations = 0;
