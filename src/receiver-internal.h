@@ -2,6 +2,7 @@
 
 #include "../include/irl-source.h"
 
+void irl_log_input_url(const char *action, const char *url);
 uint64_t irl_audio_output_claim(struct irl_source *ctx, int frames,
 				int out_rate);
 void irl_reset_stream_timing_state(struct irl_source *ctx);

@@ -16,6 +16,40 @@
 
 /* ── Helpers ──────────────────────────────────────────────── */
 
+void irl_log_input_url(const char *action, const char *url)
+{
+	char protocol[32] = {0};
+	char hostname[256] = {0};
+	int port = -1;
+
+	/* Paths, userinfo, query parameters, and fragments can all contain
+	 * credentials. av_url_split lets the log retain the useful endpoint
+	 * identity without ever copying those components. */
+	av_url_split(protocol, sizeof(protocol), NULL, 0, hostname,
+		     sizeof(hostname), &port, NULL, 0, url ? url : "");
+
+	if (!protocol[0]) {
+		blog(LOG_INFO, "[irl-source] %s: <redacted>", action);
+		return;
+	}
+
+	bool ipv6 = strchr(hostname, ':') != NULL;
+	if (hostname[0] && port >= 0) {
+		blog(LOG_INFO, "[irl-source] %s: %s://%s%s%s:%d", action,
+		     protocol, ipv6 ? "[" : "", hostname, ipv6 ? "]" : "",
+		     port);
+	} else if (hostname[0]) {
+		blog(LOG_INFO, "[irl-source] %s: %s://%s%s%s", action,
+		     protocol, ipv6 ? "[" : "", hostname, ipv6 ? "]" : "");
+	} else if (port >= 0) {
+		blog(LOG_INFO, "[irl-source] %s: %s://<redacted>:%d", action,
+		     protocol, port);
+	} else {
+		blog(LOG_INFO, "[irl-source] %s: %s://<redacted>", action,
+		     protocol);
+	}
+}
+
 static void config_free(struct irl_config *cfg)
 {
 	if (cfg->url) {
@@ -488,8 +522,7 @@ void *irl_source_create(obs_data_t *settings, obs_source_t *source)
 		irl_source_get_stats, ctx);
 
 	if (ctx->config.url) {
-		blog(LOG_INFO, "[irl-source] Created with URL: %s",
-		     ctx->config.url);
+		irl_log_input_url("Created with URL", ctx->config.url);
 		start_receiver(ctx);
 	} else {
 		blog(LOG_INFO, "[irl-source] Created with no URL configured");

@@ -426,7 +426,7 @@ static bool open_stream_attempt(struct irl_source *ctx, bool fast_probe)
 	apply_demuxer_options(&opts, ctx->config.url, ctx->config.ffmpeg_options,
 			      ctx->config.network_buffer_mb, fast_probe);
 
-	blog(LOG_INFO, "[irl-source] Connecting to: %s", ctx->config.url);
+	irl_log_input_url("Connecting to", ctx->config.url);
 
 	ctx->fmt_ctx = avformat_alloc_context();
 	if (!ctx->fmt_ctx) {
