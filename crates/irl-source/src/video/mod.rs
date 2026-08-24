@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::shared::Shared;
 
 pub use intake::VideoIntake;
+pub use thread::VideoThread;
 
 /// Where output frames go. Production is [`obs::SourceHandle`]; tests use a
 /// recording sink.
@@ -30,6 +31,5 @@ impl VideoSink for obs::SourceHandle {
 /// Video thread body: pop the queue, transfer to system memory, pace, convert
 /// and output; consume clear requests; drain on exit.
 pub fn video_thread(shared: Arc<Shared>) {
-    let _ = shared;
-    todo!("W2-C")
+    VideoThread::new(shared).run();
 }
