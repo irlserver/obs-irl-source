@@ -79,11 +79,13 @@ mod layout_test {
             .header(wrapper.to_string_lossy())
             .clang_arg(format!("-I{}", include_dir.display()))
             .clang_arg("-DHAVE_OBSCONFIG_H")
-            // libobs's graphics headers pull in the SSE intrinsics. Newer
-            // libclang (21+) parses them with a generic x86-64 target unless
-            // the features are named, and fails with "invalid conversion
-            // between vector type '__m128'". Harmless on older libclang.
-            .clang_args(["-mmmx", "-msse", "-msse2"])
+            // libobs's graphics headers reach SIMDe (util/sse-intrin.h),
+            // which with native aliases drags in clang's own xmmintrin/
+            // emmintrin — headers libclang 21 fails to parse under bindgen
+            // ("invalid conversion between vector type '__m128'"). None of
+            // the mirrored structs contain a SIMD type, so tell SIMDe to use
+            // its portable emulation and skip the intrinsic headers entirely.
+            .clang_arg("-DSIMDE_NO_NATIVE")
             // The comparison is spelled out by hand in layout_test.rs;
             // bindgen's own generated tests would only duplicate it.
             .layout_tests(false)
