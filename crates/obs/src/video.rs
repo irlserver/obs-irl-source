@@ -136,43 +136,53 @@ impl<'a> VideoFrame<'a> {
 
     /// Fill `color_matrix`, `color_range_min/max` and `full_range` through
     /// `video_format_get_parameters_for_format` (the C `setup_color_params`).
-    /// Falls back to BT.709 partial range when libobs rejects the combination.
+    /// Falls back to BT.709 when libobs rejects the colour space, and to
+    /// BT.709 limited range when it rejects the range as well.
+    ///
+    /// The C version ignores the return value, which leaves an all-zero matrix
+    /// behind for a combination libobs does not know. That is harmless for an
+    /// RGB frame (no conversion shader reads the matrix) but black for a YUV
+    /// one, so the retries are added here; `full_range` is kept consistent
+    /// with whichever range actually produced the matrix.
     #[must_use]
     pub fn colorimetry(mut self, cs: ColorSpace, range: ColorRange) -> Self {
         self.inner.full_range = range == ColorRange::Full;
 
-        let format = self.inner.format;
+        if self.fill_color_params(cs.to_sys(), range.to_sys()) {
+            return self;
+        }
+        if self.fill_color_params(obs_sys::video_colorspace::VIDEO_CS_709, range.to_sys()) {
+            return self;
+        }
+
+        self.inner.full_range = false;
+        self.fill_color_params(
+            obs_sys::video_colorspace::VIDEO_CS_709,
+            obs_sys::video_range_type::VIDEO_RANGE_PARTIAL,
+        );
+        self
+    }
+
+    /// One `video_format_get_parameters_for_format` call against the frame's
+    /// own colour arrays. `false` means libobs knows no parameters for the
+    /// combination and left them untouched.
+    fn fill_color_params(
+        &mut self,
+        cs: obs_sys::video_colorspace,
+        range: obs_sys::video_range_type,
+    ) -> bool {
         // SAFETY: the three out-parameters are the frame's own fixed-size
         // arrays (16 / 3 / 3 floats), exactly the widths libobs writes.
-        let ok = unsafe {
+        unsafe {
             obs_sys::video_format_get_parameters_for_format(
-                cs.to_sys(),
-                range.to_sys(),
-                format,
+                cs,
+                range,
+                self.inner.format,
                 self.inner.color_matrix.as_mut_ptr(),
                 self.inner.color_range_min.as_mut_ptr(),
                 self.inner.color_range_max.as_mut_ptr(),
             )
-        };
-
-        if !ok {
-            // libobs leaves the arrays untouched when it does not know the
-            // combination; BT.709 limited range is what every OBS source
-            // falls back to, and is what an unknown stream most likely is.
-            // SAFETY: as above.
-            unsafe {
-                obs_sys::video_format_get_parameters_for_format(
-                    obs_sys::video_colorspace::VIDEO_CS_709,
-                    obs_sys::video_range_type::VIDEO_RANGE_PARTIAL,
-                    format,
-                    self.inner.color_matrix.as_mut_ptr(),
-                    self.inner.color_range_min.as_mut_ptr(),
-                    self.inner.color_range_max.as_mut_ptr(),
-                )
-            };
         }
-
-        self
     }
 
     #[doc(hidden)]
