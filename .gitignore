@@ -8,3 +8,4 @@ deps/.build/
 *.dylib
 *.pdb
 .DS_Store
+.claude/

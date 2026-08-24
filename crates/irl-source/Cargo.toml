@@ -12,7 +12,12 @@ repository.workspace = true
 # cargo names the artifact libobs_irl_source.so / obs_irl_source.dll /
 # libobs_irl_source.dylib; scripts/package.sh renames it to obs-irl-source.*
 name = "obs_irl_source"
-crate-type = ["cdylib"]
+# rlib so crates/irl-source/tests/*.rs can import the plugin. Unit tests inside
+# the lib are off: rustc-link-arg-tests (which links libobs for test binaries)
+# only reaches integration-test targets, so every test lives under tests/.
+crate-type = ["cdylib", "rlib"]
+test = false
+doctest = false
 
 [features]
 default = []
