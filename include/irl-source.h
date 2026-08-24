@@ -521,9 +521,11 @@ struct irl_source {
 	uint64_t video_pkt_dropped;
 	uint64_t audio_pkt_dropped;
 	uint64_t audio_decoder_flushes;
+	/* Always 0: the video decoder is no longer flushed on a corruption
+	 * burst (see receiver-decode.c). Kept so scripts and websocket
+	 * clients that read it keep working. */
 	uint64_t video_decoder_flushes;
 	uint64_t audio_last_decoder_flush_time_us;
-	uint64_t video_last_decoder_flush_time_us;
 	uint64_t audio_last_decoder_warning_time_us;
 	uint64_t video_last_decoder_warning_time_us;
 
@@ -532,6 +534,13 @@ struct irl_source {
 	 * Cleared on next keyframe. */
 	bool video_corrupted;
 	bool video_skip_logged;
+	/* Decoded frames the decoder itself flagged as damaged
+	 * (decode_error_flags or AV_FRAME_FLAG_CORRUPT), and the subset
+	 * held back instead of shown: HEVC frames predicted from a missing
+	 * reference, which come out flat gray. Receiver thread writes. */
+	uint64_t video_corrupt_frames;
+	uint64_t video_corrupt_held;
+	bool video_hold_logged;
 
 	/* Keyframe gate.  Packet-level: don't feed the decoder at all
 	 * until a key packet arrives (avoids reference-miss error spam

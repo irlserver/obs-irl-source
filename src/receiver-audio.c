@@ -154,10 +154,10 @@ void irl_reset_stream_timing_state(struct irl_source *ctx)
 	ctx->video_frame_interval_ns = 0;
 	ctx->video_lead_ns = 0;
 	ctx->video_decode_errors = 0;
-	ctx->video_last_decoder_flush_time_us = 0;
 	ctx->video_last_decoder_warning_time_us = 0;
 	ctx->video_corrupted = false;
 	ctx->video_skip_logged = false;
+	ctx->video_hold_logged = false;
 }
 
 void irl_mark_audio_recovery(struct irl_source *ctx, uint64_t duration_us)

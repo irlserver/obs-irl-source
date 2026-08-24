@@ -671,6 +671,8 @@ void irl_handle_stream_read_error(struct irl_source *ctx, int read_ret)
 	irl_reset_stream_timing_state(ctx);
 	irl_mark_audio_recovery(ctx, 2500000ULL);
 	ctx->fade_in_pending = true;
+	ctx->video_corrupt_frames = 0;
+	ctx->video_corrupt_held = 0;
 	irl_mutex_unlock(&ctx->audio_state_lock);
 
 	ctx->current_speed = 1.0f;
@@ -751,7 +753,7 @@ void irl_log_receiver_stats(struct irl_source *ctx)
 	     "norm=%llu interp=%llu silence=%llu resets=%llu "
 	     "last_gap=%dms max_gap=%dms underruns=%llu resync_skips=%llu "
 	     "hidden_trims=%llu quality_events=%llu "
-	     "audio_flushes=%llu video_flushes=%llu vq_drops=%llu "
+	     "audio_flushes=%llu video_flushes=%llu corrupt=%llu held=%llu vq_drops=%llu "
 	     "obs_lead=%lldms chunk=%u@%u "
 	     "stream_chunk=%llums obs_chunk=%llums "
 	     "restarts=%llu av_drift=%lldms reanchors=%llu "
@@ -776,6 +778,8 @@ void irl_log_receiver_stats(struct irl_source *ctx)
 	     (unsigned long long)ctx->audio_quality_events,
 	     (unsigned long long)ctx->audio_decoder_flushes,
 	     (unsigned long long)ctx->video_decoder_flushes,
+	     (unsigned long long)ctx->video_corrupt_frames,
+	     (unsigned long long)ctx->video_corrupt_held,
 	     (unsigned long long)ctx->video_queue_drops,
 	     (long long)(ctx->audio_last_obs_lead_ns / 1000000LL),
 	     ctx->audio_last_frames_out, ctx->audio_last_samples_per_sec,

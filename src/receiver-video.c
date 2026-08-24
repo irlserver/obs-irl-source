@@ -334,7 +334,52 @@ void irl_handle_video_frame(struct irl_source *ctx, AVFrame *frame)
 	if (is_keyframe)
 		ctx->video_corrupted = false;
 
-	if (ctx->video_corrupted || frame->decode_error_flags != 0) {
+	/* Damage the decoder reported on this frame. Both flags, because the
+	 * decoders disagree on which to set: h264dec sets decode_error_flags
+	 * on a frame it concealed and AV_FRAME_FLAG_CORRUPT only on frames
+	 * before its first recovery point, while the HEVC decoder never sets
+	 * decode_error_flags at all and reports its one kind of damage — a
+	 * missing reference — as AV_FRAME_FLAG_CORRUPT on every frame
+	 * predicted from it, until the next IDR/CRA. Checking only
+	 * decode_error_flags left HEVC damage invisible. */
+	bool frame_corrupt = (frame->flags & AV_FRAME_FLAG_CORRUPT) != 0;
+	bool frame_damaged = frame_corrupt || frame->decode_error_flags != 0;
+	if (frame_damaged) {
+		irl_mutex_lock(&ctx->audio_state_lock);
+		ctx->video_corrupt_frames++;
+		irl_mutex_unlock(&ctx->audio_state_lock);
+	}
+
+	/* HEVC has no error concealment: a reference that never arrived is
+	 * synthesized as a flat mid-gray picture (hevc/refs.c
+	 * generate_missing_ref; under hwaccel it is whatever stale surface
+	 * the pool hands back), and everything predicted from it is gray with
+	 * residuals painted on top. That is a worse picture than the last good
+	 * frame, so hold it back and let OBS keep showing what it has; the
+	 * chain heals at the next keyframe, and the decoder clears the flag
+	 * there. H.264 keeps the passthrough: its concealment patches a
+	 * damaged frame from the previous one, which is a usable picture, and
+	 * its AV_FRAME_FLAG_CORRUPT never fires past the keyframe gate. */
+	if (frame_corrupt && ctx->video_dec_ctx &&
+	    ctx->video_dec_ctx->codec_id == AV_CODEC_ID_HEVC) {
+		irl_mutex_lock(&ctx->audio_state_lock);
+		ctx->video_corrupt_held++;
+		irl_mutex_unlock(&ctx->audio_state_lock);
+		if (!ctx->video_hold_logged) {
+			blog(LOG_WARNING,
+			     "[irl-source] HEVC frame predicted from a missing reference; holding the last good frame until the next keyframe");
+			ctx->video_hold_logged = true;
+		}
+		return;
+	}
+	if (ctx->video_hold_logged) {
+		blog(LOG_INFO,
+		     "[irl-source] Keyframe received, HEVC video resumed (%llu frames held this connection)",
+		     (unsigned long long)ctx->video_corrupt_held);
+		ctx->video_hold_logged = false;
+	}
+
+	if (ctx->video_corrupted || frame_damaged) {
 		if (!ctx->video_skip_logged) {
 			blog(LOG_WARNING,
 			     "[irl-source] Passing through corrupt video frames to preserve cadence");
