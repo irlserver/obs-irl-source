@@ -8,14 +8,19 @@
 #[macro_use]
 mod log;
 
-pub mod audio;
-mod config;
-pub mod receiver;
 mod settings;
-pub mod shared;
-mod source;
+
+// Public only so the integration tests under `tests/` (a separate crate) can
+// reach them. Nothing here widens what the plugin exposes to OBS: a cdylib
+// exports its `#[unsafe(no_mangle)]` items and nothing else.
+pub mod audio;
+pub mod receiver;
 pub mod video;
 mod websocket;
+
+pub mod config;
+pub mod shared;
+pub mod source;
 
 obs::declare_module! {
     module_name: "obs-irl-source",

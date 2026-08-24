@@ -63,7 +63,7 @@ Or, from the zip:
 
 ### Linux
 
-The release binary bundles its own media stack but still links your distribution's libobs, so it is built against Ubuntu's. On other distributions, build from source instead (see [Building from source](#building-from-source)).
+The release binary bundles its own media stack and resolves libobs symbols from the OBS process at load time rather than linking a libobs, so the OBS version it was built against does not matter. It is still compiled against Ubuntu's glibc; on an older distribution, build from source instead (see [Building from source](#building-from-source)).
 
 1. Close OBS
 2. Extract the tarball into `~/.config/obs-studio/plugins/`
@@ -107,7 +107,7 @@ Earlier versions exposed Min/Max Buffer, PTS gap thresholds, Network Buffer and 
 
 The plugin exposes live stats that a Lua or Python script can read, so you can put a status overlay on your own stream or on a monitor.
 
-Create a Text (GDI+) source called `IRL Stats`, then add [`irl-stats.lua`](irl-stats.lua) as a Lua script in OBS (Tools → Scripts). It polls the source's `get_stats` proc handler once a second and writes the formatted stats into the text source. Edit the two source names in `update_stats` if yours differ.
+Create a Text (GDI+) source called `IRL Stats`, then add [`irl-stats.lua`](irl-stats.lua) as a Lua script in OBS (Tools → Scripts). It polls the source's `get_stats` proc handler once a second and writes the formatted stats into the text source. It finds the IRL source by its plugin id, so renaming the source does not break it; the script properties let you name a specific one (for a scene with more than one) and change the text source.
 
 The full list of readable fields is in [Stats reference](#stats-reference).
 
@@ -309,7 +309,6 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 | `audio_output_restarts` | int | Output clock restarts after the audio thread stalled (should stay 0) |
 | `obs_lead_ms` | int | How far ahead of real time audio is queued inside OBS (healthy is roughly 60 to 100ms) |
 | `audio_decoder_flushes` | int | Number of audio decoder flushes after repeated decode errors |
-| `video_decoder_flushes` | int | Always 0. The video decoder is no longer flushed (see Decoder recovery); kept so existing scripts keep working |
 | `video_corrupt_frames` | int | Decoded frames the decoder flagged as damaged (concealed slice errors on H.264, missing-reference prediction on HEVC) |
 | `video_corrupt_held` | int | HEVC frames held back instead of shown because they were predicted from a missing reference and would have rendered gray; the last good frame stays on screen until the next keyframe |
 | `video_lead_ms` | int | How far ahead of real time the last video frame was timestamped. Tracks the audio buffer; a value climbing well past Target Buffer and staying there means concealment has inflated the A/V mapping |
@@ -323,38 +322,53 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 The plugin also logs stats to the OBS log every 30 seconds:
 
 ```
-[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 video_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
+[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
 ```
 
 A healthy stream shows `speed=1.000`, `underruns=0`, `restarts=0`, and a constant `chunk` size. `buf` plus `obs_lead` is your plugin-side latency (fill wanders inside a deadband around the target by design).
 
 ## Building from source
 
-### Linux
+The plugin is a Rust workspace under `crates/`, built with cargo. It statically links its own FFmpeg, libsrt, librist and mbedTLS rather than using OBS's, so building that stack is the first step; it only has to happen again when a version in `deps/versions.env` changes. See `deps/README.md` for the details.
 
-The plugin statically links its own FFmpeg, libsrt, librist and mbedTLS rather than using OBS's. Building that stack is the first step, and it only has to happen again when a version in `deps/versions.env` changes. See `deps/README.md` for the details.
+libobs is neither built nor linked: the plugin binds to it through hand-written FFI (`crates/obs-sys`) and resolves the symbols from the OBS process at load time. libclang is a build dependency, because bindgen generates the FFmpeg bindings during the build.
+
+### Linux
 
 ```bash
 sudo apt install build-essential cmake pkg-config nasm meson ninja-build \
-    libobs-dev libva-dev
+    clang libclang-dev libobs-dev libva-dev
 ./deps/build-deps.sh
-cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --parallel
+cargo build --release
+./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 ```
+
+`libobs-dev` is not needed for the plugin itself. It is what lets `cargo test` link the test binaries that call libobs, and what `cargo test -p obs-sys --features layout-test` checks the hand-written structs against.
 
 ### Windows (MSVC)
 
-Requires Visual Studio 2026, plus OBS source and obs-deps to build libobs (see `.github/workflows/build.yml` for the exact versions CI uses). `deps/build-deps.sh` runs under MSYS2 with the MSVC environment active, because FFmpeg's configure needs a POSIX shell even when it is driving `cl.exe`.
+Requires Visual Studio 2026 and LLVM (for libclang). `deps/build-deps.sh` runs under MSYS2 with the MSVC environment active, because FFmpeg's configure needs a POSIX shell even when it is driving `cl.exe`; the cargo build itself runs from a normal MSVC prompt. See the `windows-x64` job in `.github/workflows/build.yml` for the exact setup.
 
 ```powershell
-# Clone OBS and download pre-built dependencies (for libobs only)
-git clone --depth 1 --branch 32.1.2 https://github.com/obsproject/obs-studio.git obs-src
-# Download obs-deps from https://github.com/obsproject/obs-deps/releases
-# Install SIMDe headers or add them to CMAKE_PREFIX_PATH
-
-# Build
-cmake -B build -G "Visual Studio 18 2026" -A x64 -DOBS_SOURCE_DIR=obs-src
-cmake --build build --config RelWithDebInfo
+$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
+cargo build --release
 ```
 
-Earlier versions dynamically linked the FFmpeg that OBS bundles, and OBS lines differ in FFmpeg major version, which is why release archives used to be built per OBS line. Bundling removed that constraint. `-DIRL_BUNDLED_FFMPEG=OFF` restores the old behaviour for a quick compile check against a system FFmpeg.
+### macOS (Apple Silicon)
+
+```bash
+brew install cmake pkg-config nasm meson ninja
+./deps/build-deps.sh
+cargo build --release
+./scripts/verify-plugin.sh target/release/libobs_irl_source.dylib
+```
+
+### Packaging
+
+cargo names the artifact `libobs_irl_source.so`, `obs_irl_source.dll` or `libobs_irl_source.dylib`. `scripts/package.sh` renames it and stages the platform's install layout, which is what the release workflow runs:
+
+```bash
+scripts/package.sh linux target/release dist
+```
+
+Earlier versions dynamically linked the FFmpeg that OBS bundles, and OBS lines differ in FFmpeg major version, which is why release archives used to be built per OBS line. Bundling removed that constraint; version 2.0.0 removed the remaining CMake and libobs build steps with the move to Rust and cargo.
