@@ -5,6 +5,11 @@ fn main() {
         // libobs symbols resolve against the host process at load time.
         "macos" => {
             println!("cargo::rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
+            // rustc gives a cdylib an LC_ID_DYLIB of its absolute build path;
+            // verify-plugin.sh rejects non-system absolute paths in the load
+            // commands. An @rpath id is inert for OBS (plugins load by path)
+            // and keeps the artifact free of builder paths.
+            println!("cargo::rustc-cdylib-link-arg=-Wl,-install_name,@rpath/obs-irl-source");
             println!("cargo::rustc-link-arg-tests=-Wl,-undefined,dynamic_lookup");
         }
         // rustc already restricts a cdylib's exports to #[no_mangle] items via
