@@ -172,3 +172,112 @@ pub const RTMP_BUFFER_MS: i64 = 1000;
 pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 /// Interval of the periodic receiver stats log line.
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
+
+/// Ring capacity when the format is degenerate and `4 × max_ms` works out to
+/// nothing (`audio_buffer_init`'s `buf->capacity = 65536` fallback).
+pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every constant, pinned against the value it has in the C plugin, so a
+    /// typo in one of the tables above is caught once rather than diagnosed
+    /// from a stream that sounds slightly wrong.
+    ///
+    /// The C source of each value is in the comment beside it: `irl-source.h`
+    /// unless a file is named.
+    #[test]
+    fn consts_match_c_values() {
+        // ── identity ──
+        assert_eq!(SOURCE_ID, "irl_source"); // IRL_SOURCE_ID
+        assert_eq!(VENDOR_NAME, "obs-irl-source"); // websocket-vendor.c
+        assert_eq!(VENDOR_API_VERSION, 1); // websocket-vendor.c
+
+        // ── settings defaults ──
+        assert_eq!(DEFAULT_RECONNECT_DELAY_S, 2); // IRL_DEFAULT_RECONNECT_DELAY
+        assert_eq!(RECONNECT_DELAY_MIN_S, 1); // settings.c
+        assert_eq!(RECONNECT_DELAY_MAX_S, 60); // settings.c
+        assert_eq!(NETWORK_BUFFER_MB, 2); // IRL_DEFAULT_NETWORK_BUFFER_MB
+        assert_eq!(DEFAULT_BUFFER_TARGET_MS, 120); // IRL_DEFAULT_BUFFER_TARGET_MS
+        assert_eq!(BUFFER_TARGET_MIN_MS, 20); // settings.c
+        assert_eq!(BUFFER_TARGET_MAX_MS, 2000); // settings.c
+        assert_eq!(BUFFER_TARGET_STEP_MS, 10); // settings.c
+        const { assert!(DEFAULT_ADAPTIVE_SPEED) }; // IRL_DEFAULT_ADAPTIVE_SPEED
+        const { assert!(DEFAULT_WAIT_FOR_KEYFRAME) }; // IRL_DEFAULT_WAIT_KEYFRAME
+        const { assert!(!DEFAULT_LOW_LATENCY_AUDIO) }; // IRL_DEFAULT_LOW_LATENCY_AUDIO
+        const { assert!(!DEFAULT_CLOSE_WHEN_INACTIVE) }; // IRL_DEFAULT_CLOSE_WHEN_INACTIVE
+        const { assert!(DEFAULT_CLEAR_ON_DISCONNECT) }; // IRL_DEFAULT_CLEAR_ON_DISCONNECT
+
+        // ── buffer watermarks ──
+        assert_eq!(BUFFER_MIN_DIVISOR, 2); // IRL_BUFFER_MIN_DIVISOR
+        assert_eq!(BUFFER_MIN_FLOOR_MS, 20); // IRL_BUFFER_MIN_FLOOR_MS
+        assert_eq!(BUFFER_MAX_EXTRA_MS, 200); // IRL_BUFFER_MAX_EXTRA_MS
+        assert_eq!(BUFFER_CAPACITY_MULTIPLIER, 4); // audio-buffer.c
+        assert_eq!(AUDIO_BUFFER_FALLBACK_CAPACITY, 65536); // audio-buffer.c
+
+        // ── PTS repair ──
+        assert_eq!(SMALL_GAP_MS, 70); // IRL_SMALL_GAP_MS
+        assert_eq!(LARGE_GAP_MS, 2000); // IRL_LARGE_GAP_MS
+        assert_eq!(PTS_SMALL_GAP_RELOCK_COUNT, 8); // pts-repair.c
+        assert_eq!(PTS_SMALL_GAP_TOLERANCE_MS, 2); // pts-repair.c
+        assert_eq!(PTS_RELOCK_STEP_MS, 2); // pts-repair.c
+        assert_eq!(AUDIO_PTS_MAX_CHUNKS, 256); // audio-buffer.h
+
+        // ── audio output ──
+        assert_eq!(FADE_DURATION_MS, 50); // IRL_FADE_DURATION_MS
+        assert_eq!(STARTUP_AUDIO_WARMUP_MS, 150); // IRL_STARTUP_AUDIO_WARMUP_MS
+        assert_eq!(BLEED_PACE_FILL_MS, 1000); // IRL_BLEED_PACE_FILL_MS
+        assert_eq!(AUDIO_OFFSET_REANCHOR_MARGIN_MS, 400); // AUDIO_OFFSET_REANCHOR_MARGIN_MS
+        assert_eq!(AUDIO_RECOVERY_HOLD_US, 1_500_000); // receiver-audio.c
+        assert_eq!(AUDIO_TRIM_TRIGGER_MS, 90); // receiver-audio.c
+        assert_eq!(AUDIO_CONCEAL_FADE_MS, 8); // receiver-audio.c
+        assert_eq!(AUDIO_OUT_LEAD_MS, 80); // receiver-audio.c
+        assert_eq!(AUDIO_OUT_MAX_LAG_MS, 150); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_MIN, 0.98); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_MAX, 1.05); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_DEADBAND_MS, 20); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_SMOOTHING, 0.05); // receiver-audio.c
+        assert_eq!(AUDIO_LL_MAX_FILL_MS, 100); // receiver-audio.c
+        assert_eq!(AUDIO_DRAIN_STUCK_US, 20_000_000); // receiver-audio.c
+        assert_eq!(AUDIO_DRAIN_STUCK_PROGRESS_MS, 100); // receiver-audio.c
+        assert_eq!(AUDIO_SOFT_COMPENSATION_MAX_SAMPLES, 8); // receiver-audio.c
+        assert_eq!(AUDIO_DEFAULT_FRAME_SAMPLES, 960); // receiver-audio.c
+        assert_eq!(AUDIO_PUMP_BURST, 16); // receiver.c
+        assert_eq!(AUDIO_PUMP_SLEEP_MS, 1); // receiver.c
+        assert_eq!(AUDIO_MAX_CHANNELS, 8); // receiver-audio.c
+
+        // ── decode ──
+        assert_eq!(DECODER_FLUSH_COOLDOWN_US, 350_000); // receiver-decode.c
+        assert_eq!(DECODER_WARNING_INTERVAL_US, 1_000_000); // receiver-decode.c
+        assert_eq!(DECODER_ERROR_BURST, 3); // receiver-decode.c
+        assert_eq!(VIDEO_DECODER_THREADS, 4); // receiver-stream.c
+        assert_eq!(VIDEO_QUEUE_SIZE, 4); // IRL_VIDEO_QUEUE_SIZE
+        assert_eq!(VIDEO_EXTRA_HW_FRAMES, 6); // receiver-stream.c
+
+        // ── video timing / pacing ──
+        assert_eq!(OBS_ASYNC_FRAME_BUDGET, 24); // IRL_OBS_ASYNC_FRAME_BUDGET
+        assert_eq!(VIDEO_LEAD_WARN_INTERVAL_NS, 10_000_000_000); // IRL_VIDEO_LEAD_WARN_INTERVAL_NS
+        assert_eq!(VIDEO_INTERVAL_MIN_NS, 4_000_000); // IRL_VIDEO_INTERVAL_MIN_NS
+        assert_eq!(VIDEO_INTERVAL_MAX_NS, 100_000_000); // IRL_VIDEO_INTERVAL_MAX_NS
+        assert_eq!(VIDEO_INTERVAL_DEFAULT_NS, 33_333_333); // IRL_VIDEO_INTERVAL_DEFAULT_NS
+        assert_eq!(VIDEO_PACING_MAX_FRAMES, 512); // IRL_VIDEO_PACING_MAX_FRAMES
+        assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824); // IRL_VIDEO_PACING_MAX_BYTES
+        assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
+        assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS
+        assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000); // IRL_VIDEO_OFFSET_HOLD_NS
+        assert_eq!(VIDEO_TS_CLAMP_NS, 500_000_000); // video-handler.c
+        assert_eq!(VIDEO_TS_CAP_NS, 200_000_000); // video-handler.c
+        assert_eq!(XFER_PLANE_ALIGN, 64); // video-handler.c
+        assert_eq!(XFER_DIM_ALIGN, 16); // video-handler.c (FFALIGN(w, 16))
+
+        // ── stream / network ──
+        assert_eq!(IO_STALL_TIMEOUT_US, 10_000_000); // IRL_IO_STALL_TIMEOUT_US
+        assert_eq!(PROBE_FAST, 1_000_000); // receiver-stream.c
+        assert_eq!(PROBE_FULL, 5_000_000); // receiver-stream.c
+        assert_eq!(SRT_LATENCY_US, 200_000); // receiver-stream.c
+        assert_eq!(RTMP_BUFFER_MS, 1000); // receiver-stream.c
+        assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // receiver-stream.c (7 * 4096)
+        assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000); // receiver-stream.c
+    }
+}
