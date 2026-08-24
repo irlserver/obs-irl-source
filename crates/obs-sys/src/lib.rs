@@ -464,37 +464,163 @@ pub struct obs_websocket_request_callback {
 
 // ── Functions ──────────────────────────────────────────────────────────
 //
-// W1-A fills this in. Every declaration must match the prototype in the libobs
-// header named in the comment, and the whole block (or each block) carries
-// `#[cfg_attr(windows, link(name = "obs", kind = "raw-dylib"))]`.
+// Every declaration matches the prototype in the libobs header named above
+// its group. `raw-dylib` on Windows means no import library is needed; on
+// Linux/macOS the symbols stay undefined and resolve against the libobs the
+// host process already loaded.
 //
-// Required set (58):
-//   obs.h: obs_register_source_s, obs_get_video_info, obs_get_proc_handler,
-//     obs_enum_sources, obs_enum_scenes, obs_get_source_by_name,
-//     obs_source_get_ref, obs_source_release, obs_source_get_name,
-//     obs_source_get_unversioned_id, obs_source_get_width, obs_source_get_height,
-//     obs_source_showing, obs_source_active, obs_source_output_video,
-//     obs_source_output_audio, obs_source_get_proc_handler,
-//     obs_source_set_async_unbuffered, obs_source_set_async_decoupled,
-//     obs_source_media_started
-//   obs-scene: obs_scene_from_source, obs_scene_enum_items,
-//     obs_sceneitem_get_source, obs_sceneitem_locked,
-//     obs_sceneitem_get_bounds_crop, obs_sceneitem_set_info2
-//   obs-data.h: obs_data_create, obs_data_release, obs_data_get_string,
-//     obs_data_get_int, obs_data_get_bool, obs_data_get_double,
-//     obs_data_set_string, obs_data_set_int, obs_data_set_bool,
-//     obs_data_set_double, obs_data_set_default_string,
-//     obs_data_set_default_int, obs_data_set_default_bool,
-//     obs_data_array_create, obs_data_array_push_back, obs_data_array_release,
-//     obs_data_set_array
-//   obs-properties.h: obs_properties_create, obs_properties_set_flags,
-//     obs_properties_add_text, obs_properties_add_int, obs_properties_add_bool,
-//     obs_properties_add_list, obs_property_list_add_int
-//   callback/calldata.h: calldata_get_data, calldata_set_data, calldata_get_string
-//   callback/proc.h: proc_handler_add, proc_handler_call
-//   obs-module.h / util/text-lookup.h: obs_module_load_locale,
-//     text_lookup_destroy, text_lookup_getstr
-//   util/base.h: blog (variadic; always called as blog(level, "%s", msg))
-//   util/platform.h: os_gettime_ns, os_sleep_ms
-//   util/bmem.h: bfree
-//   media-io/video-io.h: video_format_get_parameters_for_format
+// `obs_get_video_info` and `obs_sceneitem_set_info2` are declared with the
+// exact struct types, but their two call sites in the `obs` crate hand them a
+// pointer into an [`obs_video_info_slack`] / [`obs_transform_info_slack`], so
+// a newer libobs that appended a member cannot overrun the caller's frame.
+
+#[cfg_attr(windows, link(name = "obs", kind = "raw-dylib"))]
+unsafe extern "C" {
+    // ── obs-source.h ───────────────────────────────────────────────────
+    pub fn obs_register_source_s(info: *const obs_source_info, size: usize);
+
+    // ── obs.h: core ────────────────────────────────────────────────────
+    pub fn obs_get_video_info(ovi: *mut obs_video_info) -> bool;
+    pub fn obs_get_proc_handler() -> *mut proc_handler_t;
+    pub fn obs_enum_sources(
+        enum_proc: Option<unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool>,
+        param: *mut c_void,
+    );
+    pub fn obs_enum_scenes(
+        enum_proc: Option<unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool>,
+        param: *mut c_void,
+    );
+    pub fn obs_get_source_by_name(name: *const c_char) -> *mut obs_source_t;
+
+    // ── obs.h: sources ─────────────────────────────────────────────────
+    pub fn obs_source_get_ref(source: *mut obs_source_t) -> *mut obs_source_t;
+    pub fn obs_source_release(source: *mut obs_source_t);
+    pub fn obs_source_get_name(source: *const obs_source_t) -> *const c_char;
+    pub fn obs_source_get_unversioned_id(source: *const obs_source_t) -> *const c_char;
+    pub fn obs_source_get_width(source: *mut obs_source_t) -> u32;
+    pub fn obs_source_get_height(source: *mut obs_source_t) -> u32;
+    pub fn obs_source_showing(source: *const obs_source_t) -> bool;
+    pub fn obs_source_active(source: *const obs_source_t) -> bool;
+    pub fn obs_source_output_video(source: *mut obs_source_t, frame: *const obs_source_frame);
+    pub fn obs_source_output_audio(source: *mut obs_source_t, audio: *const obs_source_audio);
+    pub fn obs_source_get_proc_handler(source: *const obs_source_t) -> *mut proc_handler_t;
+    pub fn obs_source_set_async_unbuffered(source: *mut obs_source_t, unbuffered: bool);
+    pub fn obs_source_set_async_decoupled(source: *mut obs_source_t, decouple: bool);
+    pub fn obs_source_media_started(source: *mut obs_source_t);
+
+    // ── obs.h: scenes and scene items ──────────────────────────────────
+    pub fn obs_scene_from_source(source: *const obs_source_t) -> *mut obs_scene_t;
+    pub fn obs_scene_enum_items(
+        scene: *mut obs_scene_t,
+        callback: Option<
+            unsafe extern "C" fn(scene: *mut obs_scene_t, item: *mut obs_sceneitem_t, param: *mut c_void) -> bool,
+        >,
+        param: *mut c_void,
+    );
+    pub fn obs_sceneitem_get_source(item: *const obs_sceneitem_t) -> *mut obs_source_t;
+    pub fn obs_sceneitem_locked(item: *const obs_sceneitem_t) -> bool;
+    /// Added after OBS 30.0; present in the 32.1 floor the plugin targets.
+    pub fn obs_sceneitem_get_bounds_crop(item: *const obs_sceneitem_t) -> bool;
+    /// Added after OBS 30.0 (the `crop_to_bounds`-aware `obs_sceneitem_set_info`).
+    pub fn obs_sceneitem_set_info2(item: *mut obs_sceneitem_t, info: *const obs_transform_info);
+
+    // ── obs-data.h ─────────────────────────────────────────────────────
+    pub fn obs_data_create() -> *mut obs_data_t;
+    pub fn obs_data_release(data: *mut obs_data_t);
+    pub fn obs_data_get_string(data: *mut obs_data_t, name: *const c_char) -> *const c_char;
+    pub fn obs_data_get_int(data: *mut obs_data_t, name: *const c_char) -> i64;
+    pub fn obs_data_get_bool(data: *mut obs_data_t, name: *const c_char) -> bool;
+    pub fn obs_data_get_double(data: *mut obs_data_t, name: *const c_char) -> f64;
+    pub fn obs_data_set_string(data: *mut obs_data_t, name: *const c_char, val: *const c_char);
+    pub fn obs_data_set_int(data: *mut obs_data_t, name: *const c_char, val: i64);
+    pub fn obs_data_set_bool(data: *mut obs_data_t, name: *const c_char, val: bool);
+    pub fn obs_data_set_double(data: *mut obs_data_t, name: *const c_char, val: f64);
+    pub fn obs_data_set_default_string(data: *mut obs_data_t, name: *const c_char, val: *const c_char);
+    pub fn obs_data_set_default_int(data: *mut obs_data_t, name: *const c_char, val: i64);
+    pub fn obs_data_set_default_bool(data: *mut obs_data_t, name: *const c_char, val: bool);
+    pub fn obs_data_set_array(data: *mut obs_data_t, name: *const c_char, array: *mut obs_data_array_t);
+    pub fn obs_data_array_create() -> *mut obs_data_array_t;
+    pub fn obs_data_array_push_back(array: *mut obs_data_array_t, obj: *mut obs_data_t) -> usize;
+    pub fn obs_data_array_release(array: *mut obs_data_array_t);
+
+    // ── obs-properties.h ───────────────────────────────────────────────
+    pub fn obs_properties_create() -> *mut obs_properties_t;
+    pub fn obs_properties_set_flags(props: *mut obs_properties_t, flags: u32);
+    pub fn obs_properties_add_text(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+        type_: obs_text_type,
+    ) -> *mut obs_property_t;
+    pub fn obs_properties_add_int(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+        min: c_int,
+        max: c_int,
+        step: c_int,
+    ) -> *mut obs_property_t;
+    pub fn obs_properties_add_bool(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+    ) -> *mut obs_property_t;
+    pub fn obs_properties_add_list(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+        type_: obs_combo_type,
+        format: obs_combo_format,
+    ) -> *mut obs_property_t;
+    pub fn obs_property_list_add_int(p: *mut obs_property_t, name: *const c_char, val: i64) -> usize;
+
+    // ── callback/calldata.h ────────────────────────────────────────────
+    // The typed helpers around these three are `static inline` in the header
+    // and are reimplemented in the `obs` crate (`proc::CallData`).
+    pub fn calldata_get_data(data: *const calldata_t, name: *const c_char, out: *mut c_void, size: usize) -> bool;
+    pub fn calldata_set_data(data: *mut calldata_t, name: *const c_char, in_: *const c_void, new_size: usize);
+    pub fn calldata_get_string(data: *const calldata_t, name: *const c_char, str_: *mut *const c_char) -> bool;
+
+    // ── callback/proc.h ────────────────────────────────────────────────
+    pub fn proc_handler_add(
+        handler: *mut proc_handler_t,
+        decl_string: *const c_char,
+        proc: proc_handler_proc_t,
+        data: *mut c_void,
+    );
+    pub fn proc_handler_call(handler: *mut proc_handler_t, name: *const c_char, params: *mut calldata_t) -> bool;
+
+    // ── obs.h / util/text-lookup.h: module locale ──────────────────────
+    pub fn obs_module_load_locale(
+        module: *mut obs_module_t,
+        default_locale: *const c_char,
+        locale: *const c_char,
+    ) -> *mut lookup_t;
+    pub fn text_lookup_destroy(lookup: *mut lookup_t);
+    pub fn text_lookup_getstr(lookup: *mut lookup_t, lookup_val: *const c_char, out: *mut *const c_char) -> bool;
+
+    // ── util/base.h ────────────────────────────────────────────────────
+    /// Variadic. Always called as `blog(level, c"%s", msg)` so a `%` in the
+    /// message can never be read as a format directive.
+    pub fn blog(log_level: c_int, format: *const c_char, ...);
+
+    // ── util/platform.h ────────────────────────────────────────────────
+    pub fn os_gettime_ns() -> u64;
+    pub fn os_sleep_ms(duration: u32);
+
+    // ── util/bmem.h ────────────────────────────────────────────────────
+    pub fn bfree(ptr: *mut c_void);
+
+    // ── media-io/video-io.h ────────────────────────────────────────────
+    pub fn video_format_get_parameters_for_format(
+        color_space: video_colorspace,
+        range: video_range_type,
+        format: video_format,
+        matrix: *mut f32,
+        min_range: *mut f32,
+        max_range: *mut f32,
+    ) -> bool;
+}
+
+#[cfg(all(test, feature = "layout-test"))]
+mod layout_test;
