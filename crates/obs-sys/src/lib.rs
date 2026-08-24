@@ -16,7 +16,11 @@
 //! C plugin had to (librist's pthread shim colliding with w32-pthreads on
 //! MSVC) does not exist in Rust, and nothing here depends on it.
 
-#![allow(non_camel_case_types, non_upper_case_globals, clippy::missing_safety_doc)]
+#![allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    clippy::missing_safety_doc
+)]
 
 use core::ffi::{c_char, c_int, c_long, c_void};
 use core::marker::{PhantomData, PhantomPinned};
@@ -277,8 +281,9 @@ pub enum audio_format {
 
 pub const MAX_AV_PLANES: usize = 8;
 
-pub type obs_source_enum_proc_t =
-    Option<unsafe extern "C" fn(parent: *mut obs_source_t, child: *mut obs_source_t, param: *mut c_void)>;
+pub type obs_source_enum_proc_t = Option<
+    unsafe extern "C" fn(parent: *mut obs_source_t, child: *mut obs_source_t, param: *mut c_void),
+>;
 pub type proc_handler_proc_t = Option<unsafe extern "C" fn(data: *mut c_void, cd: *mut calldata_t)>;
 
 /// `struct obs_source_info`, OBS 32.1.2 field order (identical since 30.0).
@@ -293,7 +298,9 @@ pub struct obs_source_info {
     pub type_: obs_source_type,
     pub output_flags: u32,
     pub get_name: Option<unsafe extern "C" fn(type_data: *mut c_void) -> *const c_char>,
-    pub create: Option<unsafe extern "C" fn(settings: *mut obs_data_t, source: *mut obs_source_t) -> *mut c_void>,
+    pub create: Option<
+        unsafe extern "C" fn(settings: *mut obs_data_t, source: *mut obs_source_t) -> *mut c_void,
+    >,
     pub destroy: Option<unsafe extern "C" fn(data: *mut c_void)>,
     pub get_width: Option<unsafe extern "C" fn(data: *mut c_void) -> u32>,
     pub get_height: Option<unsafe extern "C" fn(data: *mut c_void) -> u32>,
@@ -306,26 +313,81 @@ pub struct obs_source_info {
     pub hide: Option<unsafe extern "C" fn(data: *mut c_void)>,
     pub video_tick: Option<unsafe extern "C" fn(data: *mut c_void, seconds: f32)>,
     pub video_render: Option<unsafe extern "C" fn(data: *mut c_void, effect: *mut gs_effect_t)>,
-    pub filter_video: Option<unsafe extern "C" fn(data: *mut c_void, frame: *mut obs_source_frame) -> *mut obs_source_frame>,
-    pub filter_audio: Option<unsafe extern "C" fn(data: *mut c_void, audio: *mut c_void) -> *mut c_void>,
-    pub enum_active_sources: Option<unsafe extern "C" fn(data: *mut c_void, enum_callback: obs_source_enum_proc_t, param: *mut c_void)>,
+    pub filter_video: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            frame: *mut obs_source_frame,
+        ) -> *mut obs_source_frame,
+    >,
+    pub filter_audio:
+        Option<unsafe extern "C" fn(data: *mut c_void, audio: *mut c_void) -> *mut c_void>,
+    pub enum_active_sources: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            enum_callback: obs_source_enum_proc_t,
+            param: *mut c_void,
+        ),
+    >,
     pub save: Option<unsafe extern "C" fn(data: *mut c_void, settings: *mut obs_data_t)>,
     pub load: Option<unsafe extern "C" fn(data: *mut c_void, settings: *mut obs_data_t)>,
-    pub mouse_click: Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, type_: i32, mouse_up: bool, click_count: u32)>,
-    pub mouse_move: Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, mouse_leave: bool)>,
-    pub mouse_wheel: Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, x_delta: c_int, y_delta: c_int)>,
+    pub mouse_click: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            event: *const c_void,
+            type_: i32,
+            mouse_up: bool,
+            click_count: u32,
+        ),
+    >,
+    pub mouse_move:
+        Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, mouse_leave: bool)>,
+    pub mouse_wheel: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            event: *const c_void,
+            x_delta: c_int,
+            y_delta: c_int,
+        ),
+    >,
     pub focus: Option<unsafe extern "C" fn(data: *mut c_void, focus: bool)>,
-    pub key_click: Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, key_up: bool)>,
+    pub key_click:
+        Option<unsafe extern "C" fn(data: *mut c_void, event: *const c_void, key_up: bool)>,
     pub filter_remove: Option<unsafe extern "C" fn(data: *mut c_void, source: *mut obs_source_t)>,
     pub type_data: *mut c_void,
     pub free_type_data: Option<unsafe extern "C" fn(type_data: *mut c_void)>,
-    pub audio_render: Option<unsafe extern "C" fn(data: *mut c_void, ts_out: *mut u64, audio_output: *mut c_void, mixers: u32, channels: usize, sample_rate: usize) -> bool>,
-    pub enum_all_sources: Option<unsafe extern "C" fn(data: *mut c_void, enum_callback: obs_source_enum_proc_t, param: *mut c_void)>,
+    pub audio_render: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            ts_out: *mut u64,
+            audio_output: *mut c_void,
+            mixers: u32,
+            channels: usize,
+            sample_rate: usize,
+        ) -> bool,
+    >,
+    pub enum_all_sources: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            enum_callback: obs_source_enum_proc_t,
+            param: *mut c_void,
+        ),
+    >,
     pub transition_start: Option<unsafe extern "C" fn(data: *mut c_void)>,
     pub transition_stop: Option<unsafe extern "C" fn(data: *mut c_void)>,
-    pub get_defaults2: Option<unsafe extern "C" fn(type_data: *mut c_void, settings: *mut obs_data_t)>,
-    pub get_properties2: Option<unsafe extern "C" fn(data: *mut c_void, type_data: *mut c_void) -> *mut obs_properties_t>,
-    pub audio_mix: Option<unsafe extern "C" fn(data: *mut c_void, ts_out: *mut u64, audio_output: *mut c_void, channels: usize, sample_rate: usize) -> bool>,
+    pub get_defaults2:
+        Option<unsafe extern "C" fn(type_data: *mut c_void, settings: *mut obs_data_t)>,
+    pub get_properties2: Option<
+        unsafe extern "C" fn(data: *mut c_void, type_data: *mut c_void) -> *mut obs_properties_t,
+    >,
+    pub audio_mix: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            ts_out: *mut u64,
+            audio_output: *mut c_void,
+            channels: usize,
+            sample_rate: usize,
+        ) -> bool,
+    >,
     pub icon_type: obs_icon_type,
     pub media_play_pause: Option<unsafe extern "C" fn(data: *mut c_void, pause: bool)>,
     pub media_restart: Option<unsafe extern "C" fn(data: *mut c_void)>,
@@ -339,7 +401,13 @@ pub struct obs_source_info {
     pub version: u32,
     pub unversioned_id: *const c_char,
     pub missing_files: Option<unsafe extern "C" fn(data: *mut c_void) -> *mut c_void>,
-    pub video_get_color_space: Option<unsafe extern "C" fn(data: *mut c_void, count: usize, preferred_spaces: *const gs_color_space) -> gs_color_space>,
+    pub video_get_color_space: Option<
+        unsafe extern "C" fn(
+            data: *mut c_void,
+            count: usize,
+            preferred_spaces: *const gs_color_space,
+        ) -> gs_color_space,
+    >,
     pub filter_add: Option<unsafe extern "C" fn(data: *mut c_void, source: *mut obs_source_t)>,
 }
 
@@ -453,8 +521,13 @@ pub struct calldata_t {
 /// registered through obs-websocket's proc handler with this callback record
 /// (from `obs-websocket-api.h`, API version 3), passed by address and copied
 /// by obs-websocket.
-pub type obs_websocket_request_callback_function =
-    Option<unsafe extern "C" fn(request_data: *mut obs_data_t, response_data: *mut obs_data_t, priv_data: *mut c_void)>;
+pub type obs_websocket_request_callback_function = Option<
+    unsafe extern "C" fn(
+        request_data: *mut obs_data_t,
+        response_data: *mut obs_data_t,
+        priv_data: *mut c_void,
+    ),
+>;
 
 #[repr(C)]
 pub struct obs_websocket_request_callback {
@@ -483,11 +556,15 @@ unsafe extern "C" {
     pub fn obs_get_video_info(ovi: *mut obs_video_info) -> bool;
     pub fn obs_get_proc_handler() -> *mut proc_handler_t;
     pub fn obs_enum_sources(
-        enum_proc: Option<unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool>,
+        enum_proc: Option<
+            unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool,
+        >,
         param: *mut c_void,
     );
     pub fn obs_enum_scenes(
-        enum_proc: Option<unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool>,
+        enum_proc: Option<
+            unsafe extern "C" fn(param: *mut c_void, source: *mut obs_source_t) -> bool,
+        >,
         param: *mut c_void,
     );
     pub fn obs_get_source_by_name(name: *const c_char) -> *mut obs_source_t;
@@ -513,7 +590,11 @@ unsafe extern "C" {
     pub fn obs_scene_enum_items(
         scene: *mut obs_scene_t,
         callback: Option<
-            unsafe extern "C" fn(scene: *mut obs_scene_t, item: *mut obs_sceneitem_t, param: *mut c_void) -> bool,
+            unsafe extern "C" fn(
+                scene: *mut obs_scene_t,
+                item: *mut obs_sceneitem_t,
+                param: *mut c_void,
+            ) -> bool,
         >,
         param: *mut c_void,
     );
@@ -535,16 +616,27 @@ unsafe extern "C" {
     pub fn obs_data_set_int(data: *mut obs_data_t, name: *const c_char, val: i64);
     pub fn obs_data_set_bool(data: *mut obs_data_t, name: *const c_char, val: bool);
     pub fn obs_data_set_double(data: *mut obs_data_t, name: *const c_char, val: f64);
-    pub fn obs_data_set_default_string(data: *mut obs_data_t, name: *const c_char, val: *const c_char);
+    pub fn obs_data_set_default_string(
+        data: *mut obs_data_t,
+        name: *const c_char,
+        val: *const c_char,
+    );
     pub fn obs_data_set_default_int(data: *mut obs_data_t, name: *const c_char, val: i64);
     pub fn obs_data_set_default_bool(data: *mut obs_data_t, name: *const c_char, val: bool);
-    pub fn obs_data_set_array(data: *mut obs_data_t, name: *const c_char, array: *mut obs_data_array_t);
+    pub fn obs_data_set_array(
+        data: *mut obs_data_t,
+        name: *const c_char,
+        array: *mut obs_data_array_t,
+    );
     pub fn obs_data_array_create() -> *mut obs_data_array_t;
     pub fn obs_data_array_push_back(array: *mut obs_data_array_t, obj: *mut obs_data_t) -> usize;
     pub fn obs_data_array_release(array: *mut obs_data_array_t);
 
     // ── obs-properties.h ───────────────────────────────────────────────
     pub fn obs_properties_create() -> *mut obs_properties_t;
+    /// Only reached when a half-built dialog is abandoned (a caught panic);
+    /// the normal path hands the object to libobs from `get_properties`.
+    pub fn obs_properties_destroy(props: *mut obs_properties_t);
     pub fn obs_properties_set_flags(props: *mut obs_properties_t, flags: u32);
     pub fn obs_properties_add_text(
         props: *mut obs_properties_t,
@@ -572,14 +664,32 @@ unsafe extern "C" {
         type_: obs_combo_type,
         format: obs_combo_format,
     ) -> *mut obs_property_t;
-    pub fn obs_property_list_add_int(p: *mut obs_property_t, name: *const c_char, val: i64) -> usize;
+    pub fn obs_property_list_add_int(
+        p: *mut obs_property_t,
+        name: *const c_char,
+        val: i64,
+    ) -> usize;
 
     // ── callback/calldata.h ────────────────────────────────────────────
     // The typed helpers around these three are `static inline` in the header
     // and are reimplemented in the `obs` crate (`proc::CallData`).
-    pub fn calldata_get_data(data: *const calldata_t, name: *const c_char, out: *mut c_void, size: usize) -> bool;
-    pub fn calldata_set_data(data: *mut calldata_t, name: *const c_char, in_: *const c_void, new_size: usize);
-    pub fn calldata_get_string(data: *const calldata_t, name: *const c_char, str_: *mut *const c_char) -> bool;
+    pub fn calldata_get_data(
+        data: *const calldata_t,
+        name: *const c_char,
+        out: *mut c_void,
+        size: usize,
+    ) -> bool;
+    pub fn calldata_set_data(
+        data: *mut calldata_t,
+        name: *const c_char,
+        in_: *const c_void,
+        new_size: usize,
+    );
+    pub fn calldata_get_string(
+        data: *const calldata_t,
+        name: *const c_char,
+        str_: *mut *const c_char,
+    ) -> bool;
 
     // ── callback/proc.h ────────────────────────────────────────────────
     pub fn proc_handler_add(
@@ -588,7 +698,11 @@ unsafe extern "C" {
         proc: proc_handler_proc_t,
         data: *mut c_void,
     );
-    pub fn proc_handler_call(handler: *mut proc_handler_t, name: *const c_char, params: *mut calldata_t) -> bool;
+    pub fn proc_handler_call(
+        handler: *mut proc_handler_t,
+        name: *const c_char,
+        params: *mut calldata_t,
+    ) -> bool;
 
     // ── obs.h / util/text-lookup.h: module locale ──────────────────────
     pub fn obs_module_load_locale(
@@ -597,7 +711,11 @@ unsafe extern "C" {
         locale: *const c_char,
     ) -> *mut lookup_t;
     pub fn text_lookup_destroy(lookup: *mut lookup_t);
-    pub fn text_lookup_getstr(lookup: *mut lookup_t, lookup_val: *const c_char, out: *mut *const c_char) -> bool;
+    pub fn text_lookup_getstr(
+        lookup: *mut lookup_t,
+        lookup_val: *const c_char,
+        out: *mut *const c_char,
+    ) -> bool;
 
     // ── util/base.h ────────────────────────────────────────────────────
     /// Variadic. Always called as `blog(level, c"%s", msg)` so a `%` in the

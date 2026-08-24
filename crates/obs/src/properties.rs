@@ -12,10 +12,32 @@ pub enum TextType {
     Info,
 }
 
+impl TextType {
+    fn to_sys(self) -> obs_sys::obs_text_type {
+        use obs_sys::obs_text_type as T;
+        match self {
+            Self::Default => T::OBS_TEXT_DEFAULT,
+            Self::Password => T::OBS_TEXT_PASSWORD,
+            Self::Multiline => T::OBS_TEXT_MULTILINE,
+            Self::Info => T::OBS_TEXT_INFO,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComboFormat {
     Int,
     String,
+}
+
+impl ComboFormat {
+    fn to_sys(self) -> obs_sys::obs_combo_format {
+        use obs_sys::obs_combo_format as F;
+        match self {
+            Self::Int => F::OBS_COMBO_FORMAT_INT,
+            Self::String => F::OBS_COMBO_FORMAT_STRING,
+        }
+    }
 }
 
 /// `obs_properties_t` being built. Ownership passes to libobs when the
@@ -24,41 +46,76 @@ pub enum ComboFormat {
 pub struct Properties(NonNull<obs_sys::obs_properties_t>);
 
 impl Properties {
+    #[must_use]
     pub fn new() -> Self {
-        todo!("W1-A: obs_properties_create")
+        // SAFETY: no arguments; libobs returns a fresh owned object.
+        let ptr = unsafe { obs_sys::obs_properties_create() };
+        Self(NonNull::new(ptr).expect("obs_properties_create returned NULL"))
     }
 
     /// `obs_properties_set_flags` (e.g. `sys::OBS_PROPERTIES_DEFER_UPDATE`).
     pub fn set_flags(&self, flags: u32) {
-        let _ = flags;
-        todo!("W1-A")
+        // SAFETY: live handle owned by `self`.
+        unsafe { obs_sys::obs_properties_set_flags(self.0.as_ptr(), flags) };
     }
 
     pub fn add_text(&self, id: &CStr, description: &CStr, kind: TextType) {
-        let _ = (id, description, kind);
-        todo!("W1-A")
+        // SAFETY: live handle; libobs copies both strings and owns the
+        // returned obs_property_t, which stays inside the properties object.
+        unsafe {
+            obs_sys::obs_properties_add_text(
+                self.0.as_ptr(),
+                id.as_ptr(),
+                description.as_ptr(),
+                kind.to_sys(),
+            )
+        };
     }
 
     pub fn add_int(&self, id: &CStr, description: &CStr, min: i32, max: i32, step: i32) {
-        let _ = (id, description, min, max, step);
-        todo!("W1-A")
+        // SAFETY: as above.
+        unsafe {
+            obs_sys::obs_properties_add_int(
+                self.0.as_ptr(),
+                id.as_ptr(),
+                description.as_ptr(),
+                min,
+                max,
+                step,
+            )
+        };
     }
 
     pub fn add_bool(&self, id: &CStr, description: &CStr) {
-        let _ = (id, description);
-        todo!("W1-A")
+        // SAFETY: as above.
+        unsafe {
+            obs_sys::obs_properties_add_bool(self.0.as_ptr(), id.as_ptr(), description.as_ptr())
+        };
     }
 
     /// `obs_properties_add_list(..., OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT)`.
     pub fn add_int_list(&self, id: &CStr, description: &CStr) -> IntList<'_> {
-        let _ = (id, description);
-        todo!("W1-A")
+        // SAFETY: as above; the property belongs to this properties object,
+        // which the returned IntList borrows.
+        let ptr = unsafe {
+            obs_sys::obs_properties_add_list(
+                self.0.as_ptr(),
+                id.as_ptr(),
+                description.as_ptr(),
+                obs_sys::obs_combo_type::OBS_COMBO_TYPE_LIST,
+                ComboFormat::Int.to_sys(),
+            )
+        };
+        IntList(
+            NonNull::new(ptr).expect("obs_properties_add_list returned NULL"),
+            PhantomData,
+        )
     }
 
+    /// Hand ownership to libobs. Every `get_properties` shim ends here.
     pub fn into_raw(self) -> *mut obs_sys::obs_properties_t {
-        let ptr = self.0.as_ptr();
-        core::mem::forget(self);
-        ptr
+        let this = core::mem::ManuallyDrop::new(self);
+        this.0.as_ptr()
     }
 }
 
@@ -68,14 +125,28 @@ impl Default for Properties {
     }
 }
 
+impl Drop for Properties {
+    fn drop(&mut self) {
+        // Only reached when a half-built dialog is abandoned — a panic caught
+        // by the `get_properties` guard, or an early return. libobs owns the
+        // object from `into_raw` onwards, and that path never drops.
+        // SAFETY: this value owns the object; destroyed exactly once.
+        unsafe { obs_sys::obs_properties_destroy(self.0.as_ptr()) };
+    }
+}
+
 /// An int-valued combo list property.
 #[derive(Debug)]
-pub struct IntList<'p>(NonNull<obs_sys::obs_property_t>, PhantomData<&'p Properties>);
+pub struct IntList<'p>(
+    NonNull<obs_sys::obs_property_t>,
+    PhantomData<&'p Properties>,
+);
 
 impl IntList<'_> {
     /// `obs_property_list_add_int`.
     pub fn add(&self, name: &CStr, value: i64) {
-        let _ = (name, value);
-        todo!("W1-A")
+        // SAFETY: the property is alive for `'p` (owned by the Properties this
+        // borrows); libobs copies the name.
+        unsafe { obs_sys::obs_property_list_add_int(self.0.as_ptr(), name.as_ptr(), value) };
     }
 }
