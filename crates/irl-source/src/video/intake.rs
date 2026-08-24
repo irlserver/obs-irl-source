@@ -55,14 +55,19 @@ impl VideoIntake {
         let (width, height) = (frame.width(), frame.height());
         let is_key = output::is_keyframe(frame);
 
-        if !flags.first_keyframe_received {
-            if !is_key {
-                if shared.conn.total_video_frames.load(Relaxed) == 0 {
-                    irl_debug!("Waiting for keyframe (dropped non-keyframe)");
-                }
-                return;
+        // The frame-level backstop only gates when Wait For Keyframe is on
+        // (master 64dcd0f); the first-keyframe bookkeeping runs either way.
+        if !flags.first_keyframe_received
+            && !is_key
+            && shared.hot.wait_for_keyframe.load(Relaxed)
+        {
+            if shared.conn.total_video_frames.load(Relaxed) == 0 {
+                irl_debug!("Waiting for keyframe (dropped non-keyframe)");
             }
+            return;
+        }
 
+        if !flags.first_keyframe_received && is_key {
             flags.first_keyframe_received = true;
             flags.video_corrupted = false;
             // `hw_frames_ctx` on the decoded frame is the ground truth for

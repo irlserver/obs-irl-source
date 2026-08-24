@@ -680,3 +680,36 @@ fn the_lead_stats_follow_the_mapping() {
     // 2 s is past 120 ms of target buffer plus the 400 ms floor.
     assert_eq!(shared.lifetime.video_lead_excess.load(Relaxed), 1);
 }
+
+#[test]
+fn a_disabled_keyframe_gate_passes_non_key_frames() {
+    let shared = shared();
+    shared.hot.wait_for_keyframe.store(false, Relaxed);
+    let mut flags = receiver::ReceiverFlags::default();
+    let mut intake = video::VideoIntake::new();
+
+    let frame = video_frame(0, false);
+    intake.handle_frame(
+        &shared,
+        &mut flags,
+        &frame,
+        TB_90K,
+        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
+    );
+    assert_eq!(shared.video.len(), 1, "non-key frame queued with the gate off");
+    assert!(
+        !flags.first_keyframe_received,
+        "first-keyframe bookkeeping still waits for a real key frame"
+    );
+
+    let frame = video_frame(9_000, true);
+    intake.handle_frame(
+        &shared,
+        &mut flags,
+        &frame,
+        TB_90K,
+        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
+    );
+    assert!(flags.first_keyframe_received);
+    assert_eq!(shared.video.len(), 2);
+}
