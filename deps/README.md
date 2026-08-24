@@ -30,9 +30,32 @@ The build is incremental. Marker files inside the prefix record what finished,
 so a second run is a no-op and CI only has to cache `deps/.build/prefix` (not
 the much larger source and object trees).
 
-The script writes `deps/.build/prefix/irl-deps.cmake` describing the exact link
-line. The plugin's CMakeLists includes that file; it does not rediscover the
-stack on its own.
+The script writes `deps/.build/prefix/irl-deps.env` describing the exact link
+line. `crates/ffmpeg/build.rs` reads it and replays it; nothing rediscovers the
+stack on its own. (An `irl-deps.cmake` with the same content is still written
+for anything outside cargo that wants it.)
+
+### The `irl-deps.env` contract
+
+Plain `KEY=value` lines, no quoting, lists separated by `;`, paths absolute and
+native:
+
+| Key | Meaning |
+| --- | --- |
+| `IRL_DEPS_HOST` | `linux`, `macos` or `windows` |
+| `IRL_DEPS_PREFIX` | The prefix itself |
+| `IRL_DEPS_INCLUDE_DIR`, `IRL_DEPS_LIBDIR` | Where the headers and archives are |
+| `IRL_DEPS_FFMPEG_VERSION`, `IRL_DEPS_SRT_VERSION`, `IRL_DEPS_LIBRIST_VERSION`, `IRL_DEPS_MBEDTLS_VERSION` | Pinned upstream versions, logged by the plugin at load |
+| `IRL_DEPS_TRANSITIVE_LIBS` | Bare `-l` names in single-pass link order (`srt;rist;mbedtls;mbedx509;mbedcrypto`, plus `z` on Windows). The five libav*/libsw* archives are omitted: ffmpeg-sys-next emits those itself, and its build script runs first, which is what keeps the order right |
+| `IRL_DEPS_TRANSITIVE_PATHS` | The same list as absolute archive paths, for diagnostics |
+| `IRL_DEPS_SYSTEM_LIBS` | Shared system libraries (`m`, `va`, `va-drm`, the C++ runtime) |
+| `IRL_DEPS_FRAMEWORKS` | macOS frameworks |
+
+`crates/ffmpeg/build.rs` looks for the file under `$IRL_DEPS_PREFIX`, falling
+back to `deps/.build/prefix` next to the workspace, and fails with a message
+pointing at this script when it is missing. `FFMPEG_DIR` (set in
+`.cargo/config.toml`) points ffmpeg-sys-next at the same prefix, which is what
+keeps it off its pkg-config branch.
 
 ### Platforms
 
@@ -75,10 +98,10 @@ component the plugin depends on actually landed, and fails the build otherwise.
 FFmpeg 9.0 made `tls_verify` default to on. `tls_openssl.c` copes by falling
 back to `SSL_CTX_set_default_verify_paths()`, but this stack has no OpenSSL and
 `tls_mbedtls.c` loads a CA chain only from an explicit `ca_file`, so the default
-build would reject every `https://` and `rtmps://` peer. `apply_demuxer_options`
-in `src/receiver-stream.c` therefore sets `tls_verify=0`, which the user's
-FFmpeg Options can override per source. Do not "fix" that by dropping the
-option; without a bundled CA file it only turns the feature off entirely.
+build would reject every `https://` and `rtmps://` peer.
+`irl_core::url_opts::demuxer_options` therefore sets `tls_verify=0`, which the
+user's FFmpeg Options can override per source. Do not "fix" that by dropping
+the option; without a bundled CA file it only turns the feature off entirely.
 
 `fix_mbedtls_pc` exists for a related trap. libsrt and librist both record their
 mbedTLS dependency as an absolute library path, which puts it in the wrong place
@@ -93,11 +116,12 @@ as the archives linked here. On ELF an exported `avcodec_open2` in the plugin
 would resolve through the global scope to OBS's copy, so the plugin's calls
 would run against a different library's structs.
 
-The plugin is therefore built with hidden visibility, `--exclude-libs,ALL` and a
-version script (`cmake/module-symbols.map`, `cmake/module-symbols.exp`) so the
-only exported symbols are the `obs_module_*` entry points libobs looks up.
-`scripts/verify-plugin.sh` asserts this after every build, and CI fails if the
-plugin gains an `libav*` dependency or leaks a bundled symbol.
+rustc already emits its own export list for a cdylib — only
+`#[unsafe(no_mangle)]` items, which here are exactly the `obs_module_*` entry
+points libobs looks up — so every static libav* symbol stays hidden.
+`crates/irl-source/build.rs` adds `--exclude-libs,ALL` on Linux as belt and
+braces. `scripts/verify-plugin.sh` asserts the result after every build, and CI
+fails if the plugin gains a `libav*` dependency or leaks a bundled symbol.
 
 ## Licensing
 

@@ -4,7 +4,7 @@ Releases are tag driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.
 
 ## Steps
 
-1. Bump the version in `CMakeLists.txt` (the `project(obs-irl-source VERSION X.Y.Z ...)` line). The release workflow fails early if the tag and this version disagree.
+1. Bump the version in `Cargo.toml` (the `version = "X.Y.Z"` under `[workspace.package]`, the one source of truth: `scripts/package.sh` names the archives from it and the Windows installer reads it). Run a build so `Cargo.lock` picks up the new version, and commit both. The release workflow fails early if the tag and this version disagree.
 
 2. Commit the bump:
 
@@ -26,6 +26,8 @@ Releases are tag driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.
    * `obs-irl-source-X.Y.Z-windows-x64-setup.exe` (same payload as the zip, installed by `installer/obs-irl-source.iss`)
    * `obs-irl-source-X.Y.Z-macos-arm64.zip` (extract into `~/Library/Application Support/obs-studio/plugins/`)
    * `sha256sums.txt`
+
+   The three archives are staged by `scripts/package.sh`, so a maintainer can reproduce any of them locally from a `cargo build --release`.
 
    The release body starts with install instructions (from `.github/release-notes-header.md`) followed by a changelog built from the commits since the previous tag.
 
@@ -58,9 +60,9 @@ git push -f origin vX.Y.Z
 
 ## Supported OBS lines
 
-One archive per platform covers every supported OBS line. The plugin bundles its own media stack, so the only version sensitive link left is libobs, and libobs gates a plugin on `(major, minor) <= host`. Building against the oldest supported line therefore produces a binary that also loads on every newer one.
+One archive per platform covers every supported OBS line. The plugin bundles its own media stack and binds to libobs through hand-written FFI, so nothing links a specific libobs at all; libobs gates a plugin on `(major, minor) <= host`, so declaring the oldest supported line produces a binary that also loads on every newer one.
 
-`OBS_VERSION` at the top of `.github/workflows/build.yml` pins that oldest line. Raise it only to drop support for older OBS releases, never to chase a newer one. See the CI section in `CLAUDE.md`.
+`OBS_VERSION` at the top of `.github/workflows/build.yml` documents that oldest line, and `api_version` in the `declare_module!` call (`crates/irl-source/src/lib.rs`) is what actually reports it to libobs. Raise both only to drop support for older OBS releases, never to chase a newer one. See the CI section in `CLAUDE.md`.
 
 ## Not automated (yet)
 
