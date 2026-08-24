@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/obs-sys",
+    "crates/obs",
+    "crates/ffmpeg",
+    "crates/irl-core",
+    "crates/irl-source",
+]
+
+[workspace.package]
+# Single source of truth for the plugin version. release.yml verifies the
+# pushed tag against it and the Windows installer reads it from here.
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-or-later"
+authors = ["Thomas Lekanger"]
+repository = "https://github.com/datagutt/obs-irl-source"
+
+[workspace.dependencies]
+obs-sys = { path = "crates/obs-sys" }
+obs = { path = "crates/obs" }
+irl-ffmpeg = { path = "crates/ffmpeg" }
+irl-core = { path = "crates/irl-core" }
+# The bundled FFmpeg is located through FFMPEG_DIR (see .cargo/config.toml);
+# `static` makes the sys crate emit static link lines for the five libav*
+# archives. The transitive libraries (srt, rist, mbedtls, ...) are linked by
+# crates/ffmpeg/build.rs from deps/.build/prefix/irl-deps.env.
+ffmpeg-sys-next = { version = "9.0", default-features = false, features = ["static", "avcodec", "avformat", "swresample", "swscale"] }
+parking_lot = "0.12"
+bindgen = "0.72"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# catch_unwind at every FFI boundary is load-bearing; never switch to abort.
+panic = "unwind"
+# Line tables only: enough for a usable .pdb / backtrace, small enough to ship.
+debug = 1
+strip = "none"
+incremental = false
+
+[profile.dev]
+opt-level = 1
+panic = "unwind"
+
+[profile.dev.package."*"]
+opt-level = 2

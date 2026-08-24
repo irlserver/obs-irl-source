@@ -1,0 +1,27 @@
+[package]
+name = "irl-source"
+description = "IRL Source: live IRL stream ingest source for OBS Studio (SRT, RTMP, RIST, anything FFmpeg opens)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+# cargo names the artifact libobs_irl_source.so / obs_irl_source.dll /
+# libobs_irl_source.dylib; scripts/package.sh renames it to obs-irl-source.*
+name = "obs_irl_source"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+# parking_lot's deadlock detector, spawned as a poller thread at module load.
+# The Rust replacement for the C build's IRL_CHECKED_LOCKS. Dev/CI only.
+deadlocks = ["parking_lot/deadlock_detection"]
+
+[dependencies]
+obs = { workspace = true }
+irl-ffmpeg = { workspace = true }
+irl-core = { workspace = true }
+parking_lot = { workspace = true }

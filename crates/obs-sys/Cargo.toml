@@ -1,0 +1,21 @@
+[package]
+name = "obs-sys"
+description = "Hand-written libobs FFI declarations for the surface obs-irl-source uses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+links = "obs"
+
+[lib]
+name = "obs_sys"
+
+[features]
+# Dev-only: run bindgen against real libobs headers (OBS_INCLUDE_DIR, default
+# /usr/include/obs) and assert every hand-written struct's size/align/offsets.
+layout-test = ["dep:bindgen"]
+
+[build-dependencies]
+bindgen = { workspace = true, optional = true }

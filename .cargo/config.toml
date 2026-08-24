@@ -1,0 +1,15 @@
+[env]
+# ffmpeg-sys-next takes its "prebuilt tree" branch when FFMPEG_DIR is set:
+# bindgen runs against $FFMPEG_DIR/include and the libav* archives are linked
+# from $FFMPEG_DIR/lib. Keeping it on that branch is what keeps pkg-config out
+# of the picture entirely (MSVC + MSYS2 pkgconf disagree about path syntax).
+# `force = false` lets a shell override point at a prefix built elsewhere.
+FFMPEG_DIR = { value = "deps/.build/prefix", relative = true, force = false }
+
+# No link flags here on purpose: they would apply to every target kind. Link
+# arguments live in the crates' build.rs (rustc-cdylib-link-arg /
+# rustc-link-arg-tests) so the cdylib and the test binaries get their own.
+
+[alias]
+xlint = "clippy --workspace --all-targets -- -D warnings"
+xtest = "test --workspace"

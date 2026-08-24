@@ -1,0 +1,11 @@
+[package]
+name = "irl-core"
+description = "FFI-free logic of obs-irl-source: jitter buffer, PTS repair, speed control, pacing, option tables, stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,9 +1,10 @@
-build/
-cmake-build-*/
-.cache/
+target/
+dist/
 deps/.build/
+.cache/
 *.o
 *.so
 *.dll
 *.dylib
+*.pdb
 .DS_Store
