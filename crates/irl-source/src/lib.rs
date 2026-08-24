@@ -40,6 +40,7 @@ obs::declare_module! {
 pub const PLUGIN_VERSION: &str = env!("IRL_PLUGIN_VERSION");
 
 fn module_load() -> bool {
+    install_panic_hook();
     #[cfg(feature = "deadlocks")]
     spawn_deadlock_poller();
     obs::register_source::<source::IrlSource>();
@@ -68,4 +69,28 @@ fn spawn_deadlock_poller() {
             }
         })
         .expect("spawn deadlock poller");
+}
+
+/// Every FFI boundary already converts a panic into a log line and a safe
+/// return (`obs::panic::guard`, `shared::spawn_worker`), but the payload alone
+/// rarely says *where*. The hook runs before unwinding leaves the panic site,
+/// so it can capture a backtrace (`force_capture`: no RUST_BACKTRACE needed;
+/// release builds keep line tables for it). Installed once; the previous hook
+/// is chained so `cargo test`-style consumers keep their output.
+fn install_panic_hook() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        irl_error!("panic at {location}: {info}\nbacktrace:\n{backtrace}");
+        previous(info);
+    }));
 }

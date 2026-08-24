@@ -57,6 +57,14 @@ jobs:
           scripts/package.sh linux  artifacts/obs-irl-source-linux-x64   dist "${version}"
           scripts/package.sh windows artifacts/obs-irl-source-windows-x64 dist "${version}"
           scripts/package.sh macos  artifacts/obs-irl-source-macos-arm64 dist "${version}"
+          scripts/package.sh deb    artifacts/obs-irl-source-linux-x64   dist "${version}"
+
+          # Full source of the tagged tree. The bundled stack statically
+          # links LGPL FFmpeg; shipping the corresponding source alongside
+          # the binaries keeps the obligation self-contained in the release.
+          git archive --format=tar.gz \
+            --prefix="obs-irl-source-${version}/" \
+            -o "dist/obs-irl-source-${version}-source.tar.gz" HEAD
 
           # Windows installer, built by the Windows job in build.yml. Same
           # payload as the zip above, for people who would rather not hand-copy

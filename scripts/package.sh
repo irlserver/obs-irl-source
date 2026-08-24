@@ -5,7 +5,7 @@
 # Copyright (C) 2026 Thomas Lekanger
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Usage: scripts/package.sh <linux|windows|macos> <artifact-dir> <out-dir> [version]
+# Usage: scripts/package.sh <linux|windows|macos|deb> <artifact-dir> <out-dir> [version]
 #
 # <artifact-dir> holds the binary as cargo names it (libobs_irl_source.so,
 # obs_irl_source.dll, libobs_irl_source.dylib); this script renames it and
@@ -27,7 +27,7 @@ die() {
 	exit 1
 }
 
-[[ $# -ge 3 ]] || die "usage: package.sh <linux|windows|macos> <artifact-dir> <out-dir> [version]"
+[[ $# -ge 3 ]] || die "usage: package.sh <linux|windows|macos|deb> <artifact-dir> <out-dir> [version]"
 
 platform="$1"
 artifact_dir="$2"
@@ -103,11 +103,68 @@ macos)
 		>"${bundle}/Contents/Info.plist"
 	# obs_module_file() resolves to Contents/Resources inside a bundle.
 	stage_data "${bundle}/Contents/Resources"
+	# On a Mac with an identity, sign (and optionally notarize) the
+	# bundle. The release job assembles on Linux, where these are
+	# silently skipped; a maintainer with credentials repackages on a
+	# Mac and re-uploads. Notarization additionally needs
+	# NOTARIZE_APPLE_ID / NOTARIZE_PASSWORD / NOTARIZE_TEAM_ID.
+	if [[ $(uname -s) == Darwin ]]; then
+		dsym="${out_dir}/obs-irl-source-${version}-macos-arm64.dSYM.tar.gz"
+		if command -v dsymutil >/dev/null; then
+			dsymutil "${bundle}/Contents/MacOS/obs-irl-source" \
+				-o "${staging}/obs-irl-source.dSYM"
+			tar -C "${staging}" -czf "${dsym}" obs-irl-source.dSYM
+		fi
+		if [[ -n ${CODESIGN_IDENTITY:-} ]]; then
+			codesign --force --options runtime --timestamp \
+				--sign "${CODESIGN_IDENTITY}" "${bundle}"
+		fi
+	fi
 	rm -f "${archive}"
 	(cd "${staging}" && zip -qr "${archive}" obs-irl-source.plugin)
+	if [[ $(uname -s) == Darwin && -n ${CODESIGN_IDENTITY:-} && -n ${NOTARIZE_APPLE_ID:-} ]]; then
+		xcrun notarytool submit "${archive}" --wait \
+			--apple-id "${NOTARIZE_APPLE_ID}" \
+			--password "${NOTARIZE_PASSWORD}" \
+			--team-id "${NOTARIZE_TEAM_ID}"
+	fi
+	;;
+deb)
+	# A Debian package installing system-wide, next to distro OBS:
+	# /usr/lib/<multiarch>/obs-plugins + /usr/share/obs/obs-plugins/<id>.
+	command -v dpkg-deb >/dev/null || die "dpkg-deb not found"
+	deb="${out_dir}/obs-irl-source_${version}_amd64.deb"
+	pkgroot="${staging}/pkg"
+	libdir="${pkgroot}/usr/lib/x86_64-linux-gnu/obs-plugins"
+	datadir="${pkgroot}/usr/share/obs/obs-plugins/obs-irl-source"
+	docdir="${pkgroot}/usr/share/doc/obs-irl-source"
+	mkdir -p "${libdir}" "${datadir}" "${docdir}" "${pkgroot}/DEBIAN"
+	cp "$(artifact libobs_irl_source.so)" "${libdir}/obs-irl-source.so"
+	stage_data "${datadir}"
+	# Debian wants licenses under /usr/share/doc; keep copies with the
+	# plugin data too, matching the tarball layout.
+	cp "${repo_root}/LICENSE" "${docdir}/copyright"
+	cp "${repo_root}/THIRD_PARTY_NOTICES.md" "${docdir}/"
+	cat >"${pkgroot}/DEBIAN/control" <<-EOF
+		Package: obs-irl-source
+		Version: ${version}
+		Architecture: amd64
+		Section: video
+		Priority: optional
+		Maintainer: Thomas Lekanger <datagutt@lekanger.no>
+		Depends: obs-studio (>= 32.1)
+		Homepage: https://github.com/irlserver/obs-irl-source
+		Description: IRL streaming source plugin for OBS Studio
+		 Receives live IRL streams over SRT, RTMP, RIST or any protocol the
+		 bundled FFmpeg supports, with jitter buffering, PTS repair, adaptive
+		 playback speed and hardware-accelerated decoding.
+	EOF
+	rm -f "${deb}"
+	dpkg-deb --build --root-owner-group "${pkgroot}" "${deb}" >/dev/null
+	archive="${deb}"
 	;;
 *)
-	die "unknown platform '${platform}' (expected linux, windows or macos)"
+	die "unknown platform '${platform}' (expected linux, windows, macos or deb)"
 	;;
 esac
 
