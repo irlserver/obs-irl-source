@@ -8,11 +8,11 @@
 #[macro_use]
 mod log;
 
-mod audio;
+pub mod audio;
 mod config;
-mod receiver;
+pub mod receiver;
 mod settings;
-mod shared;
+pub mod shared;
 mod source;
 mod video;
 mod websocket;
