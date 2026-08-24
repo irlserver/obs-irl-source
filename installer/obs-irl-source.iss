@@ -75,15 +75,19 @@ SelectDirBrowseLabel=To continue, click Next. To install into a different OBS St
 
 [Files]
 Source: "{#PayloadDir}\obs-plugins\64bit\obs-irl-source.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
-; Mirrors the release zip, which ships the w32-pthreads OBS itself links, so
-; the installed layout and the manually extracted one stay identical.
-Source: "{#PayloadDir}\obs-plugins\64bit\w32-pthreads.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion skipifsourcedoesntexist
 ; Not optional: obs_module_text() falls back to the lookup key, so without the
 ; locale file the properties dialog renders as bare identifiers.
 Source: "..\data\locale\*"; DestDir: "{app}\data\obs-plugins\{#PluginId}\locale"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
+
+[InstallDelete]
+; Versions up to 1.x shipped w32-pthreads.dll beside the plugin, because the
+; C build linked pthreads through it. The Rust plugin never calls pthreads, so
+; the file is no longer part of the payload; an in-place upgrade would
+; otherwise leave a stale copy shadowing the one OBS ships in bin\64bit.
+Type: files; Name: "{app}\obs-plugins\64bit\w32-pthreads.dll"
 
 [Run]
 ; runasoriginaluser keeps OBS out of the elevated token the installer runs under.
