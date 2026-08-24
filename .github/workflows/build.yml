@@ -47,7 +47,7 @@ jobs:
       # prefix, so a restored prefix alone is enough to skip every dep build.
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
           key: irl-deps-linux-x64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
@@ -74,7 +74,7 @@ jobs:
         run: ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: obs-irl-source-linux-x64
           path: target/release/libobs_irl_source.so
@@ -125,7 +125,7 @@ jobs:
 
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
           key: irl-deps-windows-x64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
@@ -229,7 +229,7 @@ jobs:
           Get-ChildItem dist\*.exe
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-windows-installer
           path: dist/*.exe
@@ -242,7 +242,7 @@ jobs:
       # rest of the build uses.
       LIBCLANG_PATH: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # ffmpeg is intentionally NOT installed from Homebrew. The plugin links
       # the bundled static stack instead, which is what removes its dependency
@@ -259,7 +259,7 @@ jobs:
 
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
           key: irl-deps-macos-arm64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
@@ -282,7 +282,7 @@ jobs:
         run: ./scripts/verify-plugin.sh target/release/libobs_irl_source.dylib
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-macos-arm64
           path: target/release/libobs_irl_source.dylib
