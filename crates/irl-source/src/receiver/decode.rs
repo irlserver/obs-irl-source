@@ -85,7 +85,7 @@ fn drain_audio_frames(
                             if let Some(buf) = shared.audio_buf().as_mut() {
                                 buf.flush();
                             }
-                            audio::reset_audio_timing_state(&mut state);
+                            audio::reset_audio_timing_state(shared, &mut state);
                             audio::mark_audio_recovery(&mut state, now_us, 2_500_000);
                         }
                         reinit_audio_pts_repair(audio_in, shared, audio_tb);
