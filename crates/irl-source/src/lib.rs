@@ -14,7 +14,7 @@ pub mod receiver;
 mod settings;
 pub mod shared;
 mod source;
-mod video;
+pub mod video;
 mod websocket;
 
 obs::declare_module! {

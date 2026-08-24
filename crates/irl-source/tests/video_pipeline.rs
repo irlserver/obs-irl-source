@@ -6,26 +6,12 @@
 //! [`VideoSink`] instead of the source; the `SourceHandle` inside `Shared` is
 //! a dangling pointer that nothing here dereferences.
 //!
-//! The `#[path]` block below compiles the plugin's own modules into this test
-//! binary because the crate root declares them privately (`mod video;`), so
-//! `use obs_irl_source::video::…` cannot reach them. Once the crate root marks
-//! `shared`, `receiver` and `video` public, this block collapses to a single
-//! `use obs_irl_source::…` — see the note in the W2-C report.
+//! The plugin's modules are public (`pub mod shared/receiver/video`), so the
+//! test drives the real types rather than a re-compilation.
 
 #![allow(dead_code)]
 
-#[macro_use]
-#[path = "../src/log.rs"]
-mod log;
-
-#[path = "../src/shared.rs"]
-mod shared;
-
-#[path = "../src/receiver/mod.rs"]
-mod receiver;
-
-#[path = "../src/video/mod.rs"]
-mod video;
+use obs_irl_source::{receiver, shared, video};
 
 use std::ffi::CString;
 use std::ptr::NonNull;
@@ -74,14 +60,18 @@ impl Recorder {
     }
 }
 
-impl VideoSink for Arc<Recorder> {
+/// Local newtype: `VideoSink` and `Arc` are both foreign to this test crate
+/// now that the plugin modules come from the library.
+struct RecorderSink(Arc<Recorder>);
+
+impl VideoSink for RecorderSink {
     fn output_video(&self, frame: &obs::VideoFrame<'_>) {
         let raw = frame.as_sys();
         let planes = (0..8)
             .filter(|&i| !raw.data[i].is_null())
             .map(|i| (raw.data[i] as usize, raw.linesize[i]))
             .collect();
-        self.frames.lock().push(Emitted {
+        self.0.frames.lock().push(Emitted {
             width: raw.width,
             height: raw.height,
             format: raw.format,
@@ -92,7 +82,7 @@ impl VideoSink for Arc<Recorder> {
     }
 
     fn output_video_none(&self) {
-        self.cleared.fetch_add(1, Relaxed);
+        self.0.cleared.fetch_add(1, Relaxed);
     }
 }
 
@@ -130,7 +120,7 @@ fn shared() -> Arc<Shared> {
 
 fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>) {
     let recorder = Arc::new(Recorder::default());
-    let thread = VideoThread::with_sink(shared, Box::new(recorder.clone()));
+    let thread = VideoThread::with_sink(shared, Box::new(RecorderSink(recorder.clone())));
     (thread, recorder)
 }
 
