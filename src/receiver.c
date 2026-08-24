@@ -63,8 +63,7 @@ void *irl_receiver_thread(void *data)
 		return NULL;
 	}
 
-	blog(LOG_INFO, "[irl-source] Receiver thread started for: %s",
-	     ctx->config.url ? ctx->config.url : "(null)");
+	irl_log_input_url("Receiver thread started for", ctx->config.url);
 
 	/* A new thread means a new stream configuration (create, or a
 	 * restart-forcing settings edit): nothing learned about the previous
