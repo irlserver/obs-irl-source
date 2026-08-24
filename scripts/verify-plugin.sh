@@ -65,7 +65,7 @@ Linux*)
 	# against the host process at dlopen time. Anything else undefined
 	# means a static dependency was dropped from the link line.
 	undef="$(nm -D --undefined-only "${module}" | awk '{print $NF}' | sed 's/@.*//')"
-	echo "${undef}" | grep -vqE '^(obs_[a-z_0-9]+|os_gettime_ns|os_sleep_ms|blog|bfree|calldata_[a-z_]+|proc_handler_[a-z_]+|text_lookup_[a-z_]+|video_format_get_parameters_for_format|va[A-Z][a-zA-Z0-9]*|__[a-z_A-Z0-9]+|_[A-Z][a-zA-Z_0-9]*|[a-z_0-9]+)$' && r=1 || r=0
+	echo "${undef}" | grep -vqE '^(obs_[a-z_0-9]+|os_gettime_ns|os_sleep_ms|blog|bfree|calldata_[a-z_]+|proc_handler_[a-z_]+|text_lookup_[a-z_]+|video_format_get_parameters_for_format|__[a-z_A-Z0-9]+|_[A-Z][a-zA-Z_0-9]*|[a-z_][a-zA-Z_0-9]*)$' && r=1 || r=0
 	# libva's own entry points are camelCase (vaInitialize, vaGetImage,
 	# ...) so they need their own alternative; the last one accepts
 	# libc/libm/libstdc++ symbols by shape. The real guard is DT_NEEDED
