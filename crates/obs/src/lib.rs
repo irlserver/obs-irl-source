@@ -33,7 +33,9 @@ pub use data::{Data, DataArray, OwnedData};
 pub use proc::{CallData, ProcCallback, ProcHandler};
 pub use properties::{ComboFormat, IntList, Properties, TextType};
 pub use scene::{BoundsType, Scene, SceneItem, TransformInfo, VideoInfo};
-pub use source::{IconType, MediaState, OwnedSource, Source, SourceHandle, SourceType, register_source};
+pub use source::{
+    IconType, MediaState, OwnedSource, Source, SourceHandle, SourceType, register_source,
+};
 pub use video::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
 /// Re-exported so plugins can name raw types in the rare place they need to

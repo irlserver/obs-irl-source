@@ -4,12 +4,14 @@
 //! (microseconds, and used only for FFmpeg-side timers).
 
 /// `os_gettime_ns()`.
+#[must_use]
 pub fn gettime_ns() -> u64 {
-    todo!("W1-A")
+    // SAFETY: no arguments, no state; libobs's monotonic clock reader.
+    unsafe { obs_sys::os_gettime_ns() }
 }
 
 /// `os_sleep_ms()`.
 pub fn sleep_ms(ms: u32) {
-    let _ = ms;
-    todo!("W1-A")
+    // SAFETY: plain value argument.
+    unsafe { obs_sys::os_sleep_ms(ms) }
 }
