@@ -108,7 +108,7 @@ impl Source for IrlSource {
             let mut state = obs_state.lock();
             match state.config.url() {
                 Some(url) => {
-                    irl_info!("Created with URL: {}", url.to_string_lossy());
+                    crate::log::log_input_url("Created with URL", url);
                     start_receiver(&mut state, source, &lifetime);
                 }
                 None => irl_info!("Created with no URL configured"),

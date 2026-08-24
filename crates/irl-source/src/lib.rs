@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 #[macro_use]
-mod log;
+pub mod log;
 
 mod settings;
 

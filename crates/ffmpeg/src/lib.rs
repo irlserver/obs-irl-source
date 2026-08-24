@@ -141,6 +141,48 @@ pub fn rescale(value: i64, mul: i64, div: i64) -> i64 {
     unsafe { sys::av_rescale(value, mul, div) }
 }
 
+/// The endpoint identity of a URL, split by `av_url_split`. Userinfo, path,
+/// query and fragment are never copied out: they can all carry credentials,
+/// which is the point of using this for log lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlParts {
+    /// Scheme, empty when the URL has none.
+    pub protocol: String,
+    /// Hostname, empty when absent.
+    pub hostname: String,
+    /// Port, or -1 when absent.
+    pub port: i32,
+}
+
+/// `av_url_split`, keeping only protocol, hostname and port.
+pub fn url_split(url: &core::ffi::CStr) -> UrlParts {
+    let mut proto = [0u8; 32];
+    let mut host = [0u8; 256];
+    let mut port: c_int = -1;
+    // SAFETY: the buffers outlive the call and their sizes are passed; the
+    // components we do not want are requested with (NULL, 0), which
+    // av_url_split documents as "do not fill"; `url` is NUL-terminated.
+    unsafe {
+        ffmpeg_sys_next::av_url_split(
+            proto.as_mut_ptr().cast(),
+            proto.len() as c_int,
+            core::ptr::null_mut(),
+            0,
+            host.as_mut_ptr().cast(),
+            host.len() as c_int,
+            &mut port,
+            core::ptr::null_mut(),
+            0,
+            url.as_ptr(),
+        );
+    }
+    let str_of = |buf: &[u8]| {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    };
+    UrlParts { protocol: str_of(&proto), hostname: str_of(&host), port }
+}
+
 /// `av_gettime()` in microseconds. FFmpeg-side timers only.
 pub fn gettime_us() -> i64 {
     // SAFETY: no arguments, no shared state.
@@ -306,5 +348,21 @@ mod tests {
         assert_eq!(pix_fmt_from_raw(1_000_000), AVPixelFormat::AV_PIX_FMT_NONE);
         assert_eq!(sample_fmt_from_raw(3), AVSampleFormat::AV_SAMPLE_FMT_FLT);
         assert_eq!(sample_fmt_from_raw(99), AVSampleFormat::AV_SAMPLE_FMT_NONE);
+    }
+}
+
+#[cfg(test)]
+mod url_split_tests {
+    #[test]
+    fn splits_endpoint_and_drops_credentials() {
+        let p = super::url_split(c"srt://host.example:9000?passphrase=secret");
+        assert_eq!((p.protocol.as_str(), p.hostname.as_str(), p.port), ("srt", "host.example", 9000));
+        let p = super::url_split(c"rtmp://user:pw@live.example/app/streamkey");
+        assert_eq!((p.protocol.as_str(), p.hostname.as_str(), p.port), ("rtmp", "live.example", -1));
+        let p = super::url_split(c"srt://[2001:db8::1]:9000");
+        assert_eq!(p.hostname, "2001:db8::1");
+        assert_eq!(p.port, 9000);
+        let p = super::url_split(c"not a url");
+        assert_eq!(p.protocol, "");
     }
 }

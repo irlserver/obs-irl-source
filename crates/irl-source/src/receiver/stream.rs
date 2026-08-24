@@ -200,7 +200,7 @@ impl Receiver {
             let _ = opts.set(&key, &value);
         }
 
-        irl_info!("Connecting to: {url_str}");
+        crate::log::log_input_url("Connecting to", &url);
 
         // Unrecognised options are dropped without a word, as `av_dict_free`
         // does in the C: FFmpeg option names differ per protocol, so the
