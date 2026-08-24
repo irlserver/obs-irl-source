@@ -310,14 +310,16 @@ void irl_handle_video_frame(struct irl_source *ctx, AVFrame *frame)
 	}
 	frame->pts = pts;
 
-	if (!ctx->first_keyframe_received) {
-		if (!irl_video_is_keyframe(frame)) {
-			if (ctx->total_video_frames == 0)
-				blog(LOG_DEBUG,
-				     "[irl-source] Waiting for keyframe (dropped non-keyframe)");
-			return;
-		}
+	bool is_keyframe = irl_video_is_keyframe(frame);
+	if (!ctx->first_keyframe_received && !is_keyframe &&
+	    os_atomic_load_bool(&ctx->config.wait_for_keyframe)) {
+		if (ctx->total_video_frames == 0)
+			blog(LOG_DEBUG,
+			     "[irl-source] Waiting for keyframe (dropped non-keyframe)");
+		return;
+	}
 
+	if (!ctx->first_keyframe_received && is_keyframe) {
 		ctx->first_keyframe_received = true;
 		ctx->video_corrupted = false;
 		/* hw_frames_ctx on the decoded frame is the ground truth
@@ -329,7 +331,7 @@ void irl_handle_video_frame(struct irl_source *ctx, AVFrame *frame)
 		     frame->hw_frames_ctx ? "hardware" : "software");
 	}
 
-	if (irl_video_is_keyframe(frame))
+	if (is_keyframe)
 		ctx->video_corrupted = false;
 
 	if (ctx->video_corrupted || frame->decode_error_flags != 0) {
