@@ -26,6 +26,8 @@ void irl_source_get_defaults(obs_data_t *settings)
 				 IRL_DEFAULT_BUFFER_TARGET_MS);
 	obs_data_set_default_bool(settings, "adaptive_speed",
 				  IRL_DEFAULT_ADAPTIVE_SPEED);
+	obs_data_set_default_int(settings, "catchup_percent",
+				 IRL_DEFAULT_CATCHUP_PERCENT);
 
 	obs_data_set_default_string(settings, "ffmpeg_options", "");
 	obs_data_set_default_int(settings, "hw_decode", IRL_DEFAULT_HW_DECODE);
@@ -60,15 +62,24 @@ obs_properties_t *irl_source_get_properties(void *data)
 
 	/* ── Audio Buffer ──────────────────────────────────── */
 
-	/* Up to 2s: IRL uplinks routinely stall for over a second (a field log
-	 * showed 1.7s gaps with 287 underruns at the 120ms default), and
-	 * riding those out is the only way to avoid the concealment that
-	 * inflates the A/V mapping and holds video back with it. The old 500ms
-	 * limit could not cover them. */
+	/* IRL uplinks routinely stall for over a second (a field log showed
+	 * 1.7s gaps with 287 underruns at the 120ms default), and riding those
+	 * out is the only way to avoid the concealment that inflates the A/V
+	 * mapping and holds video back with it. High-bitrate senders with deep
+	 * buffering of their own stall for longer still, which is why the
+	 * ceiling is IRL_BUFFER_TARGET_MAX_MS rather than the 2s it was. */
 	obs_properties_add_int(props, "buffer_target_ms",
-			       obs_module_text("TargetBuffer"), 20, 2000, 10);
+			       obs_module_text("TargetBuffer"),
+			       IRL_BUFFER_TARGET_MIN_MS,
+			       IRL_BUFFER_TARGET_MAX_MS, 10);
 	obs_properties_add_bool(props, "adaptive_speed",
 				obs_module_text("AdaptiveLatency"));
+	/* Only meaningful with Adaptive Latency Control on: it is the ceiling
+	 * on that loop's drain direction. */
+	obs_property_t *catchup = obs_properties_add_int_slider(
+		props, "catchup_percent", obs_module_text("CatchUpSpeed"),
+		IRL_CATCHUP_PERCENT_MIN, IRL_CATCHUP_PERCENT_MAX, 1);
+	obs_property_int_set_suffix(catchup, "%");
 	obs_properties_add_text(props, "audio_buffer_help",
 				obs_module_text("AudioBufferHelp"),
 				OBS_TEXT_INFO);

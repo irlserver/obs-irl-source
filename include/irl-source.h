@@ -53,6 +53,32 @@ struct irl_source;
 #define IRL_DEFAULT_NETWORK_BUFFER_MB 2
 #define IRL_DEFAULT_BUFFER_TARGET_MS 120
 #define IRL_DEFAULT_ADAPTIVE_SPEED true
+
+/* Range of the Target Buffer slider.
+ *
+ * The ceiling is not a limit of the controller — it is where holding the
+ * cushion stops being free. Every millisecond of audio buffer is also a
+ * millisecond of decoded video held in the pacing queue (see
+ * IRL_VIDEO_PACING_MAX_FRAMES/BYTES), and the whole target is paid as
+ * startup delay before playback primes. High-bitrate uplinks with deep
+ * sender-side buffering do stall for several seconds, though, and 2s could
+ * not ride those out, so the ceiling is set by what the video side can still
+ * pace rather than by what the audio side needs. */
+#define IRL_BUFFER_TARGET_MIN_MS 20
+#define IRL_BUFFER_TARGET_MAX_MS 8000
+
+/* Catch-up (drain) speed authority, as a percentage above native rate.
+ *
+ * The build direction stays fixed at an inaudible -2%; this is the drain
+ * direction, which is the audible one — 5% is ~85 cents, obvious on music
+ * and unremarkable on speech. Lower it to make a recovery slower but
+ * inaudible, raise it to clear a backlog faster. Bounded below by the
+ * speed trim's own +-1% authority (a ceiling under that would leave the
+ * integral term with nothing to work in) and above by where the pitch
+ * shift stops sounding like anything but a fast-forward. */
+#define IRL_DEFAULT_CATCHUP_PERCENT 5
+#define IRL_CATCHUP_PERCENT_MIN 2
+#define IRL_CATCHUP_PERCENT_MAX 15
 #define IRL_HW_DECODE_AUTO 0
 #define IRL_HW_DECODE_OFF 1
 #define IRL_HW_DECODE_NVDEC 2
@@ -88,9 +114,10 @@ struct irl_source;
 /* Full-bleed backlog policy: once the local jitter buffer holds this
  * much audio, the receiver stops reading and lets the transport hold
  * the rest (TCP/RTMP backpressure; SRT bounds its own backlog via the
- * latency window). Playback bleeds the excess at up to +5% speed, so
- * nothing audible is ever skipped. Must stay well under the ring
- * buffer capacity (4x buffer_max_ms) or writes would drop old data. */
+ * latency window). Playback bleeds the excess at up to the configured
+ * catch-up speed, so nothing audible is ever skipped. Must stay well
+ * under the ring buffer capacity (4x buffer_max_ms) or writes would drop
+ * old data. */
 #define IRL_BLEED_PACE_FILL_MS 1000
 
 /* Concealment inflates the audio->OBS playout offset with no bounded
@@ -153,7 +180,12 @@ struct irl_source;
  * and byte ceilings binds first. Past either, frames are emitted before they
  * are due, which is exactly the old behaviour, and counted so it is visible.
  */
-#define IRL_VIDEO_PACING_MAX_FRAMES 512
+/* The frame ceiling has to carry the largest Target Buffer at the highest
+ * frame rate anyone streams: the lead is the audio buffer, so 8s at 120fps
+ * is 960 frames. At 512 the count bound, not the byte bound, was what
+ * decided when pacing gave up — and it did so at a different latency for
+ * every frame rate. The byte ceiling below is the one that should bind. */
+#define IRL_VIDEO_PACING_MAX_FRAMES 1024
 /* The byte ceiling has to carry a realistic lead at 4K: one 3840x2160 frame
  * is ~12MB at 8-bit (NV12) and ~24MB at 10-bit (P010), so 512MB was only
  * ~700ms / ~350ms of 4K60 — a queue permanently over its ceiling on exactly
@@ -221,6 +253,9 @@ struct irl_config {
 	volatile long buffer_min_ms;    /* hot */
 	volatile long buffer_max_ms;    /* hot */
 	volatile bool adaptive_speed;   /* hot */
+	/* Percent above native rate the drain may reach. See
+	 * IRL_DEFAULT_CATCHUP_PERCENT. */
+	volatile long catchup_percent; /* hot */
 
 	/* PTS repair (constants, kept here so pts_repair_init has one
 	 * source of truth) */

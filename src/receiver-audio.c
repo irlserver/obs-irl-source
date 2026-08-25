@@ -33,7 +33,8 @@
  * Buffer regulation is done by playback speed only, never by audible
  * trims. Backlog is trimmed only before playback primes; after that,
  * content is preserved: the read loop applies transport backpressure
- * above a fill ceiling and playback bleeds the excess at up to +5%.
+ * above a fill ceiling and playback bleeds the excess at up to the
+ * configured catch-up speed.
  */
 
 #include <limits.h>
@@ -62,12 +63,13 @@
  * side also uses it to decide when a lead is worth reporting. */
 
 /* Playback speed authority for buffer regulation. Asymmetric,
- * IRLToolkit-style: draining a post-stall backlog runs up to +5%
- * (mild chipmunk, but every sample is preserved instead of skipped),
- * while the build direction stays at an inaudible -2%. Draining
- * 1s of backlog takes ~20s at full authority. */
+ * IRLToolkit-style: draining a post-stall backlog runs fast (every sample
+ * is preserved instead of skipped) while the build direction stays at an
+ * inaudible -2%. The drain ceiling is the Catch-Up Speed setting rather
+ * than a constant, because it is the one bound here that is audible and
+ * the right trade differs by content: at the +5% default, draining 1s of
+ * backlog takes ~20s and music is noticeably sharp where speech is not. */
 #define AUDIO_SPEED_MIN 0.98f
-#define AUDIO_SPEED_MAX 1.05f
 #define AUDIO_SPEED_DEADBAND_MS 20
 #define AUDIO_SPEED_SMOOTHING 0.05f
 
@@ -82,6 +84,20 @@
  * is 3.5 cents at the very edge, an order of magnitude under anything
  * audible, and it makes the ramp continuous where it used to step. */
 #define AUDIO_SPEED_DEADBAND_SLOPE 0.002f
+
+/* Upper speed limit, from the hot Catch-Up Speed setting. Read per use
+ * rather than cached: the slider applies live, and every consumer here
+ * (ramp, anti-windup, clamp, stuck-drain detection) has to agree on the
+ * same value within a cycle for the anti-windup comparisons to hold. */
+static inline float audio_speed_max(const struct irl_source *ctx)
+{
+	long pct = os_atomic_load_long(&ctx->config.catchup_percent);
+	if (pct < IRL_CATCHUP_PERCENT_MIN)
+		pct = IRL_CATCHUP_PERCENT_MIN;
+	else if (pct > IRL_CATCHUP_PERCENT_MAX)
+		pct = IRL_CATCHUP_PERCENT_MAX;
+	return 1.0f + (float)pct / 100.0f;
+}
 
 /* Speed trim: the integral term that holds the buffer at target when
  * the sender's media clock is not wall clock. See the field comment on
@@ -115,16 +131,18 @@
  * skipping chunks when fill runs away. */
 #define AUDIO_LL_MAX_FILL_MS 100
 
-/* The drain is bounded at +5%, so a sender whose media clock runs faster
- * than that can never be caught up with: the buffer rises to the read
- * loop's bleed ceiling and parks there, and latency parks with it. Nothing
- * the plugin may do fixes that — draining harder would mean skipping audio,
- * which this design does not do once primed — but it should not look like
- * normal operation either, so detect it and say so.
+/* The drain is bounded by the catch-up speed, so a sender whose media clock
+ * runs faster than that can never be caught up with: the buffer rises to
+ * the read loop's bleed ceiling and parks there, and latency parks with it.
+ * Nothing the plugin may do fixes that — draining harder would mean
+ * skipping audio, which this design does not do once primed — but it
+ * should not look like normal operation either, so detect it and say so.
  *
  * Twenty seconds is chosen to sit clear of a legitimate burst: even a
  * backlog filling the ceiling drains back under buffer_max in about 13s at
- * the default target, after which the speed ramp backs off on its own. */
+ * the default target and catch-up speed, after which the speed ramp backs
+ * off on its own. A lower catch-up setting drains slower, but "slower" is
+ * still progress, which is what the check below actually tests for. */
 #define AUDIO_DRAIN_STUCK_US 20000000ULL
 /* Treat the drain as making progress if fill has come down by this much
  * since the window opened, so a slow but real recovery is not reported. */
@@ -429,7 +447,7 @@ static void audio_update_speed_trim(struct irl_source *ctx, int fill_ms,
 	 * clamps ramp + trim, so with the trim near its own limit the sum
 	 * saturates while the ramp is still short of it. */
 	float command = ramp + ctx->audio_speed_trim;
-	bool pinned_high = command >= AUDIO_SPEED_MAX - 0.0005f;
+	bool pinned_high = command >= audio_speed_max(ctx) - 0.0005f;
 	bool pinned_low = command <= AUDIO_SPEED_MIN + 0.0005f;
 	if ((pinned_high && step > 0.0) || (pinned_low && step < 0.0))
 		return;
@@ -476,7 +494,7 @@ static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 		if (t > 1.0f)
 			t = 1.0f;
 		float edge = 1.0f + AUDIO_SPEED_DEADBAND_SLOPE;
-		ramp = edge + (AUDIO_SPEED_MAX - edge) * t;
+		ramp = edge + (audio_speed_max(ctx) - edge) * t;
 	} else {
 		/* Shallow slope rather than a flat 1.0: see
 		 * AUDIO_SPEED_DEADBAND_SLOPE. This is what damps the trim. */
@@ -488,8 +506,8 @@ static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 	audio_update_speed_trim(ctx, fill_ms, target_ms, ramp);
 
 	/* The trim shifts the operating point the ramp swings around; the
-	 * hard clamp below is unchanged, because AUDIO_SPEED_MIN/MAX are
-	 * the audibility limits and hold absolutely. That the slow-down
+	 * hard clamp below is unchanged, because the min and the catch-up
+	 * ceiling are the audibility limits and hold absolutely. That the slow-down
 	 * authority shrinks to -1% once the trim has learned +1% is
 	 * correct, not a loss: having established that the sender runs
 	 * fast, dropping to 0.98 absolute would be over-correcting. */
@@ -501,8 +519,9 @@ static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 		(target_speed - ctx->current_speed) * AUDIO_SPEED_SMOOTHING;
 	if (ctx->current_speed < AUDIO_SPEED_MIN)
 		ctx->current_speed = AUDIO_SPEED_MIN;
-	if (ctx->current_speed > AUDIO_SPEED_MAX)
-		ctx->current_speed = AUDIO_SPEED_MAX;
+	float speed_max = audio_speed_max(ctx);
+	if (ctx->current_speed > speed_max)
+		ctx->current_speed = speed_max;
 	return ctx->current_speed;
 }
 
@@ -644,7 +663,7 @@ static bool should_hide_audio_backlog(const struct irl_source *ctx)
  * startup backlog can be dropped for free. This is the only trim
  * path. Once audio is live, content is never skipped: the read loop
  * stops ingesting above a fill ceiling (transport backpressure) and
- * playback bleeds the backlog off at up to AUDIO_SPEED_MAX. */
+ * playback bleeds the backlog off at up to the catch-up speed. */
 static bool maybe_trim_hidden_audio_backlog(struct irl_source *ctx, int fill_ms,
 					    int chunk_count)
 {
@@ -779,8 +798,9 @@ static void irl_audio_maybe_reanchor_offset(struct irl_source *ctx,
 
 	/* Only reclaim latency the speed-drain cannot. While backlog is
 	 * queued the inflation is real buffered audio, and draining it at
-	 * up to +5% preserves every sample, so leave it entirely to the
-	 * speed controller (content is never skipped). We step in only
+	 * up to the catch-up speed preserves every sample, so leave it
+	 * entirely to the speed controller (content is never skipped). We
+	 * step in only
 	 * once the buffer is back at/below target, where the residual
 	 * offset is phantom: concealment silence with no backing audio
 	 * (the concealed packets were dropped, not merely late), which
@@ -814,7 +834,7 @@ static void audio_check_drain_progress(struct irl_source *ctx, int fill_ms,
 				       float speed)
 {
 	int target_ms = (int)os_atomic_load_long(&ctx->config.buffer_target_ms);
-	bool at_full_authority = speed >= AUDIO_SPEED_MAX - 0.0005f &&
+	bool at_full_authority = speed >= audio_speed_max(ctx) - 0.0005f &&
 				 fill_ms > target_ms + AUDIO_SPEED_DEADBAND_MS;
 
 	if (!at_full_authority) {

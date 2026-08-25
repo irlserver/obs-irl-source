@@ -34,7 +34,15 @@
 /* ── Copied from src/receiver-audio.c ─────────────────────── */
 
 #define AUDIO_SPEED_MIN 0.98f
+/* The plugin takes this from the Catch-Up Speed setting
+ * (IRL_CATCHUP_PERCENT_MIN..MAX). The sim runs the default; the loop it
+ * exercises is the one around target, where the ceiling only enters through
+ * the anti-windup test below, so the default is the interesting case.
+ * Override it (-DAUDIO_SPEED_MAX=1.02f) to check a ceiling close to the
+ * trim's own +-1%, where the two can contend. */
+#ifndef AUDIO_SPEED_MAX
 #define AUDIO_SPEED_MAX 1.05f
+#endif
 #define AUDIO_SPEED_DEADBAND_MS 20
 #define AUDIO_SPEED_SMOOTHING 0.05f
 #define AUDIO_SPEED_DEADBAND_SLOPE 0.002f
@@ -111,8 +119,13 @@ static void update_trim(struct loop *L, int fill_ms, float ramp, bool recovery)
 
 	double step = AUDIO_SPEED_TRIM_GAIN * ((double)err_ms / 1000.0) * DT;
 
-	bool pinned_high = ramp >= AUDIO_SPEED_MAX - 0.0005f;
-	bool pinned_low = ramp <= AUDIO_SPEED_MIN + 0.0005f;
+	/* The command actually issued, not the ramp alone: the actuator
+	 * clamps ramp + trim, so with the trim near its own limit the sum
+	 * saturates while the ramp is still short of it. Matches
+	 * audio_update_speed_trim(). */
+	float command = ramp + L->trim;
+	bool pinned_high = command >= AUDIO_SPEED_MAX - 0.0005f;
+	bool pinned_low = command <= AUDIO_SPEED_MIN + 0.0005f;
 	if ((pinned_high && step > 0.0) || (pinned_low && step < 0.0))
 		return;
 
@@ -237,9 +250,12 @@ int main(void)
 	 * ramp's slopes change with min_ms/max_ms, and with them the
 	 * damping the trim relies on. */
 	printf("target sweep, sender +0.3%%, trim on, 400s\n");
-	const int targets[] = {40, 80, 120, 300, 500};
+	/* Up to the Target Buffer ceiling (IRL_BUFFER_TARGET_MAX_MS): a large
+	 * target widens the ramp span, which lowers the proportional gain,
+	 * and the trim has to hold the level anyway. */
+	const int targets[] = {40, 80, 120, 300, 500, 2000, 8000};
 	int fails = 0;
-	for (int i = 0; i < 5; i++) {
+	for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
 		target_ms = targets[i];
 		struct loop S = {1.0f, 0.0f, (double)target_ms, true};
 		run_secs(&S, 1.003, 300.0, false);
@@ -255,7 +271,7 @@ int main(void)
 		bool settled = (peak - trough) < 5.0;
 		if (!settled)
 			fails++;
-		printf("    target %3dms  fill %6.1fms (err %+5.1f)  trim %+.4f%%  swing %.1fms  %s\n",
+		printf("    target %4dms  fill %6.1fms (err %+5.1f)  trim %+.4f%%  swing %.1fms  %s\n",
 		       target_ms, S.fill_ms, S.fill_ms - target_ms,
 		       (double)S.trim * 100.0, peak - trough,
 		       settled ? "settled" : "OSCILLATING");

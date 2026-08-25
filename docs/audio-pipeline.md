@@ -139,7 +139,7 @@ When there is no audio playout mapping yet (audio-less start), video falls back 
 | Brief packet loss (< 70ms) | Audio pop, possible stutter | Interpolated silently, inaudible |
 | Cell tower handoff (100-500ms gap) | Loud click, audio jumps ahead | Silence inserted, smooth transition |
 | Sender clock drift / slow latency creep | Buffer grows forever, latency increases | Bounded speed correction drains the creep gradually while video stays synced to audio |
-| RTMP congestion with a buffering encoder | Stream skips ahead or dies | Stream pauses, resumes exactly where it stopped, and bleeds the extra delay off at up to +5% speed |
+| RTMP congestion with a buffering encoder | Stream skips ahead or dies | Stream pauses, resumes exactly where it stopped, and bleeds the extra delay off at up to the Catch-Up Speed (+5% by default) |
 | Connection drops and reconnects | Loud click on disconnect, possibly corrupted frames on reconnect | Fade out, clean reconnect, keyframe gate, fade in |
 | Decoder corruption | Gray/corrupt flicker until manual restart | H.264: timestamped concealed frames are passed through to preserve cadence. HEVC: frames predicted from a missing reference (rendered gray by FFmpeg) are held back until the next keyframe. The video decoder is never flushed; only the audio decoder is, on repeated hard errors |
 | Long stream (hours) | Timestamp epoch causes OBS sync issues | Timestamps are repaired and anchored to system clock |

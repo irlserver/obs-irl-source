@@ -77,11 +77,24 @@ static void config_load(struct irl_config *cfg, obs_data_t *settings)
 		(int)obs_data_get_int(settings, "buffer_target_ms");
 	if (cfg->buffer_target_ms <= 0)
 		cfg->buffer_target_ms = IRL_DEFAULT_BUFFER_TARGET_MS;
+	/* The slider bounds this, but a scene collection can carry anything,
+	 * including a target saved by a build with a different ceiling. */
+	if (cfg->buffer_target_ms < IRL_BUFFER_TARGET_MIN_MS)
+		cfg->buffer_target_ms = IRL_BUFFER_TARGET_MIN_MS;
+	if (cfg->buffer_target_ms > IRL_BUFFER_TARGET_MAX_MS)
+		cfg->buffer_target_ms = IRL_BUFFER_TARGET_MAX_MS;
 	cfg->buffer_min_ms = cfg->buffer_target_ms / IRL_BUFFER_MIN_DIVISOR;
 	if (cfg->buffer_min_ms < IRL_BUFFER_MIN_FLOOR_MS)
 		cfg->buffer_min_ms = IRL_BUFFER_MIN_FLOOR_MS;
 	cfg->buffer_max_ms = cfg->buffer_target_ms + IRL_BUFFER_MAX_EXTRA_MS;
 	cfg->adaptive_speed = obs_data_get_bool(settings, "adaptive_speed");
+
+	cfg->catchup_percent =
+		(int)obs_data_get_int(settings, "catchup_percent");
+	if (cfg->catchup_percent < IRL_CATCHUP_PERCENT_MIN)
+		cfg->catchup_percent = IRL_CATCHUP_PERCENT_MIN;
+	if (cfg->catchup_percent > IRL_CATCHUP_PERCENT_MAX)
+		cfg->catchup_percent = IRL_CATCHUP_PERCENT_MAX;
 
 	cfg->small_gap_ms = IRL_SMALL_GAP_MS;
 	cfg->large_gap_ms = IRL_LARGE_GAP_MS;
@@ -174,6 +187,8 @@ static void config_apply_hot(struct irl_source *ctx,
 			   next->reconnect_delay);
 	os_atomic_store_bool(&ctx->config.adaptive_speed,
 			     next->adaptive_speed);
+	os_atomic_set_long(&ctx->config.catchup_percent,
+			   next->catchup_percent);
 	os_atomic_store_bool(&ctx->config.wait_for_keyframe,
 			     next->wait_for_keyframe);
 	os_atomic_store_bool(&ctx->config.clear_on_disconnect,
