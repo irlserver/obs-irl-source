@@ -10,6 +10,13 @@
  *
  * Not built, not a CI target, not linked to anything. See tools/README.md.
  *
+ * IMPORTANT: the buffer level here is CONTINUOUS. On real audio it moves in
+ * whole decoded chunks (21.3ms for 1024-sample AAC), so the sub-millisecond
+ * steady-state errors this prints are a property of the model and not of the
+ * plugin — see docs/audio-timing-pitfalls.md. What the numbers below are good
+ * for is the shape of the response: settling versus limit-cycling, and
+ * whether a transient leaks into the trim.
+ *
  * IMPORTANT: the controller below is REPLICATED from receiver-audio.c, not
  * linked, because the real one reads struct irl_source. The constants and
  * both update rules are copied verbatim; if you change them there, change

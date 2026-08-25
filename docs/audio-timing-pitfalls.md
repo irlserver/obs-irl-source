@@ -23,12 +23,40 @@ it.
 
 Since no two clocks agree exactly, every stream carries some of this.
 Simulated at the default 120ms target, a proportional-only loop parked
-21ms high on ordinary crystal drift (0.01%) and 31ms high on a 0.3% sender;
-the PI loop parks at 1ms in both cases.
+21ms high on ordinary crystal drift (0.01%) and 31ms high on a 0.3% sender,
+against ~1ms for the PI loop — but see the next section before quoting that
+last number.
 
 The fix is an integral term (the *speed trim*). If you find yourself adding
 a "correction factor" or a "bias" to a proportional controller, you are
 adding an integrator — do it deliberately and read the next two sections.
+
+## The buffer level is quantised to one chunk
+
+Reads and writes are both whole decoded chunks, so the jitter buffer's
+residual is always a multiple of one — 21.3ms for 1024-sample AAC frames.
+The level the controller sees therefore steps: 85, 106, 128, 149ms and so
+on, and a 120ms target is not a reachable state at all. On a real feed the
+loop sits at 106 or 128 and the configured target is a value it straddles
+rather than one it holds.
+
+Two consequences worth remembering:
+
+- **No controller here resolves below 21ms.** The simulation in `tools/`
+  models a continuous level and will happily report a 1ms standing error;
+  that number is a property of the model, not of the plugin. What the trim
+  genuinely removes is the *systematic* offset — tens of milliseconds on a
+  drifting sender — and that is the claim worth making.
+- **The user gets less cushion than they configured**, by up to one chunk.
+  A 120ms target commonly runs at 106ms, and that missing 22ms is real
+  margin against an underrun. This is not new — a flat-deadband
+  proportional loop parks in the same place for the same reason — but it
+  means the target reads more like a set point the level orbits than a
+  floor it respects.
+
+Anything that tries to tighten steady-state accuracy needs to fix the
+resolution first, and that means decoupling the read size from the decoded
+frame size. Nothing in the controller can help.
 
 ## A deadband and an integrator do not mix
 
