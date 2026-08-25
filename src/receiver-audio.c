@@ -71,6 +71,46 @@
 #define AUDIO_SPEED_DEADBAND_MS 20
 #define AUDIO_SPEED_SMOOTHING 0.05f
 
+/* Speed at the edge of the deadband.
+ *
+ * The deadband used to be flat: dead-on 1.0 anywhere within 20ms of
+ * target. That is fine for a proportional-only loop, and fatal once the
+ * trim below is added — a region with zero proportional feedback leaves
+ * the integrator undamped, and the pair limit-cycles through it forever
+ * (simulated: +-20ms of fill on a ~2 minute period, never settling).
+ * A shallow slope through the deadband restores the damping. At 0.2% it
+ * is 3.5 cents at the very edge, an order of magnitude under anything
+ * audible, and it makes the ramp continuous where it used to step. */
+#define AUDIO_SPEED_DEADBAND_SLOPE 0.002f
+
+/* Speed trim: the integral term that holds the buffer at target when
+ * the sender's media clock is not wall clock. See the field comment on
+ * audio_speed_trim in irl-source.h for why the ramp alone cannot.
+ *
+ * The gain is deliberately far slower than the ramp. Their jobs are
+ * separated in time, not in signal: the ramp owns transients (closed-loop
+ * time constant of a few seconds), the trim owns the constant underneath
+ * them and converges over a minute or two. Picked as the natural frequency
+ * of the level/trim loop, w = sqrt(gain) ~= 0.05 rad/s, which is ~20x
+ * slower than the ramp and so cannot beat against it.
+ *
+ * Error is in seconds of buffer and dt in seconds, so the gain is 1/s^2. */
+#define AUDIO_SPEED_TRIM_GAIN 0.0025
+#define AUDIO_SPEED_TRIM_MAX 0.01f
+
+/* Only integrate while the level is near target. Further out the loop is
+ * working a transient — a backlog draining, a buffer refilling — and the
+ * level is reporting that transient, not the sender's rate. Three
+ * deadbands is comfortably wider than the standing error any rate inside
+ * the trim's own authority can produce, so nothing the trim is meant to
+ * correct falls outside the window. */
+#define AUDIO_SPEED_TRIM_ERR_WINDOW_MS (3 * AUDIO_SPEED_DEADBAND_MS)
+
+/* A dt this long means the audio thread was not running (debugger, laptop
+ * sleep, starvation). Integrating across it would credit the whole gap to
+ * the sender's clock. */
+#define AUDIO_SPEED_TRIM_MAX_DT_US 1000000ULL
+
 /* Low-latency mode has no speed control, so cap stale backlog by
  * skipping chunks when fill runs away. */
 #define AUDIO_LL_MAX_FILL_MS 100
@@ -118,6 +158,7 @@ void irl_reset_audio_timing_state(struct irl_source *ctx)
 	ctx->audio_conceal_fade_pending = false;
 	ctx->audio_out_last_valid = false;
 	ctx->audio_out_last_channels = 0;
+	ctx->audio_speed_frac = 0.0;
 	ctx->audio_playout_offset_baseline_ns = 0;
 	ctx->audio_playout_offset_baseline_set = false;
 	ctx->audio_last_obs_lead_ns = 0;
@@ -144,6 +185,17 @@ void irl_reset_audio_timing_state(struct irl_source *ctx)
 void irl_reset_stream_timing_state(struct irl_source *ctx)
 {
 	irl_reset_audio_timing_state(ctx);
+
+	/* The trim is a property of the sender, so it deliberately survives
+	 * the audio-only resets above (a throttled decoder flush must not
+	 * cost two minutes of relearning). It does not survive this one: a
+	 * PTS-repair reset means the timeline broke badly enough that the
+	 * level no longer maps to the sender's clock, and a reconnect may not
+	 * even be the same encoder. Relearning costs nothing worse than the
+	 * behaviour before the trim existed. */
+	ctx->audio_speed_trim = 0.0f;
+	ctx->audio_speed_trim_last_us = 0;
+
 	ctx->video_ts_init = false;
 	ctx->latest_video_stream_pts_ns = 0;
 	/* State, not counters: the interval has to be re-measured for the
@@ -330,11 +382,75 @@ static uint64_t audio_output_lead_ns(const struct irl_source *ctx,
 
 /* ── Speed control ────────────────────────────────────────── */
 
+/* Integrate the level error into the speed trim.
+ *
+ * `ramp` is the proportional term this cycle, passed in so the trim can
+ * tell whether the loop is still in control. Caller holds
+ * audio_state_lock. */
+static void audio_update_speed_trim(struct irl_source *ctx, int fill_ms,
+				    int target_ms, float ramp)
+{
+	uint64_t now_us = (uint64_t)av_gettime();
+	uint64_t last_us = ctx->audio_speed_trim_last_us;
+
+	ctx->audio_speed_trim_last_us = now_us;
+
+	/* First cycle after a start or a stall: re-seed dt, integrate
+	 * nothing. */
+	if (last_us == 0 || now_us <= last_us ||
+	    now_us - last_us > AUDIO_SPEED_TRIM_MAX_DT_US)
+		return;
+
+	/* Concealment and post-reset recovery move the fill for reasons
+	 * that are not the sender's clock. Integrating there would learn
+	 * the outage. */
+	if (irl_audio_recovery_active(ctx))
+		return;
+
+	int err_ms = fill_ms - target_ms;
+	if (err_ms > AUDIO_SPEED_TRIM_ERR_WINDOW_MS ||
+	    err_ms < -AUDIO_SPEED_TRIM_ERR_WINDOW_MS)
+		return;
+
+	double dt = (double)(now_us - last_us) / 1000000.0;
+	double err_s = (double)err_ms / 1000.0;
+	double step = AUDIO_SPEED_TRIM_GAIN * err_s * dt;
+
+	/* Anti-windup, the second half of the error-window gate above.
+	 *
+	 * While the loop is saturated the level has stopped reporting the
+	 * sender's rate — it reports that the controller ran out of
+	 * authority. At the default target the window gate already covers
+	 * this, but a small target puts min_ms within 60ms of target and the
+	 * command can pin while the error is still inside the window, so the
+	 * check earns its place there.
+	 *
+	 * Test the command actually issued, not the ramp alone: the actuator
+	 * clamps ramp + trim, so with the trim near its own limit the sum
+	 * saturates while the ramp is still short of it. */
+	float command = ramp + ctx->audio_speed_trim;
+	bool pinned_high = command >= AUDIO_SPEED_MAX - 0.0005f;
+	bool pinned_low = command <= AUDIO_SPEED_MIN + 0.0005f;
+	if ((pinned_high && step > 0.0) || (pinned_low && step < 0.0))
+		return;
+
+	double next = (double)ctx->audio_speed_trim + step;
+	if (next > AUDIO_SPEED_TRIM_MAX)
+		next = AUDIO_SPEED_TRIM_MAX;
+	else if (next < -(double)AUDIO_SPEED_TRIM_MAX)
+		next = -(double)AUDIO_SPEED_TRIM_MAX;
+	ctx->audio_speed_trim = (float)next;
+}
+
 static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 {
 	if (!os_atomic_load_bool(&ctx->config.adaptive_speed) ||
 	    ctx->config.low_latency_audio) {
 		ctx->current_speed = 1.0f;
+		/* Nothing is regulating the buffer, so a trim learned before
+		 * the setting changed describes a loop that no longer runs. */
+		ctx->audio_speed_trim = 0.0f;
+		ctx->audio_speed_trim_last_us = 0;
 		return 1.0f;
 	}
 
@@ -343,7 +459,7 @@ static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 	int max_ms = (int)os_atomic_load_long(&ctx->config.buffer_max_ms);
 	int low_edge = target_ms - AUDIO_SPEED_DEADBAND_MS;
 	int high_edge = target_ms + AUDIO_SPEED_DEADBAND_MS;
-	float target_speed = 1.0f;
+	float ramp;
 
 	if (fill_ms < low_edge) {
 		int span = low_edge - min_ms;
@@ -351,15 +467,33 @@ static float compute_buffered_output_speed(struct irl_source *ctx, int fill_ms)
 				   : 1.0f;
 		if (t > 1.0f)
 			t = 1.0f;
-		target_speed = 1.0f - (1.0f - AUDIO_SPEED_MIN) * t;
+		float edge = 1.0f - AUDIO_SPEED_DEADBAND_SLOPE;
+		ramp = edge - (edge - AUDIO_SPEED_MIN) * t;
 	} else if (fill_ms > high_edge) {
 		int span = max_ms - high_edge;
 		float t = span > 0 ? (float)(fill_ms - high_edge) / (float)span
 				   : 1.0f;
 		if (t > 1.0f)
 			t = 1.0f;
-		target_speed = 1.0f + (AUDIO_SPEED_MAX - 1.0f) * t;
+		float edge = 1.0f + AUDIO_SPEED_DEADBAND_SLOPE;
+		ramp = edge + (AUDIO_SPEED_MAX - edge) * t;
+	} else {
+		/* Shallow slope rather than a flat 1.0: see
+		 * AUDIO_SPEED_DEADBAND_SLOPE. This is what damps the trim. */
+		ramp = 1.0f + AUDIO_SPEED_DEADBAND_SLOPE *
+				      (float)(fill_ms - target_ms) /
+				      (float)AUDIO_SPEED_DEADBAND_MS;
 	}
+
+	audio_update_speed_trim(ctx, fill_ms, target_ms, ramp);
+
+	/* The trim shifts the operating point the ramp swings around; the
+	 * hard clamp below is unchanged, because AUDIO_SPEED_MIN/MAX are
+	 * the audibility limits and hold absolutely. That the slow-down
+	 * authority shrinks to -1% once the trim has learned +1% is
+	 * correct, not a loss: having established that the sender runs
+	 * fast, dropping to 0.98 absolute would be over-correcting. */
+	float target_speed = ramp + ctx->audio_speed_trim;
 
 	if (ctx->current_speed <= 0.0f)
 		ctx->current_speed = 1.0f;
@@ -417,9 +551,27 @@ static int apply_output_speed(struct irl_source *ctx, const uint8_t *in,
 	if (!ensure_speed_swr(ctx, rate, channels))
 		return -1;
 
-	int desired = (int)((float)in_frames / speed + 0.5f);
+	/* Carry the fractional remainder into the next chunk. The resampler
+	 * is driven in whole samples, so rounding each chunk independently
+	 * quantises the applied speed to multiples of 1/in_frames (~0.1% at
+	 * 1024 frames): a requested 1.0005 is executed as 1.00098, and a
+	 * requested 1.0004 as 1.0. Accumulating makes the long-run rate
+	 * exact, and stops the compensation switching on and off as the
+	 * request drifts across a rounding boundary. */
+	double want = (double)in_frames / (double)speed + ctx->audio_speed_frac;
+	int desired = (int)(want + 0.5);
 	if (desired < 1)
 		desired = 1;
+
+	/* Bounded so a pathological speed or a clamped `desired` cannot let
+	 * the debt run away and dump a correction into some later chunk. */
+	double carry = want - (double)desired;
+	if (carry > 1.0)
+		carry = 1.0;
+	else if (carry < -1.0)
+		carry = -1.0;
+	ctx->audio_speed_frac = carry;
+
 	if (desired != in_frames &&
 	    swr_set_compensation(ctx->speed_swr, desired - in_frames,
 				 desired) < 0)

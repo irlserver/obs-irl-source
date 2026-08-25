@@ -429,6 +429,16 @@ struct irl_source {
 	SwrContext *speed_swr;
 	int speed_swr_rate;
 	int speed_swr_channels;
+	/* Fractional output-sample debt carried between chunks (audio
+	 * thread).  The resampler is driven in whole samples per chunk, so
+	 * without this the applied speed is quantised to multiples of
+	 * 1/chunk — about 0.1% at 1024 frames.  Everything the controller
+	 * asks for below that either rounds away to 1.0 or gets executed at
+	 * twice its size, which makes both the deadband slope and the trim
+	 * meaningless, and makes the compensation chatter on and off as the
+	 * request crosses a rounding boundary.  Carrying the remainder makes
+	 * the long-run rate exact at any requested speed. */
+	double audio_speed_frac;
 	uint8_t *audio_speed_scratch;      /* audio thread */
 	size_t audio_speed_scratch_capacity;
 
@@ -478,6 +488,29 @@ struct irl_source {
 
 	/* Buffered audio correction state */
 	float current_speed;
+
+	/* Persistent component of playback speed (audio thread).
+	 *
+	 * The ramp in compute_buffered_output_speed() is proportional: it
+	 * only produces a speed away from 1.0 while the buffer sits away
+	 * from target. That is the right shape for a transient — a stall's
+	 * backlog drains and the ramp relaxes — but it cannot hold a
+	 * *constant*. A sender whose media clock runs at 1.003x delivers
+	 * 3ms of extra audio every second forever, and the only ramp
+	 * position that consumes it is one with a permanent level error, so
+	 * the buffer parks off-target and the latency parks with it, right
+	 * up until the offset re-anchor concedes and splices.
+	 *
+	 * The trim is the integral term that removes that standing error.
+	 * It accumulates only in the ramp's linear region, where the level
+	 * genuinely reports the sender's rate, and is clamped to ±1% —
+	 * enough for any real crystal (<0.01%) or framerate mismatch
+	 * (~0.1%), far below audibility, and small enough that the ramp
+	 * keeps essentially all of its authority for actual transients.
+	 *
+	 * It converges to the sender's rate without ever measuring it. */
+	float audio_speed_trim;
+	uint64_t audio_speed_trim_last_us;
 	uint64_t audio_underruns;
 	uint64_t audio_resync_skipped_chunks;
 	uint64_t audio_hidden_trimmed_chunks;

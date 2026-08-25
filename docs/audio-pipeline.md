@@ -55,7 +55,21 @@ The buffer level drifts over time due to network throughput variation, clock mis
 
 Speed is applied inside the plugin with a persistent swresample compensation (the same mechanism ffplay uses for audio clock sync). The sample rate submitted to OBS never changes, because libobs destroys and rebuilds its per-source resampler with no crossfade whenever `samples_per_sec` changes, which produces a click per change.
 
-The controller is proportional with a deadband and asymmetric authority: near the target it plays at exactly 1.0x, below the target it slows toward 0.98x (building buffer, inaudible), above the target it speeds toward 1.05x (draining backlog, a mild chipmunk effect). Draining 1s of backlog takes about 20s at full authority.
+The controller is PI — a fast proportional ramp with a deadband and asymmetric authority, plus a slow integral trim underneath it.
+
+The **ramp** owns transients: below the target it slows toward 0.98x (building buffer, inaudible), above the target it speeds toward 1.05x (draining backlog, a mild chipmunk effect). Draining 1s of backlog takes about 20s at full authority. Within ±20ms of target it is nearly flat, sloping to only ±0.2% at the edges of that band.
+
+The **trim** owns the constant underneath, and exists because a proportional loop mathematically cannot hold one. Two independent clocks never agree exactly, and a sender configured against the wrong frame rate is off by ~0.1% by construction. A sender at 1.003x delivers 3ms of extra audio every second, forever; the only ramp position that consumes that is one with a permanent level error, so the buffer parks off-target and the latency parks with it. Simulated at the default target, a proportional-only loop parks 21ms high on ordinary crystal drift and 31ms high on a 0.3% sender; the PI loop parks at 1ms in both cases. Since every stream has some drift, that is latency every stream was carrying for nothing.
+
+The trim is clamped to ±1% — far more than any real crystal (<0.01%) or frame-rate mismatch (~0.1%) needs, far below audibility (±1% is 17 cents), and small enough that the ramp keeps essentially all of its authority for real transients. It converges over a minute or two, survives a decoder flush, and resets on a reconnect or PTS reset where the next stream may not be the same encoder.
+
+Three details make it safe rather than a new source of oscillation, and all three were defects before they were features:
+
+- It integrates only within ±60ms of target, and never while the issued command is pinned at 0.98x or 1.05x. Outside those the level is reporting a backlog draining or a buffer starving — a transient — not the sender's rate. Without this gate the loop learns "the sender is fast" from a network stall. The pin test is on ramp + trim, not the ramp alone, because the actuator clamps their sum.
+- The deadband slopes gently instead of being flat. A region with zero proportional feedback leaves an integrator undamped, and the pair limit-cycles through it indefinitely (simulated: ±20ms of buffer on a ~2 minute period, never settling). The 0.2% slope restores damping and is roughly 3.5 cents at its steepest.
+- The speed request is applied with a fractional sample carry. The resampler is driven in whole samples per chunk, which quantises the applied speed to ~0.1% steps at 1024 frames — so before the carry existed, a requested +0.02% was discarded and a requested +0.05% came out at +0.098%. That is the whole range the slope and most of the trim operate in.
+
+Notably, the trim converges to the sender's clock rate **without measuring it**. An earlier revision did measure it directly, and that estimator was deleted: see `docs/audio-timing-pitfalls.md` for what it cost and why a measurement that cannot reach playback is worth more than one that converges faster.
 
 Backlog is never skipped once playback has primed. When a stall ends and delayed data floods back in, everything gets played, sped up, until latency returns to the target. Above a fill ceiling (about 1s) the receiver stops reading from the transport, so the excess buffers at the sender or in the TCP path instead of overflowing the local ring buffer. With an RTMP encoder that buffers during congestion, the stream pauses and resumes exactly where it stopped, then bleeds the extra delay off over the following minutes. SRT bounds its own backlog through the latency window, so this ceiling rarely engages there.
 
