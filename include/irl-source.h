@@ -196,6 +196,31 @@ struct irl_source;
 /* Emit rather than sleep again when this close to due: another wakeup costs
  * more than the timing error it would remove. */
 #define IRL_VIDEO_PACING_SLACK_NS 1000000LL
+/* How far ahead of its due time a frame is handed to libobs, in OBS canvas
+ * ticks. The frame still carries its due time as its timestamp, so libobs
+ * shows it at the same moment either way; what the lead buys is that the
+ * frame is already queued when the render tick it belongs to runs.
+ *
+ * ready_async_frame() advances its play head by exact wall-clock deltas and
+ * takes the frame whose timestamp it has just passed, so a frame already in
+ * the async queue lands on a deterministic tick. A frame handed over at its
+ * due time has not been queued yet when that tick runs, and slips to the
+ * next one — but only sometimes, because what decides it is this thread's
+ * wakeup jitter (a condvar timeout, so millisecond-granular at best, and far
+ * coarser on a Windows box whose timer resolution nothing has raised). For a
+ * 30fps source on a 60fps canvas that is the difference between every frame
+ * holding two ticks and frames alternating between one and three: judder, on
+ * exactly the panning shots where it is most visible.
+ *
+ * Two ticks covers that jitter. It is still a queue depth of one to four
+ * source frames, far under the 30 at which cache_video() drops the whole
+ * async queue, which is what the pacing queue exists to prevent. */
+#define IRL_VIDEO_PACING_LEAD_TICKS 2
+/* Ceiling on that lead, for a canvas running at an unusually low frame rate.
+ * Past this the queue depth stops being the thing worth optimising. */
+#define IRL_VIDEO_PACING_MAX_LEAD_NS 50000000ULL
+/* Canvas tick used when libobs has not reported one yet (60fps). */
+#define IRL_VIDEO_CANVAS_TICK_DEFAULT_NS 16666667ULL
 /* Ceiling on a single pacing sleep, so a clear or a shutdown is never left
  * waiting on a frame that is due far in the future. */
 #define IRL_VIDEO_PACING_MAX_WAIT_MS 50
