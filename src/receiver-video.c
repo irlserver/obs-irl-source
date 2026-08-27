@@ -188,16 +188,36 @@ static void pacing_reschedule(struct irl_source *ctx)
 	}
 }
 
-/* Emit every frame whose moment has arrived. Over the ceilings the head goes
- * out early rather than being dropped: too-early video is what the un-paced
- * path did all the time, and it beats a hole in the picture. */
-static void pacing_emit_due(struct irl_source *ctx, uint64_t now)
+/* How early a frame is handed to libobs. See IRL_VIDEO_PACING_LEAD_TICKS:
+ * the frame keeps its due time as its timestamp, so this changes when libobs
+ * receives it, not when it is shown. Sampled per cycle rather than cached,
+ * because the canvas frame rate is a setting the user can change while the
+ * source runs. */
+static int64_t pacing_emit_slack_ns(void)
+{
+	uint64_t tick = obs_get_frame_interval_ns();
+	if (tick == 0)
+		tick = IRL_VIDEO_CANVAS_TICK_DEFAULT_NS;
+
+	uint64_t lead = tick * IRL_VIDEO_PACING_LEAD_TICKS;
+	if (lead > IRL_VIDEO_PACING_MAX_LEAD_NS)
+		lead = IRL_VIDEO_PACING_MAX_LEAD_NS;
+
+	return (int64_t)lead + IRL_VIDEO_PACING_SLACK_NS;
+}
+
+/* Emit every frame whose moment has arrived (or is within the delivery lead).
+ * Over the ceilings the head goes out early rather than being dropped:
+ * too-early video is what the un-paced path did all the time, and it beats a
+ * hole in the picture. */
+static void pacing_emit_due(struct irl_source *ctx, uint64_t now,
+			    int64_t slack_ns)
 {
 	while (ctx->pacing_count > 0) {
 		bool over = !pacing_has_room(ctx);
 		uint64_t due = ctx->pacing_queue[ctx->pacing_head].due_ns;
 
-		if (!over && (int64_t)(due - now) > IRL_VIDEO_PACING_SLACK_NS)
+		if (!over && (int64_t)(due - now) > slack_ns)
 			return;
 		if (over)
 			ctx->pacing_overflows++;
@@ -236,12 +256,14 @@ void *irl_video_thread(void *data)
 			continue;
 		}
 
+		int64_t slack_ns = pacing_emit_slack_ns();
+
 		pacing_intake(ctx);
 		/* Before both the emit and the sleep below, so each cycle
 		 * schedules against the offset as it is now rather than as it
 		 * was when the frames were decoded. */
 		pacing_reschedule(ctx);
-		pacing_emit_due(ctx, os_gettime_ns());
+		pacing_emit_due(ctx, os_gettime_ns(), slack_ns);
 
 		irl_mutex_lock(&ctx->video_queue_lock);
 		ctx->video_pacing_now = ctx->pacing_count;
@@ -258,9 +280,12 @@ void *irl_video_thread(void *data)
 			int64_t until = (int64_t)ctx->pacing_queue[ctx->pacing_head]
 						.due_ns -
 					(int64_t)now;
-			if (until <= IRL_VIDEO_PACING_SLACK_NS)
+			if (until <= slack_ns)
 				continue; /* due already; go round again */
-			uint32_t ms = (uint32_t)(until / 1000000LL);
+			/* Wake at the moment the head enters the delivery
+			 * lead, not at its due time: sleeping the whole way
+			 * would hand it over late by exactly the lead. */
+			uint32_t ms = (uint32_t)((until - slack_ns) / 1000000LL);
 			if (ms < wait_ms)
 				wait_ms = ms;
 		}
