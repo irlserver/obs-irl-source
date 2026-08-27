@@ -193,8 +193,14 @@ static void pacing_reschedule(struct irl_source *ctx)
  * receives it, not when it is shown. Sampled per cycle rather than cached,
  * because the canvas frame rate is a setting the user can change while the
  * source runs. */
-static int64_t pacing_emit_slack_ns(void)
+static int64_t pacing_emit_slack_ns(const struct irl_source *ctx)
 {
+	/* The frame that re-anchors libobs's play head goes at its due time:
+	 * it is shown on arrival whatever its timestamp, so a lead on that
+	 * one frame biases the whole connection. */
+	if (ctx->pacing_anchor_pending)
+		return IRL_VIDEO_PACING_SLACK_NS;
+
 	uint64_t tick = obs_get_frame_interval_ns();
 	if (tick == 0)
 		tick = IRL_VIDEO_CANVAS_TICK_DEFAULT_NS;
@@ -225,12 +231,18 @@ static void pacing_emit_due(struct irl_source *ctx, uint64_t now,
 		struct irl_pacing_frame e = pacing_pop(ctx);
 		irl_video_output_frame(ctx, e.frame, e.due_ns);
 		av_frame_free(&e.frame);
+		/* That frame anchored the play head; the rest of this drain
+		 * and every later cycle get the lead back. */
+		ctx->pacing_anchor_pending = false;
 	}
 }
 
 void *irl_video_thread(void *data)
 {
 	struct irl_source *ctx = data;
+
+	/* A fresh source has last_frame_ts == 0 too. */
+	ctx->pacing_anchor_pending = true;
 
 	while (os_atomic_load_bool(&ctx->thread_active)) {
 		bool clear;
@@ -252,11 +264,14 @@ void *irl_video_thread(void *data)
 			 * ended; the next one brings its own PTS epoch. */
 			ctx->video_playout_offset_ns = 0;
 			ctx->video_playout_offset_time_ns = 0;
+			/* This resets libobs's last_frame_ts to 0, so the
+			 * next frame out re-anchors its play head. */
+			ctx->pacing_anchor_pending = true;
 			obs_source_output_video(ctx->source, NULL);
 			continue;
 		}
 
-		int64_t slack_ns = pacing_emit_slack_ns();
+		int64_t slack_ns = pacing_emit_slack_ns(ctx);
 
 		pacing_intake(ctx);
 		/* Before both the emit and the sleep below, so each cycle
