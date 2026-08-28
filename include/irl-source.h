@@ -196,6 +196,42 @@ struct irl_source;
 /* Emit rather than sleep again when this close to due: another wakeup costs
  * more than the timing error it would remove. */
 #define IRL_VIDEO_PACING_SLACK_NS 1000000LL
+/* How far ahead of its due time a frame is handed to libobs, in OBS canvas
+ * ticks. The frame still carries its due time as its timestamp, so libobs
+ * shows it at the same moment either way; what the lead buys is that the
+ * frame is already queued when the render tick it belongs to runs.
+ *
+ * ready_async_frame() advances its play head by exact wall-clock deltas and
+ * takes the frame whose timestamp it has just passed, so a frame already in
+ * the async queue lands on a deterministic tick. A frame handed over at its
+ * due time has not been queued yet when that tick runs, and slips to the
+ * next one — but only sometimes, because what decides it is this thread's
+ * wakeup jitter (a condvar timeout, so millisecond-granular at best, and far
+ * coarser on a Windows box whose timer resolution nothing has raised). For a
+ * 30fps source on a 60fps canvas that is the difference between every frame
+ * holding two ticks and frames alternating between one and three: judder, on
+ * exactly the panning shots where it is most visible.
+ *
+ * Two ticks covers that jitter. It is still a queue depth of one to four
+ * source frames, far under the 30 at which cache_video() drops the whole
+ * async queue, which is what the pacing queue exists to prevent.
+ *
+ * The lead is suppressed for one frame whenever libobs's play head is
+ * unanchored (source start, and after the clear that sets last_frame_ts back
+ * to 0). get_closest_frame() shows that frame the moment it arrives, whatever
+ * its timestamp, and anchors last_frame_ts to it; since the play head only
+ * ever advances by wall-clock deltas afterwards, anchoring it from a frame
+ * delivered a lead early would run the whole connection a lead ahead of the
+ * schedule the audio mapping set — a permanent video-leads-audio offset, in
+ * the more noticeable direction. One frame at zero lead costs nothing: the
+ * jitter this guards against is invisible on a frame that is being shown on
+ * arrival regardless. */
+#define IRL_VIDEO_PACING_LEAD_TICKS 2
+/* Ceiling on that lead, for a canvas running at an unusually low frame rate.
+ * Past this the queue depth stops being the thing worth optimising. */
+#define IRL_VIDEO_PACING_MAX_LEAD_NS 50000000ULL
+/* Canvas tick used when libobs has not reported one yet (60fps). */
+#define IRL_VIDEO_CANVAS_TICK_DEFAULT_NS 16666667ULL
 /* Ceiling on a single pacing sleep, so a clear or a shutdown is never left
  * waiting on a frame that is due far in the future. */
 #define IRL_VIDEO_PACING_MAX_WAIT_MS 50
@@ -329,6 +365,10 @@ struct irl_source {
 	size_t pacing_bytes;
 	int pacing_peak;
 	uint64_t pacing_overflows;
+	/* Set while libobs's async play head is unanchored, so the next frame
+	 * out must go at its due time rather than a lead early. See
+	 * IRL_VIDEO_PACING_LEAD_TICKS. Video-thread-private. */
+	bool pacing_anchor_pending;
 	/* Last audio playout offset the video thread saw, and when. Also
 	 * video-thread-private. A re-anchor zeroes the published mapping for
 	 * the one pump iteration it takes to rebuild it; rescheduling the
