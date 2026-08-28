@@ -875,6 +875,40 @@ static void audio_check_drain_progress(struct irl_source *ctx, int fill_ms,
 
 /* ── Pump ─────────────────────────────────────────────────── */
 
+/* Stand the low-latency output clock down until real audio returns.
+ *
+ * Low-latency mode deliberately emits no concealment, so an empty input
+ * cannot advance the sample counter. The output clock then sits still while
+ * wall clock moves, and the stall check below reads that as a stalled audio
+ * thread — which it is not. Restarting it there re-anchors, waits one lead,
+ * and trips again, so a silent input produced a restart every ~150ms for as
+ * long as it stayed silent: log spam, and audio_output_restarts /
+ * audio_quality_events climbing on a source that is merely quiet.
+ *
+ * Drop the stale mapping instead and let the normal prime path establish one
+ * new clock when a real chunk arrives. Counted as an underrun, which is what
+ * it is. Buffered mode is untouched: its concealment keeps the counter
+ * moving, so a late clock there really is an output-side stall. */
+static void suspend_low_latency_audio_clock(struct irl_source *ctx,
+					    uint64_t lag_ns)
+{
+	ctx->audio_out_primed = false;
+	ctx->audio_out_anchor_ns = 0;
+	ctx->audio_out_samples = 0;
+	ctx->latest_audio_obs_end_ts_ns = 0;
+	ctx->latest_audio_buffered_end_pts_ns = 0;
+	ctx->audio_last_obs_lead_ns = 0;
+	ctx->audio_playout_offset_baseline_set = false;
+	ctx->audio_conceal_fade_pending = true;
+
+	ctx->audio_underruns++;
+	ctx->audio_quality_events++;
+	irl_mark_audio_recovery(ctx, AUDIO_RECOVERY_HOLD_US);
+	blog(LOG_WARNING,
+	     "[irl-source] Low-latency audio input empty for %llums; suspending output clock until audio resumes",
+	     (unsigned long long)(lag_ns / 1000000ULL));
+}
+
 /* Caller holds audio_state_lock for the whole call (irl_audio_thread). See
  * the declaration in receiver-internal.h: nothing on this path may re-take
  * it. Buffer-mutex calls (peek/read/fill) nest underneath it, which is the
@@ -898,6 +932,27 @@ bool irl_pump_audio_once(struct irl_source *ctx)
 	uint64_t lead_ns = audio_output_lead_ns(ctx, base_samples, out_rate);
 	uint64_t now = os_gettime_ns();
 
+	/* Read before the primed block below, which needs to know whether the
+	 * input is empty to tell a stalled output thread from a quiet source.
+	 * The trim underneath only acts before priming, so hoisting it here
+	 * changes nothing about when it runs. */
+	int64_t peek = 0;
+	int fill_ms = 0;
+	int chunk_count = 0;
+	bool has_audio = audio_buffer_peek_state(&ctx->audio_buf, &peek,
+						 &fill_ms, &chunk_count);
+	/* The receiver thread reads this for the stats line; audio_state_lock
+	 * is already held for the whole pump, so the publish is covered.
+	 * peek_state took and released the buffer mutex underneath it, which
+	 * is the documented order (audio_state_lock before the buffer
+	 * mutex). */
+	if (fill_ms > ctx->audio_fill_peak_ms)
+		ctx->audio_fill_peak_ms = fill_ms;
+
+	if (has_audio &&
+	    maybe_trim_hidden_audio_backlog(ctx, fill_ms, chunk_count))
+		return true;
+
 	if (ctx->audio_out_primed) {
 		/* Cap runaway concealment latency before it desyncs A/V.
 		 * Runs even on a healthy-lead cycle: the offset inflates
@@ -917,6 +972,14 @@ bool irl_pump_audio_once(struct irl_source *ctx)
 		 * permanent audio buffering for a late source. */
 		if (now > next_ts &&
 		    now - next_ts > AUDIO_OUT_MAX_LAG_MS * 1000000ULL) {
+			/* An empty low-latency input is a quiet source, not a
+			 * stalled thread: nothing there can advance the
+			 * counter. Stand the clock down instead. */
+			if (low_latency && !has_audio) {
+				suspend_low_latency_audio_clock(ctx,
+								now - next_ts);
+				return false;
+			}
 			ctx->audio_output_restarts++;
 			ctx->audio_quality_events++;
 			blog(LOG_WARNING,
@@ -927,23 +990,6 @@ bool irl_pump_audio_once(struct irl_source *ctx)
 			ctx->audio_conceal_fade_pending = true;
 		}
 	}
-
-	int64_t peek = 0;
-	int fill_ms = 0;
-	int chunk_count = 0;
-	bool has_audio = audio_buffer_peek_state(&ctx->audio_buf, &peek,
-						 &fill_ms, &chunk_count);
-	/* The receiver thread reads this for the stats line; audio_state_lock
-	 * is already held for the whole pump, so the publish is covered.
-	 * peek_state took and released the buffer mutex underneath it, which
-	 * is the documented order (audio_state_lock before the buffer
-	 * mutex). */
-	if (fill_ms > ctx->audio_fill_peak_ms)
-		ctx->audio_fill_peak_ms = fill_ms;
-
-	if (has_audio &&
-	    maybe_trim_hidden_audio_backlog(ctx, fill_ms, chunk_count))
-		return true;
 
 	if (!ctx->audio_out_primed) {
 		int prime_ms = 0;
@@ -963,9 +1009,9 @@ bool irl_pump_audio_once(struct irl_source *ctx)
 	}
 
 	if (!has_audio) {
-		/* Low-latency mode keeps the old behaviour: no
-		 * concealment, resume where the clock line left off
-		 * (the stall restart above covers long droughts). */
+		/* Low-latency mode emits no concealment. A brief gap resumes
+		 * on the clock line it left off; a long one already had that
+		 * clock suspended above, and re-primes when audio returns. */
 		if (low_latency)
 			return false;
 
