@@ -11,6 +11,8 @@
  * decoded frames to the jitter buffer / video handler.
  */
 
+#include <errno.h>
+
 #include "../include/irl-source.h"
 #include "receiver-internal.h"
 
@@ -52,6 +54,8 @@ void *irl_audio_thread(void *data)
 void *irl_receiver_thread(void *data)
 {
 	struct irl_source *ctx = data;
+	/* Start of the current unbroken run of EAGAIN reads, or 0. */
+	uint64_t eagain_since_us = 0;
 	AVPacket *pkt = av_packet_alloc();
 	AVFrame *frame = av_frame_alloc();
 	if (!pkt || !frame) {
@@ -73,6 +77,7 @@ void *irl_receiver_thread(void *data)
 
 	while (os_atomic_load_bool(&ctx->thread_active)) {
 		if (!ctx->fmt_ctx) {
+			eagain_since_us = 0;
 			if (!irl_open_stream(ctx)) {
 				if (!irl_wait_for_reconnect(ctx))
 					break;
@@ -116,6 +121,29 @@ void *irl_receiver_thread(void *data)
 
 		ctx->io_start_us = (uint64_t)av_gettime();
 		int ret = av_read_frame(ctx->fmt_ctx, pkt);
+		/* Not an error: a non-blocking demuxer saying "nothing yet".
+		 * Treating it as one tore down a healthy connection and
+		 * reconnected for what is a normal empty poll.
+		 *
+		 * Bounded, because retrying resets io_start_us on every pass
+		 * and the interrupt callback only measures one av_read_frame
+		 * call: without the bound, a demuxer wedged in permanent
+		 * EAGAIN would spin here forever, past the stall timeout that
+		 * a wedged blocking read would have hit. Past that same
+		 * timeout, fall through and let the read error path
+		 * reconnect. */
+		if (ret == AVERROR(EAGAIN)) {
+			uint64_t now_us = (uint64_t)av_gettime();
+			if (eagain_since_us == 0)
+				eagain_since_us = now_us;
+			if (now_us - eagain_since_us < IRL_IO_STALL_TIMEOUT_US) {
+				av_packet_unref(pkt);
+				av_usleep(1000);
+				continue;
+			}
+		} else {
+			eagain_since_us = 0;
+		}
 		if (ret < 0) {
 			irl_handle_stream_read_error(ctx, ret);
 			continue;
