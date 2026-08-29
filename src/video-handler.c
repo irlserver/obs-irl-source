@@ -200,6 +200,7 @@ static enum video_format avpixfmt_to_obs(enum AVPixelFormat fmt)
 
 /* ── Keyframe detection ───────────────────────────────────── */
 
+/* True if the frame is a keyframe (IDR/CRA/I-frame). */
 bool irl_video_is_keyframe(const AVFrame *frame)
 {
 	return (frame->flags & AV_FRAME_FLAG_KEY) != 0;
@@ -507,6 +508,7 @@ static bool xfer_frame_from_pool(struct irl_source *ctx, AVFrame *out,
 	return true;
 }
 
+/* Release the hardware frame transfer pool (called on resolution change or shutdown). */
 void irl_video_xfer_pool_release(struct irl_source *ctx)
 {
 	/* Safe with pooled buffers still alive in the pacing queue: the pool

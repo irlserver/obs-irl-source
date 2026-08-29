@@ -44,6 +44,7 @@ void irl_video_request_clear(struct irl_source *ctx)
 	irl_mutex_unlock(&ctx->video_queue_lock);
 }
 
+/* Clone a decoded video frame into the receiver-to-video-thread queue. */
 void irl_video_queue_push(struct irl_source *ctx, AVFrame *frame,
 			  int64_t pts_ns)
 {
@@ -241,6 +242,7 @@ static void pacing_emit_due(struct irl_source *ctx, uint64_t now)
 	}
 }
 
+/* Video thread entry point: paces frames to their due times and outputs them to OBS. */
 void *irl_video_thread(void *data)
 {
 	struct irl_source *ctx = data;
@@ -340,6 +342,7 @@ static int64_t video_frame_pts(const AVFrame *frame)
 	return AV_NOPTS_VALUE;
 }
 
+/* Apply keyframe gate and corruption policy, then push video to the pacing queue. */
 void irl_handle_video_frame(struct irl_source *ctx, AVFrame *frame)
 {
 	int64_t pts = video_frame_pts(frame);

@@ -14,6 +14,7 @@
 
 /* ── Defaults ─────────────────────────────────────────────── */
 
+/* OBS get_defaults callback: sets default values for all settings. */
 void irl_source_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "url", "");
@@ -43,6 +44,7 @@ void irl_source_get_defaults(obs_data_t *settings)
 
 /* ── Properties ───────────────────────────────────────────── */
 
+/* OBS get_properties callback: builds the source settings UI. */
 obs_properties_t *irl_source_get_properties(void *data)
 {
 	UNUSED_PARAMETER(data);

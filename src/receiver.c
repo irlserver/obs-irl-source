@@ -18,6 +18,7 @@
 
 /* ── Main read loop ───────────────────────────────────────── */
 
+/* Audio thread entry point: drain jitter buffer, apply speed, submit to OBS. */
 void *irl_audio_thread(void *data)
 {
 	struct irl_source *ctx = data;
@@ -51,6 +52,7 @@ void *irl_audio_thread(void *data)
 	return NULL;
 }
 
+/* Receiver thread entry point: demux, decode, push audio/video to queues. */
 void *irl_receiver_thread(void *data)
 {
 	struct irl_source *ctx = data;
@@ -167,6 +169,7 @@ void *irl_receiver_thread(void *data)
 	return NULL;
 }
 
+/* Signal worker threads to stop and wait for them to exit. */
 void irl_receiver_stop(struct irl_source *ctx)
 {
 	if (!os_atomic_load_bool(&ctx->thread_active))

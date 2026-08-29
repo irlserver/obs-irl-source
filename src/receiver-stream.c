@@ -367,6 +367,7 @@ static AVCodecContext *open_decoder(struct irl_source *src, AVStream *stream,
 	return ctx;
 }
 
+/* Close the FFmpeg demuxer and decoders (called before reconnect and on shutdown). */
 void irl_close_ffmpeg(struct irl_source *ctx)
 {
 	if (ctx->swr_ctx) {
@@ -533,6 +534,7 @@ static bool open_stream_attempt(struct irl_source *ctx, bool fast_probe)
 	return true;
 }
 
+/* Open the stream URL, probe format, and initialize decoders. Returns false to reconnect. */
 bool irl_open_stream(struct irl_source *ctx)
 {
 	/* Reconnects to a stream this thread has already carried probe with
@@ -572,6 +574,7 @@ bool irl_open_stream(struct irl_source *ctx)
 	return true;
 }
 
+/* Runs after a successful stream open: clears queues, resets timing, logs connection. */
 void irl_prepare_new_connection(struct irl_source *ctx)
 {
 	os_atomic_store_bool(&ctx->reconnecting, false);
@@ -586,6 +589,7 @@ void irl_prepare_new_connection(struct irl_source *ctx)
 	irl_mutex_unlock(&ctx->audio_state_lock);
 }
 
+/* Sleep until the reconnect interval elapses or the thread is stopped. Returns false to exit. */
 bool irl_wait_for_reconnect(struct irl_source *ctx)
 {
 	os_atomic_store_bool(&ctx->reconnecting, true);
@@ -645,6 +649,7 @@ static void fade_out_buffered_audio(struct irl_source *ctx)
 	free(fade_buf);
 }
 
+/* Handle an av_read_frame error: close the stream, fade out audio, schedule reconnect. */
 void irl_handle_stream_read_error(struct irl_source *ctx, int read_ret)
 {
 	char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -695,6 +700,7 @@ void irl_handle_stream_read_error(struct irl_source *ctx, int read_ret)
 	ctx->last_stats_time = 0;
 }
 
+/* Log a periodic stats line with fill levels, speed, drops, and quality events. */
 void irl_log_receiver_stats(struct irl_source *ctx)
 {
 	uint64_t now = os_gettime_ns();

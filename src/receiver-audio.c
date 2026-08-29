@@ -168,6 +168,7 @@ static uint8_t *ensure_scratch(uint8_t **buf, size_t *cap, size_t need)
 	return *buf;
 }
 
+/* Reset audio-only timing state (output clock, speed trim, etc). */
 void irl_reset_audio_timing_state(struct irl_source *ctx)
 {
 	ctx->audio_out_primed = false;
@@ -200,6 +201,7 @@ void irl_reset_audio_timing_state(struct irl_source *ctx)
 	ctx->audio_drain_warn_time_us = 0;
 }
 
+/* Reset timing state common to both buffered and low-latency audio modes. */
 void irl_reset_stream_timing_state(struct irl_source *ctx)
 {
 	irl_reset_audio_timing_state(ctx);
@@ -230,6 +232,7 @@ void irl_reset_stream_timing_state(struct irl_source *ctx)
 	ctx->video_hold_logged = false;
 }
 
+/* Mark the start of an audio recovery window (no trim, no backlog drain). */
 void irl_mark_audio_recovery(struct irl_source *ctx, uint64_t duration_us)
 {
 	uint64_t now_us = (uint64_t)av_gettime();
@@ -239,6 +242,7 @@ void irl_mark_audio_recovery(struct irl_source *ctx, uint64_t duration_us)
 		ctx->audio_recovery_until_us = until_us;
 }
 
+/* True if an audio recovery window is still active. */
 bool irl_audio_recovery_active(const struct irl_source *ctx)
 {
 	uint64_t now_us = (uint64_t)av_gettime();
@@ -376,6 +380,7 @@ static uint64_t audio_output_next_ts(const struct irl_source *ctx,
 				    1000000000LL, out_rate);
 }
 
+/* Advance the sample counter output clock and return the OBS timestamp for this chunk. */
 uint64_t irl_audio_output_claim(struct irl_source *ctx, int frames,
 				int out_rate)
 {
@@ -1121,6 +1126,7 @@ bool irl_pump_audio_once(struct irl_source *ctx)
 
 /* ── Decoded-frame intake (receiver thread) ───────────────── */
 
+/* Resample, repair PTS, and write a decoded audio frame to the jitter buffer. */
 void irl_handle_audio_frame(struct irl_source *ctx, AVFrame *frame)
 {
 	AVStream *as = NULL;

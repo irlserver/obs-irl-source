@@ -16,6 +16,7 @@
 
 /* ── Helpers ──────────────────────────────────────────────── */
 
+/* Log an action against a URL, stripping credentials while keeping protocol/host/port. */
 void irl_log_input_url(const char *action, const char *url)
 {
 	char protocol[32] = {0};
@@ -473,12 +474,14 @@ static void irl_source_get_stats(void *data, calldata_t *cd)
 
 /* ── Lifecycle ────────────────────────────────────────────── */
 
+/* OBS get_name callback: returns the localized source display name. */
 const char *irl_source_get_name(void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	return obs_module_text("SourceName");
 }
 
+/* OBS source creation: allocate context, load config, register stats proc. */
 void *irl_source_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct irl_source *ctx = bzalloc(sizeof(*ctx));
@@ -555,6 +558,7 @@ void *irl_source_create(obs_data_t *settings, obs_source_t *source)
 	return ctx;
 }
 
+/* OBS source destruction: stop threads, free FFmpeg state, release resources. */
 void irl_source_destroy(void *data)
 {
 	struct irl_source *ctx = data;
@@ -602,6 +606,7 @@ void irl_source_destroy(void *data)
 	bfree(ctx);
 }
 
+/* OBS source update: diff new settings, hot-apply or reconnect as needed. */
 void irl_source_update(void *data, obs_data_t *settings)
 {
 	struct irl_source *ctx = data;
@@ -646,6 +651,7 @@ void irl_source_update(void *data, obs_data_t *settings)
 	start_receiver(ctx);
 }
 
+/* OBS activate callback: start receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_activate(void *data)
 {
 	struct irl_source *ctx = data;
@@ -656,6 +662,7 @@ void irl_source_activate(void *data)
 	start_receiver(ctx);
 }
 
+/* OBS deactivate callback: stop receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_deactivate(void *data)
 {
 	struct irl_source *ctx = data;
@@ -667,6 +674,7 @@ void irl_source_deactivate(void *data)
 		stop_receiver(ctx, true);
 }
 
+/* OBS show callback: start receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_show(void *data)
 {
 	struct irl_source *ctx = data;
@@ -677,6 +685,7 @@ void irl_source_show(void *data)
 	start_receiver(ctx);
 }
 
+/* OBS hide callback: stop receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_hide(void *data)
 {
 	struct irl_source *ctx = data;
@@ -696,6 +705,7 @@ void irl_source_hide(void *data)
  * which is how NOALBS's !fix reconnects a stalled feed, and it is also
  * what puts the source in the media controls dock. */
 
+/* Media restart control: clears media_stopped and starts the receiver. */
 void irl_source_media_restart(void *data)
 {
 	struct irl_source *ctx = data;
@@ -713,6 +723,7 @@ void irl_source_media_restart(void *data)
 		obs_source_media_started(ctx->source);
 }
 
+/* Media stop control: sets media_stopped and stops the receiver. */
 void irl_source_media_stop(void *data)
 {
 	struct irl_source *ctx = data;
@@ -732,6 +743,7 @@ void irl_source_media_stop(void *data)
 	 * end to report. */
 }
 
+/* Media play/pause control: toggles the media_stopped latch. */
 /* Pause is the only honest reading of "stop receiving" for a live
  * stream: there is no paused position to resume from, so unpausing
  * reconnects. */
@@ -743,6 +755,7 @@ void irl_source_media_play_pause(void *data, bool pause)
 		irl_source_media_restart(data);
 }
 
+/* Media state query: returns playing/stopped/none based on receiver and media_stopped. */
 enum obs_media_state irl_source_media_get_state(void *data)
 {
 	struct irl_source *ctx = data;
@@ -770,6 +783,7 @@ enum obs_media_state irl_source_media_get_state(void *data)
 	return playing ? OBS_MEDIA_STATE_PLAYING : OBS_MEDIA_STATE_BUFFERING;
 }
 
+/* OBS tick callback: run one-shot fit-to-canvas for new sources with video. */
 void irl_source_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
