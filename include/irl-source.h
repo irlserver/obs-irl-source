@@ -696,33 +696,51 @@ struct irl_source {
 
 /* ── Lifecycle (irl-source.c) ─────────────────────────────── */
 
+/* OBS source creation: allocate context, load config, register stats proc. */
 void *irl_source_create(obs_data_t *settings, obs_source_t *source);
+/* OBS source destruction: stop threads, free FFmpeg state, release resources. */
 void irl_source_destroy(void *data);
+/* OBS source update: diff new settings, hot-apply or reconnect as needed. */
 void irl_source_update(void *data, obs_data_t *settings);
+/* OBS activate callback: start receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_activate(void *data);
+/* OBS deactivate callback: stop receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_deactivate(void *data);
+/* OBS show callback: start receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_show(void *data);
+/* OBS hide callback: stop receiver if "Close Stream When Inactive" is enabled. */
 void irl_source_hide(void *data);
+/* OBS tick callback: run one-shot fit-to-canvas for new sources with video. */
 void irl_source_tick(void *data, float seconds);
+/* OBS get_name callback: returns the localized source display name. */
 const char *irl_source_get_name(void *unused);
 
 /* Media controls (OBS_SOURCE_CONTROLLABLE_MEDIA). Drive the media
  * controls dock, and obs-websocket's TriggerMediaInputAction /
  * GetMediaInputStatus. */
+/* Media play/pause control: toggles the media_stopped latch (receiver runs or doesn't). */
 void irl_source_media_play_pause(void *data, bool pause);
+/* Media restart control: clears media_stopped and starts the receiver. */
 void irl_source_media_restart(void *data);
+/* Media stop control: sets media_stopped and stops the receiver. */
 void irl_source_media_stop(void *data);
+/* Media state query: returns playing/stopped/none based on receiver and media_stopped. */
 enum obs_media_state irl_source_media_get_state(void *data);
 
 /* ── Settings (settings.c) ────────────────────────────────── */
 
+/* OBS get_properties callback: builds the source settings UI. */
 obs_properties_t *irl_source_get_properties(void *data);
+/* OBS get_defaults callback: sets default values for all settings. */
 void irl_source_get_defaults(obs_data_t *settings);
 
 /* ── Receiver thread (receiver.c) ─────────────────────────── */
 
+/* Receiver thread entry point: demux, decode, push audio/video to queues. */
 void *irl_receiver_thread(void *data);
+/* Audio thread entry point: drain jitter buffer, apply speed, submit to OBS. */
 void *irl_audio_thread(void *data);
+/* Signal worker threads to stop and wait for them to exit. */
 void irl_receiver_stop(struct irl_source *ctx);
 
 /* ── Audio buffer (audio-buffer.c) ────────────────────────── */
@@ -730,12 +748,18 @@ void irl_receiver_stop(struct irl_source *ctx);
 
 /* ── Video handler (video-handler.c) ──────────────────────── */
 
+/* Convert and submit a system-memory frame to OBS at the given timestamp. Returns true if submitted. */
 bool irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 			    uint64_t timestamp);
+/* Transfer a hardware frame to system memory, or return the frame as-is if already in sysmem. */
 AVFrame *irl_video_to_sysmem(struct irl_source *ctx, AVFrame *frame);
+/* Release the hardware frame transfer pool (called on resolution change or shutdown). */
 void irl_video_xfer_pool_release(struct irl_source *ctx);
+/* Map a video frame's PTS to its OBS output timestamp via the audio playout offset. */
 uint64_t irl_video_due_time(struct irl_source *ctx, const AVFrame *frame);
+/* Read the current audio playout offset, with staleness guard. Returns false if unavailable. */
 bool irl_video_playout_offset(struct irl_source *ctx, int64_t *offset_ns);
+/* True if the frame is a keyframe (IDR/CRA/I-frame). */
 bool irl_video_is_keyframe(const AVFrame *frame);
 
 /* ── PTS repair (pts-repair.c) ────────────────────────────── */
@@ -743,4 +767,5 @@ bool irl_video_is_keyframe(const AVFrame *frame);
 
 /* ── obs-websocket vendor (websocket-vendor.c) ────────────── */
 
+/* Register the obs-irl-source vendor extension with obs-websocket (GetStats, GetSourceList, GetVersion). */
 void irl_websocket_vendor_register(void);

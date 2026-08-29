@@ -90,6 +90,7 @@ static void drain_audio_frames(struct irl_source *ctx, AVFrame *frame)
 	}
 }
 
+/* Decode an audio packet and pass each frame to irl_handle_audio_frame. */
 void irl_handle_audio_packet(struct irl_source *ctx, AVPacket *pkt,
 			     AVFrame *frame)
 {
@@ -183,6 +184,7 @@ static void drain_video_frames(struct irl_source *ctx, AVFrame *frame)
 	}
 }
 
+/* Decode a video packet and pass each frame to irl_handle_video_frame. */
 void irl_handle_video_packet(struct irl_source *ctx, AVPacket *pkt,
 			     AVFrame *frame)
 {
