@@ -730,7 +730,7 @@ void irl_receiver_stop(struct irl_source *ctx);
 
 /* ── Video handler (video-handler.c) ──────────────────────── */
 
-void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
+bool irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 			    uint64_t timestamp);
 AVFrame *irl_video_to_sysmem(struct irl_source *ctx, AVFrame *frame);
 void irl_video_xfer_pool_release(struct irl_source *ctx);

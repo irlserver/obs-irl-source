@@ -587,8 +587,9 @@ AVFrame *irl_video_to_sysmem(struct irl_source *ctx, AVFrame *frame)
 }
 
 /* Hand a system-memory frame to OBS with the timestamp pacing scheduled it
- * for. `frame` must already have been through irl_video_to_sysmem(). */
-void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
+ * for. `frame` must already have been through irl_video_to_sysmem(). Returns
+ * true only when the frame was submitted. */
+bool irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 			    uint64_t timestamp)
 {
 	enum video_format obs_fmt = avpixfmt_to_obs(frame->format);
@@ -628,7 +629,7 @@ void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 		if (need > ctx->sws_nv12_buf_capacity) {
 			uint8_t *next = realloc(ctx->sws_nv12_buf, need);
 			if (!next)
-				return;
+				return false;
 			ctx->sws_nv12_buf = next;
 			ctx->sws_nv12_buf_capacity = need;
 		}
@@ -638,7 +639,7 @@ void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 		int dst_strides[2] = {frame->width, frame->width};
 
 		if (!irl_convert_to_nv12(ctx, frame, dst_planes, dst_strides))
-			return;
+			return false;
 
 		struct obs_source_frame obs_frame = {0};
 		obs_frame.width = frame->width;
@@ -652,7 +653,7 @@ void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 		setup_color_params(&obs_frame, frame, VIDEO_FORMAT_NV12);
 
 		obs_source_output_video(ctx->source, &obs_frame);
-		return;
+		return true;
 	}
 
 	/* Direct output for natively supported formats (zero-copy) */
@@ -672,4 +673,5 @@ void irl_video_output_frame(struct irl_source *ctx, AVFrame *frame,
 	}
 
 	obs_source_output_video(ctx->source, &obs_frame);
+	return true;
 }
