@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 cmake_minimum_required(VERSION 3.16)
-project(obs-irl-source VERSION 1.4.1 LANGUAGES C)
+project(obs-irl-source VERSION 1.5.0 LANGUAGES C)
 
 set(OBS_IRL_SOURCE_BUILD_VERSION "${PROJECT_VERSION}")
 find_package(Git QUIET)
