@@ -216,24 +216,28 @@ static int64_t pacing_emit_slack_ns(const struct irl_source *ctx)
  * Over the ceilings the head goes out early rather than being dropped:
  * too-early video is what the un-paced path did all the time, and it beats a
  * hole in the picture. */
-static void pacing_emit_due(struct irl_source *ctx, uint64_t now,
-			    int64_t slack_ns)
+static void pacing_emit_due(struct irl_source *ctx, uint64_t now)
 {
 	while (ctx->pacing_count > 0) {
 		bool over = !pacing_has_room(ctx);
 		uint64_t due = ctx->pacing_queue[ctx->pacing_head].due_ns;
+		int64_t slack_ns = pacing_emit_slack_ns(ctx);
+		bool due_now = (int64_t)(due - now) <= slack_ns;
 
-		if (!over && (int64_t)(due - now) > slack_ns)
+		if (!due_now && (!over || ctx->pacing_anchor_pending))
 			return;
 		if (over)
 			ctx->pacing_overflows++;
 
 		struct irl_pacing_frame e = pacing_pop(ctx);
-		irl_video_output_frame(ctx, e.frame, e.due_ns);
+		bool submitted =
+			irl_video_output_frame(ctx, e.frame, e.due_ns);
 		av_frame_free(&e.frame);
-		/* That frame anchored the play head; the rest of this drain
-		 * and every later cycle get the lead back. */
-		ctx->pacing_anchor_pending = false;
+		if (ctx->pacing_anchor_pending && due_now && submitted) {
+			/* That frame anchored the play head; the rest of this drain
+			 * and every later cycle get the lead back. */
+			ctx->pacing_anchor_pending = false;
+		}
 	}
 }
 
@@ -271,14 +275,13 @@ void *irl_video_thread(void *data)
 			continue;
 		}
 
-		int64_t slack_ns = pacing_emit_slack_ns(ctx);
-
 		pacing_intake(ctx);
 		/* Before both the emit and the sleep below, so each cycle
 		 * schedules against the offset as it is now rather than as it
 		 * was when the frames were decoded. */
 		pacing_reschedule(ctx);
-		pacing_emit_due(ctx, os_gettime_ns(), slack_ns);
+		pacing_emit_due(ctx, os_gettime_ns());
+		int64_t slack_ns = pacing_emit_slack_ns(ctx);
 
 		irl_mutex_lock(&ctx->video_queue_lock);
 		ctx->video_pacing_now = ctx->pacing_count;
