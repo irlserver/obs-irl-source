@@ -312,8 +312,16 @@ void *irl_video_thread(void *data)
 
 		irl_mutex_lock(&ctx->video_queue_lock);
 		/* Re-check under the lock: a push or clear between the work
-		 * above and here would otherwise be slept through. */
-		if (!ctx->video_clear_pending && ctx->video_queue_count == 0 &&
+		 * above and here would otherwise be slept through. A queued
+		 * frame is only a reason to skip the sleep if the pacing
+		 * queue has room to take it: over the ceiling with a head
+		 * that is not due yet, pacing_emit_due keeps the anchor
+		 * frame back and pacing_intake takes nothing, so a cycle
+		 * does no work at all and skipping the wait spins this
+		 * thread at full CPU until the head comes due. */
+		bool can_intake =
+			ctx->video_queue_count > 0 && pacing_has_room(ctx);
+		if (!ctx->video_clear_pending && !can_intake &&
 		    os_atomic_load_bool(&ctx->thread_active)) {
 			if (wait_ms == 0)
 				wait_ms = 1;
