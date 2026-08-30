@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/irlserver/obs-irl-source#readme
+    about: Settings reference, stats reference, hardware decoding, and how to read the plugin's log lines. Please check here before opening an issue.
