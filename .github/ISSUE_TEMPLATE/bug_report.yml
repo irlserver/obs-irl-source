@@ -1,0 +1,171 @@
+name: Bug report
+description: Something in IRL Source is not working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Most reports are resolved much faster
+        when the checklist below is done first, because the OBS log almost always contains
+        the answer.
+
+  - type: checkboxes
+    id: troubleshooting
+    attributes:
+      label: Before you file
+      description: Please work through these first. They resolve most reports.
+      options:
+        - label: I searched [existing issues](https://github.com/irlserver/obs-irl-source/issues?q=is%3Aissue) (including closed ones) and this is not already reported.
+          required: true
+        - label: I am on the [latest release](https://github.com/irlserver/obs-irl-source/releases) and the problem still happens there.
+          required: true
+        - label: I restarted OBS after installing or updating the plugin.
+          required: true
+        - label: I checked the README's [Stats reference](https://github.com/irlserver/obs-irl-source#stats-reference) and, if this is an audio or latency problem, the [audio pipeline notes](https://github.com/irlserver/obs-irl-source/blob/master/docs/audio-pipeline.md).
+          required: false
+        - label: I tried the same URL with a fresh IRL Source at default settings (Target Buffer 120ms, Hardware Decode Auto), to rule out my own settings.
+          required: false
+        - label: If it is a video or decoding problem, I tried Hardware Decode set to Off, to find out whether it is the hardware decoder.
+          required: false
+        - label: >-
+            If audio sounds sped up, slowed down, pitchy or chipmunky, or skips ahead: I checked
+            **Use OBS Low-Latency Async Audio Mode** in the source's advanced settings. That mode
+            drains the buffer immediately instead of holding the jitter cushion and caps backlog by
+            skipping audio, so it is the usual cause. Turn it off unless you specifically need it.
+          required: false
+        - label: >-
+            If audio still runs fast after a stall, I checked my **Catch-Up Speed** setting. Playing
+            back at up to +5% until latency returns to target is by design (nothing is skipped); the
+            default is audible on music, so lower it if you would rather the recovery take longer
+            than be heard.
+          required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        Audio drops out for about a second every few minutes, then comes back with a click.
+        I expected the buffer to cover a hiccup that short.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: What you did, in order. Include how long it took to show up.
+      placeholder: |
+        1. Add an IRL Source with URL srt://...
+        2. Start the phone stream
+        3. After ~5 minutes of streaming, the dropout happens
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ## The OBS log
+
+        **This is the single most useful thing you can attach.** The plugin writes everything
+        it knows to the OBS log under the `[irl-source]` prefix, including a stats line every
+        30 seconds. Without it, almost any report about audio, video, latency or decoding is
+        guesswork.
+
+        **How to get it:** reproduce the problem, then in OBS use
+        **Help → Log Files → Upload Current Log File** (or **Upload Last Log File** if you
+        already restarted OBS). Paste the link it gives you below.
+
+        If upload does not work, the log files are at:
+
+        | Platform | Location |
+        | --- | --- |
+        | Windows | `%APPDATA%\obs-studio\logs` |
+        | macOS | `~/Library/Application Support/obs-studio/logs` |
+        | Linux | `~/.config/obs-studio/logs` |
+
+        Please let the stream run for **at least a minute** before grabbing the log, so it
+        contains at least one `[irl-source] Stats:` line. Logs are plain text — check them for
+        anything you would rather not share (your stream URL and stream key appear in them)
+        before posting.
+
+  - type: input
+    id: log-link
+    attributes:
+      label: OBS log
+      description: The obsproject.com link from Help → Log Files → Upload Current Log File.
+      placeholder: https://obsproject.com/logs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: irl-lines
+    attributes:
+      label: "`[irl-source]` log lines"
+      description: >
+        Optional but helpful: paste the `[irl-source]` lines from around the time the problem
+        happened, especially a `Stats:` line or two. On Linux/macOS,
+        `grep irl-source ~/.config/obs-studio/logs/<newest>.txt` pulls them out.
+      render: text
+      placeholder: |
+        [irl-source] Video stream 0: hevc 1920x1080 (d3d11va)
+        [irl-source] First keyframe received (1920x1080 fmt=171 hardware decode)
+        [irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ...
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: IRL Source version
+      description: Shown in the source's properties dialog, and in the OBS log at startup.
+      placeholder: "1.5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: obs-version
+    attributes:
+      label: OBS Studio version
+      placeholder: "32.1.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: GPU / hardware
+      description: Relevant for anything video- or decode-related.
+      placeholder: "NVIDIA RTX 3060, driver 566.36"
+
+  - type: textarea
+    id: stream-setup
+    attributes:
+      label: Stream setup
+      description: >
+        Protocol and URL shape (**with the stream key removed**), sender app, codec, resolution
+        and bitrate, plus every plugin setting that is not at its default — in particular Target
+        Buffer, Adaptive Latency Control, Catch-Up Speed and Use OBS Low-Latency Async Audio Mode.
+      placeholder: |
+        srt://my-server:8888?streamid=publish/live/REDACTED&latency=2000
+        Sender: IRL Pro on Android, HEVC 1080p60, 6 Mbps
+        Settings: Target Buffer 200ms, Low-Latency Async Audio off, everything else default
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, clips, or context that does not fit above.
