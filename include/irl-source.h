@@ -244,7 +244,11 @@ struct irl_source;
 /* Abort a blocking read/connect through the FFmpeg interrupt callback
  * after this long without progress. A dead-but-open connection (uplink
  * loss in a dead zone) otherwise hangs av_read_frame forever with no
- * reconnect. Connect plus stream probe normally completes in under 3s. */
+ * reconnect. Connect plus stream probe normally completes in under 3s.
+ *
+ * "Without progress" is meant literally: interrupt_cb restarts the clock
+ * whenever bytes have arrived since it last looked, and does not run it at
+ * all while a listener URL is parked in accept() waiting to be called. */
 #define IRL_IO_STALL_TIMEOUT_US 10000000ULL
 
 /* One frame waiting for its moment.
@@ -416,6 +420,14 @@ struct irl_source {
 	 * timeout. Receiver-thread owned (interrupt_cb runs on the
 	 * calling thread). */
 	uint64_t io_start_us;
+	/* Byte counter the stall deadline is measured against. A blocking
+	 * call that is still taking delivery has not stalled, however long
+	 * it has been running. Receiver-thread owned, like io_start_us. */
+	int64_t io_bytes_read;
+	/* This URL waits for the far end to dial in (srt/rist listener or
+	 * rendezvous) rather than dialing out. Latched at open from
+	 * config.url; see interrupt_cb. */
+	bool url_awaits_caller;
 	AVCodecContext *audio_dec_ctx;
 	AVCodecContext *video_dec_ctx;
 	AVBufferRef *hw_device_ctx;
