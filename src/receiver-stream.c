@@ -407,18 +407,69 @@ void irl_close_ffmpeg(struct irl_source *ctx)
 	ctx->hw_map_ok = -1;
 }
 
+/* Does this URL wait to be called, rather than dialing out?
+ *
+ * srt:// and rist:// both spell it in the query string, and rendezvous
+ * waits the same way from the caller's point of view. The test is on the
+ * query only: a path or a passphrase containing the word must not decide
+ * this. */
+static bool url_is_listening(const char *url)
+{
+	if (!url)
+		return false;
+	const char *query = strchr(url, '?');
+	if (!query)
+		return false;
+	return strstr(query, "mode=listener") != NULL ||
+	       strstr(query, "mode=rendezvous") != NULL ||
+	       strstr(query, "listen=1") != NULL;
+}
+
+static bool deadline_passed(const struct irl_source *ctx)
+{
+	return (uint64_t)av_gettime() - ctx->io_start_us >
+	       IRL_IO_STALL_TIMEOUT_US;
+}
+
 static int interrupt_cb(void *opaque)
 {
 	struct irl_source *ctx = opaque;
 
 	if (!os_atomic_load_bool(&ctx->thread_active))
 		return 1;
-	if (ctx->io_start_us != 0 &&
-	    (uint64_t)av_gettime() - ctx->io_start_us >
-		    IRL_IO_STALL_TIMEOUT_US) {
-		return 1;
+	if (ctx->io_start_us == 0)
+		return 0;
+
+	/* No AVIOContext yet means no connection yet, and for a listener URL
+	 * that is not a fault — it is the source's normal idle state.
+	 * `srt://0.0.0.0:7000?mode=listener` sits inside srt_accept() until
+	 * the phone calls in, which can be hours, and libsrt polls the
+	 * interrupt callback throughout. Timing that out tore the listening
+	 * socket down every 10s and rebound it after the reconnect delay, so
+	 * the port was dark for a slice of every cycle and any handshake in
+	 * flight died with the socket. A caller-mode URL keeps the deadline:
+	 * it is dialing a host that either answers or does not.
+	 *
+	 * Reported as "IRL Source fails to open an SRT stream that OBS's
+	 * Media Source opens immediately" (#28) — the media source's
+	 * interrupt callback only checks for shutdown, so it simply waits. */
+	AVIOContext *pb = ctx->fmt_ctx ? ctx->fmt_ctx->pb : NULL;
+	if (!pb)
+		return ctx->url_awaits_caller ? 0 : deadline_passed(ctx);
+
+	/* Connected. Measure the stall from the last byte that actually
+	 * arrived rather than from the start of the call. avformat_open_input
+	 * accepts the connection and then probes over the same deadline, so
+	 * without this a caller that arrived nine seconds into the accept got
+	 * one second to deliver a PAT/PMT and the probe failed on a stream
+	 * that was perfectly healthy. */
+	if (pb->bytes_read != ctx->io_bytes_read) {
+		ctx->io_bytes_read = pb->bytes_read;
+		ctx->io_start_us = (uint64_t)av_gettime();
+		return 0;
 	}
-	return 0;
+
+	return deadline_passed(ctx);
 }
 
 static bool open_stream_attempt(struct irl_source *ctx, bool fast_probe)
@@ -438,6 +489,8 @@ static bool open_stream_attempt(struct irl_source *ctx, bool fast_probe)
 	ctx->fmt_ctx->interrupt_callback.callback = interrupt_cb;
 	ctx->fmt_ctx->interrupt_callback.opaque = ctx;
 
+	ctx->url_awaits_caller = url_is_listening(ctx->config.url);
+	ctx->io_bytes_read = 0;
 	ctx->io_start_us = (uint64_t)av_gettime();
 	int ret = avformat_open_input(&ctx->fmt_ctx, ctx->config.url, NULL,
 				      &opts);
