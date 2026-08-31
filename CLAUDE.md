@@ -86,7 +86,7 @@ One cdylib, five workspace crates. The rule that shapes the split: **all unsafe 
 | --- | --- |
 | `crates/obs-sys` | Hand-written libobs FFI: `#[repr(C)]` structs, `extern` declarations, constants. No safety, no abstraction. A `layout-test` feature runs bindgen over the real headers and asserts every field offset. |
 | `crates/obs` | Safe, plugin-agnostic libobs API: the `Source` trait and registration, `declare_module!`, `Data`/`Properties`/`CallData`/`ProcHandler`, `VideoFrame`/`AudioFrame` builders, scene transforms, the obs-websocket vendor helper, `panic::guard`. Knows nothing about IRL streaming. |
-| `crates/ffmpeg` | RAII over `ffmpeg-sys-next` (package `irl-ffmpeg`, lib name `ffmpeg`): `FormatContext`, `CodecContext`, `Frame`, `Packet`, `HwDeviceContext`, `FramePool`, `Resampler`, `Scaler`, `InterruptWatch`. `build.rs` replays `irl-deps.env`. |
+| `crates/ffmpeg` | RAII over `ffmpeg-sys-next` (package `irl-ffmpeg`, lib name `ffmpeg`): `FormatContext`, `CodecContext`, `Frame`, `Packet`, `HwDeviceContext`, `FramePool`, `Resampler`, `Scaler`, `InterruptWatch`, and `log::route_to`, which hands the bundled FFmpeg's `av_log` to a caller-supplied sink. `build.rs` replays `irl-deps.env`. |
 | `crates/irl-core` | Everything that needs neither libobs nor FFmpeg: the jitter buffer, PTS repair, the speed controller, output-clock arithmetic, video pacing, demuxer options, config derivation, the stats table, every tuning constant. Plain data in, plain data out — and therefore the only crate with a real unit-test suite. |
 | `crates/irl-source` | The plugin itself: module entry points, the source lifecycle and the three worker threads. |
 
@@ -135,8 +135,8 @@ Buffer regulation happens through playback speed only, asymmetric like IRLToolki
 
 | file | ports |
 | --- | --- |
-| `lib.rs` | `plugin.c`: `declare_module!`, load → `register_source::<IrlSource>()`, post_load → `websocket::register()`, the deadlock poller under the feature. |
-| `log.rs` | `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, which bind the `[irl-source]` prefix. |
+| `lib.rs` | `plugin.c`: `declare_module!`, load → the FFmpeg log route and `register_source::<IrlSource>()`, post_load → `websocket::register()`, the deadlock poller under the feature. |
+| `log.rs` | `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, which bind the `[irl-source]` prefix, plus the redaction (`redacted_input_url`, `redacted_log_line`) and the `[ffmpeg]` sink. |
 | `source.rs` | `irl-source.c`: create/update/tick/activate/deactivate/show/hide/Drop, the media callbacks and the `media_stopped` latch, `start_receiver`/`stop_receiver`, fit-to-canvas, the `get_stats` proc. |
 | `settings.rs` | `settings.c`: defaults and the properties dialog. |
 | `config.rs` | `config_load` / `config_requires_restart` / `config_apply_hot`. |
@@ -177,6 +177,7 @@ Panics never cross an FFI boundary. `obs::panic::guard` wraps every `extern "C"`
 
 - **Unsafe.** Only in `obs-sys`, `obs` and `ffmpeg`, and every `unsafe` block there carries a `// SAFETY:` comment. If a port needs a raw pointer, the answer is a new safe wrapper in one of those crates, not an `unsafe` block in `irl-source`.
 - **Logging.** `irl_info!("…")`, never `blog` directly; the macros bind the `[irl-source]` prefix. Log strings are part of the interface people grep for — keep them byte-identical to the C where the C had one.
+- **Credentials in the log.** A URL never reaches the log whole. The plugin's own lines go through `log::redacted_input_url` (protocol, host and port; the C `irl_log_input_url`), and FFmpeg's go through `log::redacted_log_line`, because FFmpeg prints `h->filename` — the user's `srt://…?passphrase=…&streamid=…` — for its own connect failures. Anything new that logs a URL, or a string that might contain one, belongs behind one of the two.
 - **Clocks.** OBS timestamps come from `obs::time::gettime_ns` (`os_gettime_ns`), never `std::time::Instant`. FFmpeg-side timers stay in the `av_gettime` microsecond domain. `irl-core` takes both as parameters so the two can never be mixed by accident.
 - **UI strings.** Never pass English text to `module_text`. A new string belongs in two places: the call site and `data/locale/en-US.ini`, keyed by a short identifier. The version in the About block is substituted with `str::replace` on a `%1` token rather than a format string, so a bad translation renders oddly instead of failing.
 - **Stats.** A new stat is *one line* in `irl_core::stats::FIELDS` plus its field in `StatsSnapshot` and `values()`. The proc declaration, the calldata writer (`source.rs`) and the websocket copy loop (`websocket.rs`) all walk that table, so they cannot drift. The README table is the only other place to update.

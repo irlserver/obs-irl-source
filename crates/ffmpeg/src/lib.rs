@@ -19,6 +19,7 @@ pub mod dict;
 pub mod format;
 pub mod frame;
 pub mod hw;
+pub mod log;
 pub mod packet;
 pub mod swr;
 pub mod sws;

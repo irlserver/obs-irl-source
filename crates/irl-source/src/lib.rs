@@ -41,6 +41,7 @@ pub const PLUGIN_VERSION: &str = env!("IRL_PLUGIN_VERSION");
 
 fn module_load() -> bool {
     install_panic_hook();
+    log::route_ffmpeg_log();
     #[cfg(feature = "deadlocks")]
     spawn_deadlock_poller();
     obs::register_source::<source::IrlSource>();
