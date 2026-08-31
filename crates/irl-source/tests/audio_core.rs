@@ -359,6 +359,49 @@ fn the_catchup_setting_bounds_the_drain_end_to_end() {
     );
 }
 
+/// The pump sleeps to the deadline its own output clock gives it, rather than
+/// polling: once primed and queued ahead, "nothing to do" comes with how long
+/// nothing is to be done for.
+#[test]
+fn an_idle_pump_reports_when_it_next_has_work() {
+    let shared = make_shared(false, true);
+    let clock = Arc::new(AtomicU64::new(1_000_000_000));
+    let recorder = Recorder::new(CHANNELS as usize);
+    let mut pump = make_pump(&shared, &clock, &recorder);
+
+    // Nothing buffered yet: the wake condition is a write from another
+    // thread, which no deadline here can predict.
+    assert!(!pump.pump_once());
+    assert_eq!(pump.idle_sleep_ms(), consts::AUDIO_PUMP_SLEEP_MS);
+
+    let mut pts_ns = 0i64;
+    for _ in 0..20 {
+        write_chunk(&shared, pts_ns, 0.1);
+        pts_ns += CHUNK_NS as i64;
+    }
+    while pump.pump_once() {}
+
+    // Primed and queued ahead: it now knows when the lead runs down, and that
+    // is further away than the 1ms poll it used to spend.
+    assert!(shared.audio_state().primed);
+    let hint = pump.idle_sleep_ms();
+    assert!(
+        hint > consts::AUDIO_PUMP_SLEEP_MS && hint <= consts::AUDIO_PUMP_MAX_SLEEP_MS,
+        "expected a real deadline, got {hint}ms"
+    );
+
+    // The hint truncates to whole milliseconds, so it lands at or just before
+    // the deadline and never past it: sleeping it must not overshoot the
+    // moment the chunk was due, and one more millisecond must reach it.
+    clock.fetch_add(hint as u64 * 1_000_000, Relaxed);
+    let early = pump.pump_once();
+    clock.fetch_add(1_000_000, Relaxed);
+    assert!(
+        early || pump.pump_once(),
+        "still nothing emitted a millisecond past the reported deadline"
+    );
+}
+
 /// AAC decodes 1024 frames at a time, which does not divide a 120ms target
 /// (5760 frames). Reads and writes are both whole chunks, so before the read
 /// alignment the residual could only be a multiple of 1024 and the loop had to

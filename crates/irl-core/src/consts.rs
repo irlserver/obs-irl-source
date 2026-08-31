@@ -169,8 +169,19 @@ pub const AUDIO_SOFT_COMPENSATION_MAX_SAMPLES: i32 = 8;
 pub const AUDIO_DEFAULT_FRAME_SAMPLES: i32 = 960;
 /// Pump iterations per audio-thread wakeup.
 pub const AUDIO_PUMP_BURST: u32 = 16;
-/// Sleep between audio-thread wakeups.
+/// Sleep between audio-thread wakeups when the pump cannot say when it will
+/// next have work (waiting for data rather than for the clock).
 pub const AUDIO_PUMP_SLEEP_MS: u32 = 1;
+/// Ceiling on the pump's own "next chunk is due in N ms" sleep.
+///
+/// Once primed the pump knows exactly when it next has to emit — the output
+/// clock says so — and polling at 1 ms in the meantime is 1000 wakeups a second
+/// taking two mutexes each, on a thread that has nothing to do. Sleeping to the
+/// deadline instead costs nothing in responsiveness, because the deadline is
+/// what gates emission. The cap keeps the per-cycle work that is not emission
+/// (the concealment re-anchor, the fill peak the stats line reports) running at
+/// a sane rate, and bounds how long a stop request waits for this thread.
+pub const AUDIO_PUMP_MAX_SLEEP_MS: u32 = 20;
 /// Maximum channels remembered for silence shaping.
 pub const AUDIO_MAX_CHANNELS: usize = 8;
 
@@ -322,6 +333,8 @@ mod tests {
         assert_eq!(AUDIO_DEFAULT_FRAME_SAMPLES, 960); // receiver-audio.c
         assert_eq!(AUDIO_PUMP_BURST, 16); // receiver.c
         assert_eq!(AUDIO_PUMP_SLEEP_MS, 1); // receiver.c
+        // No C ancestor: the C polled at AUDIO_PUMP_SLEEP_MS unconditionally.
+        assert_eq!(AUDIO_PUMP_MAX_SLEEP_MS, 20);
         assert_eq!(AUDIO_MAX_CHANNELS, 8); // receiver-audio.c
 
         // ── decode ──

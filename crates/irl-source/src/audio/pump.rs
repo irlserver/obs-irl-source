@@ -58,6 +58,9 @@ pub struct AudioPump {
     /// hundreds of times too slowly, so the loop it is meant to close never
     /// closes. The two are always the same real clock in production.
     now_us: Box<dyn Fn() -> u64 + Send>,
+    /// How long the audio thread may sleep before this pump next has work.
+    /// See [`Self::idle_sleep_ms`].
+    idle_sleep_ms: u32,
 }
 
 impl AudioPump {
@@ -78,6 +81,7 @@ impl AudioPump {
             float: FloatEdit::default(),
             now_ns: Box::new(obs::time::gettime_ns),
             now_us: Box::new(|| ffmpeg::gettime_us() as u64),
+            idle_sleep_ms: consts::AUDIO_PUMP_SLEEP_MS,
         }
     }
 
@@ -98,6 +102,18 @@ impl AudioPump {
         self
     }
 
+    /// How long the caller may sleep after a `pump_once` that emitted nothing.
+    ///
+    /// Once primed the output clock says exactly when the next chunk is due, so
+    /// the thread can sleep to that deadline instead of polling. When the pump
+    /// is waiting on data rather than on the clock there is no deadline to
+    /// compute, and this stays at [`consts::AUDIO_PUMP_SLEEP_MS`] — the C
+    /// behaviour, and the right one, since the wake condition is a write from
+    /// another thread.
+    pub fn idle_sleep_ms(&self) -> u32 {
+        self.idle_sleep_ms
+    }
+
     /// One pump iteration. Takes `audio_state` exactly once for the whole
     /// call; returns whether audio (or concealment) was emitted.
     pub fn pump_once(&mut self) -> bool {
@@ -112,6 +128,10 @@ impl AudioPump {
     }
 
     fn pump_locked(&mut self, shared: &Shared, state: &mut AudioState) -> bool {
+        // Every path but the "already queued far enough ahead" one below is
+        // waiting on a write from another thread, which no deadline here can
+        // predict; those keep the C's poll interval.
+        self.idle_sleep_ms = consts::AUDIO_PUMP_SLEEP_MS;
         let low_latency = shared.cfg.low_latency_audio;
 
         let Some(fmt) = BufferFormat::of(shared) else {
@@ -148,8 +168,14 @@ impl AudioPump {
 
             let next_ts = timing::output_next_ts(state.anchor_ns, state.samples, fmt.rate as u32);
 
-            // Enough queued ahead of wall clock — nothing to do.
+            // Enough queued ahead of wall clock — nothing to do until the
+            // lead runs down, and the output clock says exactly when that is.
             if next_ts >= now + lead_ns {
+                let until_ns = next_ts - (now + lead_ns);
+                self.idle_sleep_ms = (until_ns / 1_000_000).clamp(
+                    consts::AUDIO_PUMP_SLEEP_MS as u64,
+                    consts::AUDIO_PUMP_MAX_SLEEP_MS as u64,
+                ) as u32;
                 return false;
             }
 

@@ -41,7 +41,11 @@ pub fn audio_thread(shared: Arc<Shared>) {
         }
 
         if !pumped {
-            obs::time::sleep_ms(consts::AUDIO_PUMP_SLEEP_MS);
+            // The pump reports when it next has work rather than being polled
+            // at a fixed 1ms: once primed that is a deadline off the output
+            // clock, and in the steady state it is "when the next chunk is
+            // due", which is the only moment this thread matters.
+            obs::time::sleep_ms(pump.idle_sleep_ms());
         }
     }
 }
