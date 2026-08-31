@@ -60,6 +60,18 @@ cargo build --release -p irl-source --features deadlocks
 scripts/package.sh linux target/release dist   # the release archive, locally
 ```
 
+`make` wraps the same gates plus the ones cargo does not cover, each with an explicit config out of `.config/` so a machine's global settings cannot change the result. `make style` is the only target that rewrites files; `cargo fmt` on its own picks the wrong width, so always go through the Makefile or pass `--config-path .config/rustfmt.toml`.
+
+```bash
+make style        # cargo fmt
+make style-check
+make lint         # cargo xlint
+make test         # cargo xtest
+make spell-check  # codespell
+make check        # style-check + lint + test + spell-check, what CI runs
+make sim          # the speed-controller simulation; not a CI target
+```
+
 `--features deadlocks` spawns parking_lot's deadlock detector at module load and logs any cycle with backtraces. It replaces the C build's `IRL_CHECKED_LOCKS`; use it whenever you touch the threading model. Development only.
 
 `cargo build` names the artifact `libobs_irl_source.so` / `obs_irl_source.dll` / `libobs_irl_source.dylib`. `scripts/package.sh` is what renames it to `obs-irl-source.*` and stages the platform's install layout.
@@ -100,7 +112,7 @@ The audio core is built around three facts about libobs:
 2. Changing `samples_per_sec` between submissions makes OBS destroy and recreate its per source resampler with no crossfade (a click per change). Playback speed is instead applied inside the plugin with a persistent swresample compensation, and the rate submitted to OBS never changes.
 3. The OBS mixer consumes 21.3ms ticks against wall clock. A source whose queued audio runs dry gets a tick of silence plus a time shifted splice (crackle), and a source that falls behind the mix window causes OBS to permanently add global audio buffering. After priming, the pump always emits (real audio or shaped concealment silence) and keeps a fixed lead ahead of wall clock.
 
-Buffer regulation happens through playback speed only, asymmetric like IRLToolkit's player: builds at an inaudible -2%, drains post-stall backlog at up to +5% (mild chipmunk). Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP/RTMP backpressure; SRT bounds itself via its latency window), and startup backlog is trimmed only before priming.
+Buffer regulation happens through playback speed only, asymmetric like IRLToolkit's player: builds at an inaudible -2%, drains post-stall backlog at up to the Catch-Up Speed setting (+5% by default, mild chipmunk). The loop is PI, not P: a slow integral trim under the proportional ramp removes the standing error a sender whose media clock is not wall clock would otherwise leave, and it converges on the sender's rate without measuring it. `docs/audio-timing-pitfalls.md` is why every part of it is shaped the way it is, and is required reading before touching `speed.rs`. Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP/RTMP backpressure; SRT bounds itself via its latency window), and startup backlog is trimmed only before priming.
 
 ### `crates/irl-core`
 
@@ -109,7 +121,7 @@ Buffer regulation happens through playback speed only, asymmetric like IRLToolki
 | `consts.rs` | Every tuning constant, with a test pinning the values to the C plugin's. Nothing else may hardcode a threshold. |
 | `audio_buffer.rs` | The jitter buffer: a ring sized in milliseconds with a parallel 256-entry PTS chunk queue. Carries no lock of its own; the caller's mutex is the lock. `resize` grows and never shrinks. |
 | `pts_repair.rs` | Three-tier discontinuity repair plus the relock path: small gaps interpolated, medium gaps get silence, large gaps reset the timeline. |
-| `speed.rs` | The playback-speed controller (deadband, EMA, asymmetric limits) and `DrainWatch`, which notices a buffer that stopped draining. |
+| `speed.rs` | The PI playback-speed controller: the proportional ramp (sloped deadband, EMA, asymmetric limits), `SpeedTrim` (the integral term, with its error window and anti-windup), `SpeedCarry` (the fractional output-sample debt that makes sub-0.1% speeds applicable at all) and `DrainWatch`, which notices a buffer that stopped draining. `examples/speed-controller-sim.rs` drives all of it closed-loop. |
 | `pacing.rs` | The video-thread pacing queue: bounded by frames and bytes, `reschedule` re-derives due times, `due_now` returns Emit / EmitEarly / Wait. |
 | `timing.rs` | Output-clock arithmetic: next timestamp, lead, expected samples, soft compensation, prime threshold. |
 | `dsp.rs` | Fades, shaped concealment silence, last-sample memory. |
@@ -153,7 +165,7 @@ Four threads. The C plugin enforced its lock contract by convention and a debug-
 
 Lock order, and the whole of it: **`audio_state` → `audio_buf` → `hot.watermarks`.** `video.q` is never held together with any of them. The audio pump takes `audio_state` exactly once per iteration and passes `&mut AudioState` down, so nothing below it can take it again — parking_lot mutexes are not recursive, and a nested acquire would hang the audio thread and then the video thread behind it.
 
-Hot config (`reconnect_delay_s`, `adaptive_speed`, `wait_for_keyframe`, `clear_on_disconnect`) is atomics, read with `Relaxed` on the worker threads. The three watermarks publish together under a mutex because they must never be read torn mid-resize. Stat counters are relaxed atomics: unsynchronised in C, explicitly relaxed here, same values.
+Hot config (`reconnect_delay_s`, `adaptive_speed`, `catchup_percent`, `wait_for_keyframe`, `clear_on_disconnect`) is atomics, read with `Relaxed` on the worker threads. `catchup_percent` is read once per controller cycle and passed down as a speed, because the ramp, the anti-windup, the actuator clamp and the stuck-drain watch all have to agree on the same ceiling within a cycle. The three watermarks publish together under a mutex because they must never be read torn mid-resize. Stat counters are relaxed atomics: unsynchronised in C, explicitly relaxed here, same values.
 
 Panics never cross an FFI boundary. `obs::panic::guard` wraps every `extern "C"` shim (source callbacks, proc handlers, enumeration trampolines, vendor requests, module exports) and `shared::spawn_worker` wraps every worker thread: a panic is logged, `thread_active` is cleared (which also trips the FFmpeg interrupt watch, so a receiver blocked in `av_read_frame` unblocks), the video sleeper is woken, and the normal stop path takes over.
 
@@ -172,6 +184,16 @@ Panics never cross an FFI boundary. `obs::panic::guard` wraps every `extern "C"`
 `irl-core` has unit tests (`#[cfg(test)]` in each module) derived from the C plugin's thresholds; they are the regression net for the port.
 
 Everywhere else, tests live in `tests/`, never inside the lib. The link arguments that make a test binary resolve libobs (`cargo::rustc-link-arg-tests`) only reach integration-test targets, so `crates/irl-source` sets `test = false` on the lib (its `cdylib` half must not gain test harness code either) and `crates/obs` keeps its lib free of `#[cfg(test)]`. A test that touches libobs runs on Linux (with `libobs-dev`) and is skipped in CI on Windows and macOS, where there is no libobs for the binary to load against. `calldata_*` is the exception that is safe to call anywhere: it is pure bookkeeping over libobs's allocator and needs no `obs_startup`.
+
+`crates/irl-source/tests/locale_keys.rs` is the mechanical half of the "a new UI string belongs in two places" rule: it scans `settings.rs` and `source.rs` for `module_text` keys and fails if one has no `data/locale/en-US.ini` entry, or if the ini carries a string nothing uses. `module_text` falls back to returning the key, so without it a missing string is only noticed by opening the properties dialog.
+
+The speed controller has one more check that is not a test, because a controller that limit-cycles still passes every assertion you would think to write about one sample of it:
+
+```bash
+cargo run -p irl-core --example speed-controller-sim
+```
+
+It runs the real `irl_core::speed` closed-loop against a simulated sender and exits non-zero if the loop fails to settle at any buffer target or if a requested speed is not applied faithfully. Not a CI target; run it by hand whenever you touch `speed.rs`, and read `docs/audio-timing-pitfalls.md` first.
 
 Real-stream validation is manual: run the same feed through this build and a known-good one and compare the 30-second stats line field by field.
 
@@ -198,6 +220,8 @@ The port is behaviour-identical except for these, which are intentional:
 7. Two latent races where the stats snapshot read unlocked video-thread writes are closed by mirroring the anchors into atomics. Same values.
 8. The stats field list is one table (`irl_core::stats::FIELDS`) instead of three hand-synchronised copies.
 9. Version 2.0.0. The artifact is built by cargo, and CI no longer builds libobs.
+10. The speed-controller simulation **links** the controller instead of replicating it. `tools/speed-controller-sim.c` copy-pasted the constants and both update rules, because the real controller read `struct irl_source`; `crates/irl-core/examples/speed-controller-sim.rs` calls `irl_core::speed` directly, so the C file's standing caveat — "change them there and you must change them here too, or this quietly starts simulating a controller that no longer exists" — does not apply. `tools/` is gone with it.
+11. The UI strings are checked against `data/locale/en-US.ini` by a test rather than by convention (`crates/irl-source/tests/locale_keys.rs`).
 
 ## Contributing
 
@@ -213,4 +237,6 @@ This plugin was heavily built with LLM assistance, including the Rust port. The 
 - **`THIRD_PARTY_NOTICES.md`** — Licenses for the statically linked stack and the Rust crates, shipped inside every release archive rather than only living in the repo, because LGPLv3 FFmpeg wants its notices conveyed with the object code. `deps/README.md` has the reasoning behind the license choices; this file is the artifact-facing copy.
 - **`docs/audio-pipeline.md`** — Deep dive on the buffered vs low-latency audio paths, jitter buffer, adaptive latency control, PTS repair tiers, and timestamp handling.
 - **`docs/viewer-quality-plan.md`** — The viewer-quality policy and the recovery/diagnostics behavior that implements it (what stats to watch and what healthy looks like).
+- **`docs/audio-timing-pitfalls.md`** — What was built wrong first in the audio timing path, and the media-clock estimator that was built, measured and deleted. Required reading before changing `crates/irl-core/src/speed.rs`; most of it is re-inventable.
+- **`Makefile`**, **`.config/`** — The quality gates and their explicit configs (`rustfmt.toml`, `codespellrc`), so `make check` gives the same answer everywhere.
 - **`AGENTS.md`**, **`GEMINI.md`** — Symlinks to this file (`CLAUDE.md`).
