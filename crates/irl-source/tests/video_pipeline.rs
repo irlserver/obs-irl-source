@@ -499,6 +499,86 @@ fn a_resolution_change_re_anchors_the_video_clock() {
 
 /* ── The pacing loop ──────────────────────────────────────── */
 
+/// A queued packet is only work if there is room for what it decodes.
+///
+/// Once the channel carries the whole configured latency as packets, the
+/// pacing queue sitting at its decode lead with the head not yet due is the
+/// *normal* steady state at any Target Buffer above that lead. Treating a
+/// queued message as proof of work makes the video thread skip its sleep and
+/// spin at full CPU for the entire connection — and with the decoder stalled
+/// behind a queue it cannot drain.
+#[test]
+fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
+    let shared = shared();
+    let (mut thread, _recorder) = thread_with(shared.clone());
+
+    // A backlog of packets, as any target above the decode lead produces.
+    for i in 0..200 {
+        shared.video.push_packet(
+            shared::TimedPacket {
+                packet: ffmpeg::Packet::new().unwrap(),
+                pts_ns: i * 33_333_333,
+                bytes: 2048,
+            },
+            &shared.lifetime,
+        );
+    }
+    assert!(!shared.video.is_empty());
+
+    // Fill the pacing queue past its decode lead with frames due far ahead.
+    let now = obs::time::gettime_ns();
+    let mut pts = 0i64;
+    while thread.pacing_has_room() {
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(now as i64 + 60_000_000_000 + pts);
+        thread.pace_decoded(frame);
+        pts += 33_333_333;
+    }
+    assert!(!thread.pacing_has_room(), "queue should be at its lead");
+
+    // Packets queued, no room, nothing due: there is nothing to do, so the
+    // thread must sleep rather than spin.
+    assert!(
+        !shared.video.has_work(thread.pacing_has_room()),
+        "the thread would spin: packets queued but no room to decode them"
+    );
+
+    // Room again means work again.
+    assert!(shared.video.has_work(true));
+
+    // A clear always wakes it, whatever the queue looks like.
+    shared.video.request_clear();
+    assert!(shared.video.has_work(false));
+}
+
+/// A decoder handover is not gated on pacing room: it produces nothing by
+/// itself, and leaving it behind a full queue would strand a reconnect until
+/// the previous connection's frames drained.
+#[test]
+fn a_decoder_handover_is_taken_even_with_no_pacing_room() {
+    let shared = shared();
+    shared.video.push_packet(
+        shared::TimedPacket {
+            packet: ffmpeg::Packet::new().unwrap(),
+            pts_ns: 0,
+            bytes: 1,
+        },
+        &shared.lifetime,
+    );
+    assert!(!shared.video.next_is_decoder(), "a packet is at the front");
+
+    shared.video.request_clear();
+    shared.video.push_packet(
+        shared::TimedPacket {
+            packet: ffmpeg::Packet::new().unwrap(),
+            pts_ns: 0,
+            bytes: 1,
+        },
+        &shared.lifetime,
+    );
+    assert!(!shared.video.next_is_decoder());
+}
+
 #[test]
 fn a_queued_frame_is_transferred_paced_and_emitted() {
     let shared = shared();

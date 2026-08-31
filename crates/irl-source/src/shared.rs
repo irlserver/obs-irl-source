@@ -406,6 +406,12 @@ impl VideoChannel {
         std::mem::take(&mut self.q.lock().clear_pending)
     }
 
+    /// Whether the next message is a decoder handover, which the video thread
+    /// takes regardless of pacing room.
+    pub fn next_is_decoder(&self) -> bool {
+        matches!(self.q.lock().msgs.front(), Some(VideoMsg::Decoder(_)))
+    }
+
     /// Video thread: take the next message.
     pub fn pop(&self) -> Option<VideoMsg> {
         let mut q = self.q.lock();
@@ -436,13 +442,27 @@ impl VideoChannel {
         self.q.lock().span_ns()
     }
 
-    /// Video thread pacing sleep: returns as soon as a message or a clear
-    /// arrives, or the run is stopping, or `timeout` elapses. The predicate is
-    /// re-checked under the lock. Spurious wakeups are allowed; callers
-    /// re-derive due times from the OBS clock every cycle.
-    pub fn wait(&self, timeout: Duration, active: &AtomicBool) {
+    /// Whether the video thread has something to do right now.
+    ///
+    /// A queued packet is only work if there is somewhere to put what it
+    /// decodes: `has_room` is the pacing queue's. Treating a queued message as
+    /// proof of work spins the thread at full CPU whenever the pacing queue is
+    /// at its decode lead and the head frame is not due — which, once the
+    /// channel carries the whole configured latency as packets, is the *normal*
+    /// steady state at any Target Buffer above that lead.
+    pub fn has_work(&self, has_room: bool) -> bool {
+        let q = self.q.lock();
+        q.clear_pending || (has_room && !q.msgs.is_empty())
+    }
+
+    /// Video thread pacing sleep: returns as soon as there is work, or the run
+    /// is stopping, or `timeout` elapses. The predicate is re-checked under the
+    /// lock. Spurious wakeups are allowed; callers re-derive due times from the
+    /// OBS clock every cycle.
+    pub fn wait(&self, timeout: Duration, has_room: bool, active: &AtomicBool) {
         let mut q = self.q.lock();
-        if !q.clear_pending && q.msgs.is_empty() && active.load(Relaxed) {
+        let work = q.clear_pending || (has_room && !q.msgs.is_empty());
+        if !work && active.load(Relaxed) {
             self.cv.wait_for(&mut q, timeout);
         }
     }

@@ -144,9 +144,11 @@ impl VideoThread {
             // a clear arrives, or the thread is stopped. The predicate is
             // re-checked under the lock, so a push between the work above and
             // here is not slept through.
-            self.shared
-                .video
-                .wait(wait, &self.shared.flags.thread_active);
+            self.shared.video.wait(
+                wait,
+                self.pacing.has_room(),
+                &self.shared.flags.thread_active,
+            );
         }
 
         self.finish();
@@ -208,6 +210,15 @@ impl VideoThread {
         let shared = self.shared.clone();
         if shared.video_flags.timeline_reset.swap(false, Relaxed) {
             self.state.reset_timeline();
+        }
+        // A decoder handover is taken even with no room: it produces nothing
+        // by itself, and leaving it behind the queue would strand a reconnect
+        // until the old connection's frames drained.
+        while shared.video.next_is_decoder() {
+            if let Some(VideoMsg::Decoder(decoder)) = shared.video.pop() {
+                self.decoder = Some(*decoder);
+                self.state.reset();
+            }
         }
         while self.pacing.has_room() {
             let Some(msg) = shared.video.pop() else {
@@ -333,6 +344,12 @@ impl VideoThread {
     }
 
     /* ── Test seams ───────────────────────────────────────── */
+
+    /// Whether the pacing queue can take another frame (test seam; the thread
+    /// passes this to [`crate::shared::VideoChannel::wait`]).
+    pub fn pacing_has_room(&self) -> bool {
+        self.pacing.has_room()
+    }
 
     /// Frames currently paced.
     pub fn paced_len(&self) -> usize {
