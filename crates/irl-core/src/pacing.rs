@@ -127,11 +127,15 @@ impl<F: PacedFrame> PacingQueue<F> {
     /// delivery lead (see [`consts::VIDEO_PACING_LEAD_TICKS`]). The caller
     /// samples it per cycle, because the canvas frame rate is a setting the
     /// user can change while the source runs.
-    pub fn due_now(&mut self, now_ns: u64, slack_ns: i64) -> Option<DueVerdict> {
+    /// `allow_early` is false while the caller still needs a frame at its exact
+    /// due time — the one that re-anchors libobs's play head. Emitting that one
+    /// early would anchor the whole connection early, which is the offset the
+    /// lead exists to avoid, so a hard ceiling waits instead of overflowing.
+    pub fn due_now(&mut self, now_ns: u64, slack_ns: i64, allow_early: bool) -> Option<DueVerdict> {
         let due_ns = self.entries.front()?.due_ns;
         // Only a *hard* ceiling forces a frame out early. Sitting at the decode
         // lead is the normal steady state and must not.
-        let over = self.at_hard_ceiling();
+        let over = self.at_hard_ceiling() && allow_early;
         let delta = due_ns as i64 - now_ns as i64;
 
         if !over && delta > slack_ns {
@@ -288,7 +292,7 @@ mod tests {
     #[test]
     fn empty_queue_has_no_verdict() {
         let mut q = queue();
-        assert_eq!(q.due_now(1_000, consts::VIDEO_PACING_SLACK_NS), None);
+        assert_eq!(q.due_now(1_000, consts::VIDEO_PACING_SLACK_NS, true), None);
         assert_eq!(q.next_due(), None);
     }
 
@@ -297,7 +301,7 @@ mod tests {
         let mut q = queue();
         q.push(frame(0), 100_000_000);
         assert_eq!(
-            q.due_now(50_000_000, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(50_000_000, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Wait(50_000_000))
         );
         assert_eq!(q.overflows(), 0);
@@ -311,12 +315,12 @@ mod tests {
         // Exactly one slack unit out: emit.
         let now = 100_000_000 - consts::VIDEO_PACING_SLACK_NS as u64;
         assert_eq!(
-            q.due_now(now, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(now, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Emit)
         );
         // One nanosecond further out: sleep.
         assert_eq!(
-            q.due_now(now - 1, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(now - 1, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Wait(1_000_001))
         );
     }
@@ -326,11 +330,11 @@ mod tests {
         let mut q = queue();
         q.push(frame(0), 100_000_000);
         assert_eq!(
-            q.due_now(100_000_000, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(100_000_000, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Emit)
         );
         assert_eq!(
-            q.due_now(500_000_000, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(500_000_000, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Emit)
         );
         assert_eq!(q.overflows(), 0);
@@ -345,7 +349,7 @@ mod tests {
 
         // Not remotely due, but a memory ceiling binds.
         assert_eq!(
-            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::EmitEarly)
         );
         assert_eq!(q.overflows(), 1);
@@ -353,8 +357,34 @@ mod tests {
 
         // Back under the ceiling: normal pacing resumes.
         assert_eq!(
-            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Wait(1_016_000_000))
+        );
+        assert_eq!(q.overflows(), 1);
+    }
+
+    /// While the caller still needs a frame at its exact due time — the one
+    /// that re-anchors libobs's play head — a hard ceiling must wait rather
+    /// than force the head out early. Anchoring from an early frame runs the
+    /// whole connection early by the delivery lead.
+    #[test]
+    fn a_hard_ceiling_does_not_emit_early_while_early_is_forbidden() {
+        let mut q = PacingQueue::new(i64::MAX, 2, usize::MAX);
+        q.push(frame(0), 1_000_000_000);
+        q.push(frame(1), 1_016_000_000);
+        assert!(!q.has_room(), "at the hard ceiling");
+
+        // Allowed: the ceiling forces it out.
+        assert_eq!(
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS, true),
+            Some(DueVerdict::EmitEarly)
+        );
+        assert_eq!(q.overflows(), 1);
+
+        // Forbidden: it waits, and nothing is counted as an overflow.
+        assert_eq!(
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS, false),
+            Some(DueVerdict::Wait(1_000_000_000))
         );
         assert_eq!(q.overflows(), 1);
     }
@@ -379,7 +409,7 @@ mod tests {
         // Full, but nothing is due: it waits, and nothing is counted as an
         // overflow.
         assert!(matches!(
-            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Wait(_))
         ));
         assert_eq!(q.overflows(), 0);

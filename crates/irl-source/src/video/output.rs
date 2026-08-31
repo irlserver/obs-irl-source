@@ -342,7 +342,10 @@ impl VideoThread {
     /// pixel format, or the bottom-up layout OBS's async path cannot express
     /// (`Frame::plane` reports a negative stride as no plane) — goes through
     /// swscale into the persistent NV12 scratch.
-    pub fn output_frame(&mut self, frame: &Frame, timestamp: u64) {
+    /// Returns whether the frame reached libobs. A conversion that fails
+    /// submits nothing, and the caller needs to know: libobs's play head is
+    /// only anchored by a frame it actually received.
+    pub fn output_frame(&mut self, frame: &Frame, timestamp: u64) -> bool {
         let (width, height) = (frame.width(), frame.height());
         let colors = frame.colorimetry();
         let cs = convert_color_space(colors.colorspace, colors.color_trc);
@@ -374,10 +377,10 @@ impl VideoThread {
                 }
             }
             self.sink.output_video(&obs_frame);
-            return;
+            return true;
         }
 
-        self.output_frame_via_nv12(frame, timestamp, cs, range);
+        self.output_frame_via_nv12(frame, timestamp, cs, range)
     }
 
     /// The swscale half of [`Self::output_frame`].
@@ -387,10 +390,10 @@ impl VideoThread {
         timestamp: u64,
         cs: ColorSpace,
         range: ColorRange,
-    ) {
+    ) -> bool {
         let (width, height) = (frame.width(), frame.height());
         if width <= 0 || height <= 0 {
-            return;
+            return false;
         }
         let pix_fmt = frame.pix_fmt();
 
@@ -423,7 +426,7 @@ impl VideoThread {
                 Ok(scaler) => self.scaler = Some(scaler),
                 Err(err) => {
                     irl_warn!("swscale conversion failed: {err}");
-                    return;
+                    return false;
                 }
             }
         }
@@ -431,11 +434,11 @@ impl VideoThread {
         {
             let (y, uv) = self.nv12_scratch.split_at_mut(y_size);
             let Some(scaler) = self.scaler.as_mut() else {
-                return;
+                return false;
             };
             if let Err(err) = scaler.scale_into_nv12(frame, y, uv, width) {
                 irl_warn!("swscale conversion failed: {err}");
-                return;
+                return false;
             }
         }
 
@@ -445,5 +448,6 @@ impl VideoThread {
             .plane(0, &self.nv12_scratch[..y_size], width as u32)
             .plane(1, &self.nv12_scratch[y_size..need], width as u32);
         self.sink.output_video(&obs_frame);
+        true
     }
 }

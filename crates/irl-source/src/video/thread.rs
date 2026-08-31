@@ -316,7 +316,13 @@ impl VideoThread {
     /// video is what the un-paced path did all the time, and it beats a hole
     /// in the picture.
     fn pacing_emit_due(&mut self, now_ns: u64, slack_ns: i64) {
-        while let Some(verdict) = self.pacing.due_now(now_ns, slack_ns) {
+        loop {
+            // While the play head needs anchoring, a hard ceiling must not
+            // force the head out early: anchoring from an early frame is the
+            // offset this whole path exists to avoid.
+            let Some(verdict) = self.pacing.due_now(now_ns, slack_ns, !self.anchor_pending) else {
+                return;
+            };
             if let DueVerdict::Wait(_) = verdict {
                 return;
             }
@@ -326,10 +332,14 @@ impl VideoThread {
             let Some(paced) = self.pacing.pop() else {
                 return;
             };
-            self.output_frame(paced.frame(), due_ns);
-            // That frame anchored libobs's play head; the rest of this drain
-            // and every cycle after it gets the delivery lead.
-            self.anchor_pending = false;
+            let submitted = self.output_frame(paced.frame(), due_ns);
+            // The play head is only anchored by a frame libobs actually
+            // received, at its real due time. A conversion that failed
+            // submitted nothing, and an early frame would anchor early, so
+            // neither clears the flag.
+            if self.anchor_pending && verdict == DueVerdict::Emit && submitted {
+                self.anchor_pending = false;
+            }
         }
     }
 
