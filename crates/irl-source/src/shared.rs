@@ -72,6 +72,23 @@ impl HotConfig {
     }
 }
 
+/// The two video-decode flags the audio path also touches, now that decode
+/// lives on the video thread.
+///
+/// `first_keyframe` gates audio intake as well as video output (audio is not
+/// admitted before the first keyframe), and the receiver clears `corrupted`
+/// when PTS repair resets the timeline. Everything else about video decode is
+/// owned outright by the video thread and is not here.
+#[derive(Default)]
+pub struct VideoFlags {
+    pub first_keyframe: AtomicBool,
+    pub corrupted: AtomicBool,
+    /// An audio PTS reset broke the timeline, so the video thread's
+    /// frame-interval estimate and decoder-error bookkeeping no longer describe
+    /// this stream. Set by the receiver, consumed by the video thread.
+    pub timeline_reset: AtomicBool,
+}
+
 /// Run-level flags.
 pub struct RunFlags {
     /// `thread_active`. An `Arc` because the FFmpeg interrupt watch shares it,
@@ -215,7 +232,11 @@ impl ConnStats {
 pub struct LifetimeStats {
     pub reconnect_count: AtomicU64,
     pub video_queue_drops: AtomicU64,
-    pub video_pinned_peak: AtomicI32,
+    /// Peak packets queued for decode. Was the peak count of *decoded* frames
+    /// pinning hardware surfaces, which no longer exist: the receiver queues
+    /// compressed packets and the video thread decodes them just before
+    /// display.
+    pub video_queue_peak: AtomicI32,
     pub pacing_now: AtomicI32,
     pub pacing_peak: AtomicI32,
     pub pacing_bytes: AtomicUsize,
@@ -241,51 +262,79 @@ impl LifetimeStats {
     }
 }
 
-/// The receiver → video frame queue (C `video_queue` + `video_queue_lock` +
-/// `video_queue_cond`). Depth is small because queued hardware frames pin
-/// decoder surfaces; overflow drops the oldest, never the newest, so audio is
-/// never stalled. Frames carry their PTS already rescaled to nanoseconds: the
-/// receiver may close the format context while frames are still queued, and
-/// a queued frame must not borrow it (enforced by `ffmpeg::Frame` having no
-/// such lifetime).
+/// The receiver → video queue: **compressed packets**, not decoded frames.
+///
+/// This is where the stream's configured latency is held. Video has to be
+/// delayed by the same amount as audio (its due time is the frame PTS plus the
+/// audio playout offset), and holding that as decoded frames does not scale:
+/// 1080p NV12 is ~3.1MB a frame and 4K P010 ~24.9MB, so an 8s Target Buffer at
+/// 4K60 would be ~6GB. The same 8s of packets is ~20MB.
+///
+/// So the receiver decodes nothing: it pushes packets here and the video thread
+/// decodes them just before they are due, keeping only
+/// [`consts::VIDEO_DECODE_LEAD_MS`] of decoded frames alive at a time. That is
+/// also why video decode cannot live on the receiver thread — during a network
+/// stall the receiver is blocked in `av_read_frame`, which is exactly when the
+/// video thread must keep draining the buffer it has.
+///
+/// Bounded by media duration and bytes. Overflow drops from the front, which
+/// costs artifacts until the next keyframe; it should not happen, because the
+/// receiver's own read backpressure stops ingest long before this fills.
 pub struct VideoChannel {
     q: Mutex<VideoQueue>,
     cv: Condvar,
 }
 
-pub struct VideoQueue {
-    frames: std::collections::VecDeque<ffmpeg::Frame>,
-    /// 1 while the video thread holds a popped frame through the HW transfer.
-    in_flight: usize,
+/// A packet waiting to be decoded, with everything the queue needs to bound
+/// itself. `pts_ns` is approximate — it is only used for the span bound, while
+/// output timing comes from the decoded frame's own PTS.
+pub struct TimedPacket {
+    pub packet: ffmpeg::Packet,
+    pub pts_ns: i64,
+    pub bytes: usize,
+}
+
+/// What the receiver sends the video thread, in order.
+pub enum VideoMsg {
+    /// A new connection's decoder. Ordering matters: packets after this one
+    /// belong to it, and packets before it to the decoder it replaces.
+    Decoder(Box<VideoDecoder>),
+    Packet(TimedPacket),
+}
+
+/// A video decoder handed from the receiver (which opens the stream) to the
+/// video thread (which owns it from then on).
+pub struct VideoDecoder {
+    pub ctx: ffmpeg::CodecContext,
+    pub time_base: ffmpeg::Rational,
+    pub codec_id: ffmpeg::AVCodecID,
+}
+
+struct VideoQueue {
+    msgs: std::collections::VecDeque<VideoMsg>,
+    packets: usize,
+    bytes: usize,
     /// Set by the receiver on disconnect; the *video* thread performs the
     /// actual `obs_source_output_video(NULL)` so a frame already mid-conversion
     /// cannot repaint after the clear.
     clear_pending: bool,
 }
 
-/// A frame popped from the queue while the video thread transfers it.
-/// Dropping it clears `in_flight`, so a panic mid-transfer cannot leave the
-/// pinned-surface accounting wrong.
-pub struct InFlight<'a> {
-    channel: &'a VideoChannel,
-    frame: Option<ffmpeg::Frame>,
-}
-
-impl InFlight<'_> {
-    /// Take the frame out (the guard still clears `in_flight` on drop).
-    pub fn take(&mut self) -> Option<ffmpeg::Frame> {
-        self.frame.take()
-    }
-
-    pub fn frame(&self) -> Option<&ffmpeg::Frame> {
-        self.frame.as_ref()
-    }
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        let mut q = self.channel.q.lock();
-        q.in_flight = q.in_flight.saturating_sub(1);
+impl VideoQueue {
+    /// Media time between the oldest and newest queued packet.
+    fn span_ns(&self) -> i64 {
+        let mut first = None;
+        let mut last = None;
+        for msg in &self.msgs {
+            if let VideoMsg::Packet(p) = msg {
+                first.get_or_insert(p.pts_ns);
+                last = Some(p.pts_ns);
+            }
+        }
+        match (first, last) {
+            (Some(a), Some(b)) => (b - a).max(0),
+            _ => 0,
+        }
     }
 }
 
@@ -293,26 +342,49 @@ impl VideoChannel {
     pub fn new() -> Self {
         Self {
             q: Mutex::new(VideoQueue {
-                frames: std::collections::VecDeque::with_capacity(
-                    irl_core::consts::VIDEO_QUEUE_SIZE,
-                ),
-                in_flight: 0,
+                msgs: std::collections::VecDeque::new(),
+                packets: 0,
+                bytes: 0,
                 clear_pending: false,
             }),
             cv: Condvar::new(),
         }
     }
 
-    /// Receiver thread: enqueue, dropping the oldest when full.
-    pub fn push(&self, frame: ffmpeg::Frame, lifetime: &LifetimeStats) {
+    /// Receiver thread: hand the video thread the decoder for a new
+    /// connection.
+    pub fn install_decoder(&self, decoder: VideoDecoder) {
         let mut q = self.q.lock();
-        if q.frames.len() >= irl_core::consts::VIDEO_QUEUE_SIZE {
-            q.frames.pop_front(); // Drop → av_frame_free → surface released
-            lifetime.video_queue_drops.fetch_add(1, Relaxed);
+        q.msgs.push_back(VideoMsg::Decoder(Box::new(decoder)));
+        drop(q);
+        self.cv.notify_one();
+    }
+
+    /// Receiver thread: enqueue a packet, dropping the oldest if a bound is
+    /// exceeded.
+    pub fn push_packet(&self, packet: TimedPacket, lifetime: &LifetimeStats) {
+        let mut q = self.q.lock();
+        q.bytes += packet.bytes;
+        q.packets += 1;
+        q.msgs.push_back(VideoMsg::Packet(packet));
+
+        while q.bytes > irl_core::consts::VIDEO_PACKET_QUEUE_MAX_BYTES
+            || q.span_ns() > irl_core::consts::VIDEO_PACKET_QUEUE_MAX_MS * 1_000_000
+        {
+            // Dropping a packet costs artifacts until the next keyframe, so
+            // this is a last resort the read backpressure should prevent.
+            let Some(dropped) = q.msgs.pop_front() else {
+                break;
+            };
+            if let VideoMsg::Packet(p) = dropped {
+                q.bytes -= p.bytes;
+                q.packets -= 1;
+                lifetime.video_queue_drops.fetch_add(1, Relaxed);
+            }
         }
-        q.frames.push_back(frame);
-        let pinned = (q.frames.len() + q.in_flight) as i32;
-        LifetimeStats::note_peak_i32(&lifetime.video_pinned_peak, pinned);
+
+        let depth = q.packets as i32;
+        LifetimeStats::note_peak_i32(&lifetime.video_queue_peak, depth);
         drop(q);
         self.cv.notify_one();
     }
@@ -321,7 +393,9 @@ impl VideoChannel {
     /// video thread to clear the OBS frame.
     pub fn request_clear(&self) {
         let mut q = self.q.lock();
-        q.frames.clear();
+        q.msgs.clear();
+        q.packets = 0;
+        q.bytes = 0;
         q.clear_pending = true;
         drop(q);
         self.cv.notify_one();
@@ -332,35 +406,43 @@ impl VideoChannel {
         std::mem::take(&mut self.q.lock().clear_pending)
     }
 
-    /// Video thread: pop the oldest frame, marking it in flight.
-    pub fn pop_in_flight(&self, lifetime: &LifetimeStats) -> Option<InFlight<'_>> {
+    /// Video thread: take the next message.
+    pub fn pop(&self) -> Option<VideoMsg> {
         let mut q = self.q.lock();
-        let frame = q.frames.pop_front()?;
-        q.in_flight += 1;
-        let pinned = (q.frames.len() + q.in_flight) as i32;
-        LifetimeStats::note_peak_i32(&lifetime.video_pinned_peak, pinned);
-        drop(q);
-        Some(InFlight {
-            channel: self,
-            frame: Some(frame),
-        })
+        let msg = q.msgs.pop_front()?;
+        if let VideoMsg::Packet(p) = &msg {
+            q.bytes -= p.bytes;
+            q.packets -= 1;
+        }
+        Some(msg)
     }
 
+    /// Packets queued for decode.
     pub fn len(&self) -> usize {
-        self.q.lock().frames.len()
+        self.q.lock().packets
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Video thread pacing sleep: returns as soon as a frame or a clear
+    /// Bytes of compressed video queued.
+    pub fn bytes(&self) -> usize {
+        self.q.lock().bytes
+    }
+
+    /// Media duration queued for decode: the latency actually being held.
+    pub fn span_ns(&self) -> i64 {
+        self.q.lock().span_ns()
+    }
+
+    /// Video thread pacing sleep: returns as soon as a message or a clear
     /// arrives, or the run is stopping, or `timeout` elapses. The predicate is
-    /// re-checked under the lock, as in the C. Spurious wakeups are allowed;
-    /// callers re-derive due times from the OBS clock every cycle.
+    /// re-checked under the lock. Spurious wakeups are allowed; callers
+    /// re-derive due times from the OBS clock every cycle.
     pub fn wait(&self, timeout: Duration, active: &AtomicBool) {
         let mut q = self.q.lock();
-        if !q.clear_pending && q.frames.is_empty() && active.load(Relaxed) {
+        if !q.clear_pending && q.msgs.is_empty() && active.load(Relaxed) {
             self.cv.wait_for(&mut q, timeout);
         }
     }
@@ -370,9 +452,12 @@ impl VideoChannel {
         self.cv.notify_all();
     }
 
-    /// Receiver stop: drain everything (frames are freed).
+    /// Receiver stop: drain everything.
     pub fn drain(&self) {
-        self.q.lock().frames.clear();
+        let mut q = self.q.lock();
+        q.msgs.clear();
+        q.packets = 0;
+        q.bytes = 0;
     }
 }
 
@@ -393,6 +478,8 @@ pub struct Shared {
     /// Lock order: `audio_state` before this.
     pub audio_buf: Mutex<Option<AudioBuffer>>,
     pub video: VideoChannel,
+    /// Video-decode state the audio path also reads or clears.
+    pub video_flags: VideoFlags,
     pub conn: ConnStats,
     pub lifetime: Arc<LifetimeStats>,
     pub interrupt: Arc<ffmpeg::InterruptWatch>,
@@ -417,6 +504,7 @@ impl Shared {
             audio_state: Mutex::new(AudioState::new(irl_core::consts::STARTUP_AUDIO_WARMUP_MS)),
             audio_buf: Mutex::new(None),
             video: VideoChannel::new(),
+            video_flags: VideoFlags::default(),
             conn: ConnStats::default(),
             lifetime,
             interrupt,

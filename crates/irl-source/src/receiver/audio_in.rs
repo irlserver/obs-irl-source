@@ -133,14 +133,11 @@ impl AudioIntake {
                 );
                 shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 drop(state);
-                // The receiver-owned half of `irl_reset_stream_timing_state`,
-                // which lives in `ReceiverFlags` here.
-                flags.video_prev_pts_ns = 0;
-                flags.video_decode_errors = 0;
-                flags.video_last_decoder_warning_time_us = 0;
-                flags.video_corrupted = false;
-                flags.video_skip_logged = false;
-                flags.video_hold_logged = false;
+                // The video half of `irl_reset_stream_timing_state`. Video
+                // decode runs on its own thread now, so this is a request
+                // rather than a write: it picks it up on its next cycle.
+                shared.video_flags.corrupted.store(false, Relaxed);
+                shared.video_flags.timeline_reset.store(true, Relaxed);
                 flags.audio_decode_errors = 0;
                 flags.audio_last_decoder_flush_time_us = 0;
                 flags.audio_last_decoder_warning_time_us = 0;
@@ -206,7 +203,7 @@ impl AudioIntake {
 
         if shared.hot.wait_for_keyframe.load(Relaxed)
             && flags.has_video_stream
-            && !flags.first_keyframe_received
+            && !shared.video_flags.first_keyframe.load(Relaxed)
         {
             return;
         }

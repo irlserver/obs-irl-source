@@ -93,12 +93,13 @@ One cdylib, five workspace crates. The rule that shapes the split: **all unsafe 
 ### Data flow
 
 ```
-[receiver thread]: FFmpeg URL, demux, decode, PTS repair
-  audio: resample, write to jitter buffer
-  video: keyframe gate, push decoded frame (PTS in ns) onto video queue
+[receiver thread]: FFmpeg URL, demux
+  audio: decode, PTS repair, resample, write to jitter buffer
+  video: push the *compressed packet* onto the video queue
 
-[video thread]: pop video queue, HW frame transfer, hold until due,
-                format conversion, OBS async video output
+[video thread]: decode packets as they come due, keyframe gate, HW frame
+                transfer, hold until due, format conversion,
+                OBS async video output
 
 [audio thread]: drain jitter buffer, speed correction, concealment,
                 OBS audio output
@@ -140,9 +141,9 @@ Buffer regulation happens through playback speed only, asymmetric like IRLToolki
 | `settings.rs` | `settings.c`: defaults and the properties dialog. |
 | `config.rs` | `config_load` / `config_requires_restart` / `config_apply_hot`. |
 | `shared.rs` | The decomposition of the C `struct irl_source` into owners (see below). |
-| `receiver/{mod,stream,decode,audio_in}.rs` | `receiver.c`, `receiver-stream.c`, `receiver-decode.c` and the intake half of `receiver-audio.c`. |
+| `receiver/{mod,stream,decode,audio_in}.rs` | `receiver.c`, `receiver-stream.c`, the audio half of `receiver-decode.c`, and the intake half of `receiver-audio.c`. |
 | `audio/{mod,pump}.rs` | The output half of `receiver-audio.c`: the pump, concealment, speed application, re-anchoring. |
-| `video/{mod,thread,intake,output}.rs` | `receiver-video.c` and `video-handler.c`. |
+| `video/{mod,thread,decode,intake,output}.rs` | `receiver-video.c`, `video-handler.c` and the video half of `receiver-decode.c`. |
 | `websocket.rs` | `websocket-vendor.c`. |
 
 `update` diffs the new settings against the live config: URL, FFmpeg Options, Hardware Decode and Low Latency Audio are latched at stream open and force a reconnect; everything else is swapped in place through `Config::apply_hot`, so a settings tweak neither drops the connection nor clears the stats counters. Retuning Target Buffer live goes through `AudioBuffer::resize`, which grows the ring (never shrinks it) and only then publishes the new watermarks — if the resize fails the old target stays in force, including in the OBS-thread config that the next diff compares against.
@@ -159,9 +160,12 @@ Four threads. The C plugin enforced its lock contract by convention and a debug-
 
 - **OBS thread** — `IrlSource`: create, destroy, update, tick, get_properties, activate/deactivate/show/hide (the last four only matter with "Close Stream When Inactive"). Everything it owns sits in one `Mutex<ObsState>` (config, `fit_pending`, `media_stopped`, the running threads). It is behind a mutex only because the stats proc can arrive on another thread.
 - **`Shared`** — built fresh at every `start_receiver`, which is what replaces the C `reset_runtime_state()`: everything that function zeroed is a field of `Shared` and starts zeroed, and everything it deliberately kept lives in `LifetimeStats`, which is an `Arc` carried across runs.
-- **Receiver thread** — owns demux/decode FFmpeg state as a plain struct on its own stack. Writes to the jitter buffer and pushes decoded video frames (PTS already rescaled to nanoseconds) onto the video channel. Never blocks on GPU or OBS video delivery.
-- **Video thread** — pops the channel, does the HW transfer, paces each frame to its due time, converts and calls `obs_source_output_video`. Its pacing queue is a local, lock-free `PacingQueue`; only the counters are mirrored into `LifetimeStats` for the stats line.
+- **Receiver thread** — owns demux and the *audio* decoder as a plain struct on its own stack. Writes to the jitter buffer, and pushes video packets onto the video channel without decoding them. Never touches the GPU.
+- **Video thread** — owns the video decoder, handed over by the receiver at stream open (`VideoMsg::Decoder`, ordered ahead of the packets it belongs to). Decodes packets only as they approach their due time, does the HW transfer, paces each frame, converts and calls `obs_source_output_video`. Its pacing queue is a local, lock-free `PacingQueue`; only the counters are mirrored into `LifetimeStats`.
+
 - **Audio thread** — drains the jitter buffer and submits audio, paced against the sample-counter output clock.
+
+Video decode is on the video thread and not the receiver for two reasons, and the second is the load-bearing one. Decoding eagerly would mean holding the stream's whole latency as decoded frames — 8s of 4K60 is ~6GB — where the same 8s of packets is ~20MB. And the receiver spends a network stall blocked in `av_read_frame`, which is exactly when video must keep draining the buffer it already has, so the thread that decodes cannot be the thread that reads.
 
 Lock order, and the whole of it: **`audio_state` → `audio_buf` → `hot.watermarks`.** `video.q` is never held together with any of them. The audio pump takes `audio_state` exactly once per iteration and passes `&mut AudioState` down, so nothing below it can take it again — parking_lot mutexes are not recursive, and a nested acquire would hang the audio thread and then the video thread behind it.
 
@@ -222,6 +226,7 @@ The port is behaviour-identical except for these, which are intentional:
 9. Version 2.0.0. The artifact is built by cargo, and CI no longer builds libobs.
 10. The speed-controller simulation **links** the controller instead of replicating it. `tools/speed-controller-sim.c` copy-pasted the constants and both update rules, because the real controller read `struct irl_source`; `crates/irl-core/examples/speed-controller-sim.rs` calls `irl_core::speed` directly, so the C file's standing caveat — "change them there and you must change them here too, or this quietly starts simulating a controller that no longer exists" — does not apply. `tools/` is gone with it.
 11. The UI strings are checked against `data/locale/en-US.ini` by a test rather than by convention (`crates/irl-source/tests/locale_keys.rs`).
+12. Video is decoded on the video thread, just before each frame is due, and the receiver → video queue carries compressed packets instead of decoded frames. The C decoded eagerly on the receiver thread, which made the Target Buffer cost decoded-frame memory: 1 GiB of pacing budget is 5.7s of 1080p60 but only 1.4s of 4K60 and 0.7s of 4K60 10-bit, and past that frames were emitted early and dropped. Decoded memory is now bounded by `VIDEO_DECODE_LEAD_MS` regardless of the target. `PacingQueue` gained the matching soft/hard bound split: holding the decode lead is normal and must not emit early, while the byte and frame ceilings are memory limits that still do. The stats line reports `pktq=` instead of `pinned_peak=`, since no decoded frame pins a decoder surface any more.
 
 ## Contributing
 

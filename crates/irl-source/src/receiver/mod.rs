@@ -18,7 +18,6 @@ use irl_core::consts;
 
 use crate::receiver::audio_in::AudioIntake;
 use crate::shared::Shared;
-use crate::video::VideoIntake;
 
 /// Receiver-thread state shared between the packet path (`decode.rs`) and
 /// the two frame intakes. Every field is receiver-thread-only; the C kept
@@ -30,31 +29,13 @@ pub struct ReceiverFlags {
     /// / `video_stream_idx >= 0` in C); set at open, cleared at close.
     pub has_audio_stream: bool,
     pub has_video_stream: bool,
-    /// Frame-level keyframe gate: decoded video is shown, and audio is
-    /// admitted, only after the first keyframe.
-    pub first_keyframe_received: bool,
-    /// Packet-level keyframe gate: the video decoder is not fed until a key
-    /// packet arrives.
-    pub video_pkt_gate_open: bool,
-    /// When the packet gate started waiting (FFmpeg µs domain).
-    pub video_pkt_gate_start_us: u64,
-    /// Set when `send_packet` failed for video; cleared on the next keyframe.
-    pub video_corrupted: bool,
-    /// Log throttles.
-    pub video_skip_logged: bool,
-    pub video_hold_logged: bool,
-    /// Consecutive decode errors (audio flushes after a burst; video never).
+    /// Consecutive audio decode errors (the audio decoder flushes after a
+    /// burst). Video decode is not on this thread; its state lives in
+    /// [`crate::video::DecodeState`].
     pub audio_decode_errors: i32,
-    pub video_decode_errors: i32,
     /// Throttles (FFmpeg µs domain).
     pub audio_last_decoder_flush_time_us: u64,
     pub audio_last_decoder_warning_time_us: u64,
-    pub video_last_decoder_warning_time_us: u64,
-    /// Previous decoded video PTS (ns) for the frame-interval EMA.
-    pub video_prev_pts_ns: i64,
-    /// Last seen video dimensions, for mid-stream resolution changes.
-    pub last_video_width: i32,
-    pub last_video_height: i32,
 }
 
 impl ReceiverFlags {
@@ -78,7 +59,6 @@ pub struct Receiver {
     shared: Arc<Shared>,
     fmt: Option<ffmpeg::FormatContext>,
     audio_dec: Option<ffmpeg::CodecContext>,
-    video_dec: Option<ffmpeg::CodecContext>,
     /// Created with the connection and released with it: keeping a device
     /// across reconnects made the probe loop silently skip and attach a stale
     /// device, so reconnects behaved differently from fresh connects.
@@ -87,7 +67,6 @@ pub struct Receiver {
     video_stream_idx: i32,
     audio_tb: ffmpeg::Rational,
     video_tb: ffmpeg::Rational,
-    video_codec_id: ffmpeg::AVCodecID,
     /// What the previous session on this thread carried, so a reconnect can
     /// probe fast. Cleared at thread start, never by `close_ffmpeg`, so a
     /// settings-forced restart always probes in full.
@@ -96,7 +75,6 @@ pub struct Receiver {
     using_hw_decode: bool,
     flags: ReceiverFlags,
     audio_in: AudioIntake,
-    video_in: VideoIntake,
     last_stats_time: u64,
     pkt: ffmpeg::Packet,
     frame: ffmpeg::Frame,
@@ -113,19 +91,16 @@ impl Receiver {
             shared,
             fmt: None,
             audio_dec: None,
-            video_dec: None,
             hw_device: None,
             audio_stream_idx: -1,
             video_stream_idx: -1,
             audio_tb: ffmpeg::Rational::new(0, 1),
             video_tb: ffmpeg::Rational::new(0, 1),
-            video_codec_id: ffmpeg::AVCodecID::AV_CODEC_ID_NONE,
             prev_had_video: false,
             prev_had_audio: false,
             using_hw_decode: false,
             flags: ReceiverFlags::default(),
             audio_in,
-            video_in: VideoIntake::new(),
             last_stats_time: 0,
             pkt,
             frame,
@@ -182,8 +157,8 @@ impl Receiver {
             let index = self.pkt.stream_index();
             if index == self.audio_stream_idx && self.audio_dec.is_some() {
                 self.handle_audio_packet();
-            } else if index == self.video_stream_idx && self.video_dec.is_some() {
-                self.handle_video_packet();
+            } else if index == self.video_stream_idx {
+                self.push_video_packet();
             }
 
             self.pkt.unref();

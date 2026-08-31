@@ -8,14 +8,11 @@ use irl_core::consts;
 use crate::audio;
 use crate::receiver::audio_in::AudioIntake;
 use crate::receiver::{Receiver, ReceiverFlags};
-use crate::shared::Shared;
-use crate::video::VideoIntake;
+use crate::shared::{Shared, TimedPacket};
 
-/// Pre-keyframe packets only produce reference-miss error spam and garbage
-/// frames that the frame-level gate discards anyway. This timeout covers
-/// demuxers that never set `AV_PKT_FLAG_KEY`; the decoder then finds the
-/// keyframe itself.
-const VIDEO_PKT_GATE_TIMEOUT_US: u64 = 5_000_000;
+/// Nanosecond time base packet PTS is rescaled into for the video queue's
+/// duration bound.
+const NS_TIME_BASE: Rational = Rational::new(1, 1_000_000_000);
 
 fn should_log_decoder_warning(last_warning_time_us: &mut u64, now_us: u64) -> bool {
     if *last_warning_time_us != 0
@@ -117,48 +114,6 @@ fn drain_audio_frames(
 /// intact packet decodes fine without any reset, and the reference chain heals
 /// at the next keyframe either way. The burst is still counted and logged so it
 /// shows up in diagnostics.
-fn note_video_decode_error(flags: &mut ReceiverFlags, stage: &str) {
-    flags.video_decode_errors += 1;
-    flags.video_corrupted = true;
-    if flags.video_decode_errors < consts::DECODER_ERROR_BURST {
-        return;
-    }
-    let now_us = ffmpeg::gettime_us() as u64;
-    if should_log_decoder_warning(&mut flags.video_last_decoder_warning_time_us, now_us) {
-        irl_warn!(
-            "Video decoder {stage}: corruption burst ({} consecutive errors), waiting for the next keyframe",
-            flags.video_decode_errors
-        );
-    }
-    flags.video_decode_errors = 0;
-}
-
-/// Drain everything the video decoder has ready.
-fn drain_video_frames(
-    dec: &mut CodecContext,
-    frame: &mut Frame,
-    shared: &Shared,
-    flags: &mut ReceiverFlags,
-    video_in: &mut VideoIntake,
-    video_tb: Rational,
-    codec_id: ffmpeg::AVCodecID,
-) {
-    loop {
-        match dec.receive_frame(frame) {
-            Err(err) if err.is_eagain() || err.is_eof() => return,
-            Err(_) => {
-                note_video_decode_error(flags, "receive");
-                return;
-            }
-            Ok(()) => {
-                flags.video_decode_errors = 0;
-                video_in.handle_frame(shared, flags, frame, video_tb, codec_id);
-                frame.unref();
-            }
-        }
-    }
-}
-
 impl Receiver {
     /// `irl_handle_audio_packet`.
     pub(super) fn handle_audio_packet(&mut self) {
@@ -224,71 +179,34 @@ impl Receiver {
         drain_audio_frames(dec, frame, shared, flags, audio_in, audio_tb);
     }
 
-    /// `irl_handle_video_packet`.
-    pub(super) fn handle_video_packet(&mut self) {
-        let video_tb = self.video_tb;
-        let codec_id = self.video_codec_id;
-        let Self {
-            shared,
-            video_dec,
-            frame,
-            flags,
-            video_in,
-            pkt,
-            ..
-        } = self;
-        let Some(dec) = video_dec.as_mut() else {
-            return;
-        };
+    /// The video half of the read loop: hand the packet to the video thread.
+    ///
+    /// Nothing is decoded here. The stream's latency is held as compressed
+    /// packets and decoded just before display, which is what makes a deep
+    /// Target Buffer affordable at 4K — and it has to be the video thread that
+    /// decodes, because this one spends a stall blocked in `av_read_frame`.
+    pub(super) fn push_video_packet(&mut self) {
+        // Only used to bound the queue by media duration; output timing comes
+        // from the decoded frame's own PTS, after repair.
+        let pts_ns = self
+            .pkt
+            .pts_or_dts()
+            .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
+        let bytes = self.pkt.size().max(0) as usize;
 
-        // Packet-level keyframe gate.
-        if shared.hot.wait_for_keyframe.load(Relaxed)
-            && !flags.first_keyframe_received
-            && !flags.video_pkt_gate_open
-        {
-            if pkt.is_key() {
-                flags.video_pkt_gate_open = true;
-            } else {
-                let now_us = ffmpeg::gettime_us() as u64;
-                if flags.video_pkt_gate_start_us == 0 {
-                    flags.video_pkt_gate_start_us = now_us;
-                }
-                if now_us - flags.video_pkt_gate_start_us < VIDEO_PKT_GATE_TIMEOUT_US {
-                    return;
-                }
-                flags.video_pkt_gate_open = true;
+        match self.pkt.new_ref() {
+            Ok(packet) => self.shared.video.push_packet(
+                TimedPacket {
+                    packet,
+                    pts_ns,
+                    bytes,
+                },
+                &self.shared.lifetime,
+            ),
+            Err(err) => {
+                self.shared.lifetime.video_pkt_dropped.fetch_add(1, Relaxed);
+                irl_warn!("Could not reference a video packet ({err}); frame dropped");
             }
         }
-
-        let mut result = dec.send_packet(pkt);
-        if result.as_ref().is_err_and(ffmpeg::Error::is_eagain) {
-            // The decoder refused the packet: it has output waiting and, on
-            // fixed-pool hardware decoders, no free surface until we take it.
-            // FFmpeg's contract is to read the output and resend the same
-            // packet — falling through would discard it, and with a reference
-            // frame that costs artifacts until the next keyframe rather than
-            // one dropped frame.
-            //
-            // One retry, deliberately not a loop. A single drain frees every
-            // surface the decoder was waiting on, and this runs on the receiver
-            // thread, which also feeds audio intake: a decoder that returned
-            // EAGAIN without producing frames would spin here and starve the
-            // jitter buffer, trading a dropped packet for the underrun cascade.
-            shared.lifetime.video_pkt_eagain.fetch_add(1, Relaxed);
-            drain_video_frames(dec, frame, shared, flags, video_in, video_tb, codec_id);
-            result = dec.send_packet(pkt);
-            if result.as_ref().is_err_and(ffmpeg::Error::is_eagain) {
-                shared.lifetime.video_pkt_dropped.fetch_add(1, Relaxed);
-            }
-        }
-
-        match &result {
-            Err(err) if !err.is_eagain() && !err.is_eof() => {
-                note_video_decode_error(flags, "send");
-            }
-            _ => flags.video_decode_errors = 0,
-        }
-
-        drain_video_frames(dec, frame, shared, flags, video_in, video_tb, codec_id);
     }
 }

@@ -34,6 +34,7 @@ pub struct PacingQueue<F> {
     overflows: u64,
     max_frames: usize,
     max_bytes: usize,
+    lead_ns: i64,
 }
 
 #[derive(Debug)]
@@ -45,8 +46,21 @@ struct Entry<F> {
 }
 
 impl<F: PacedFrame> PacingQueue<F> {
-    /// Empty queue with the given ceilings.
-    pub fn new(max_frames: usize, max_bytes: usize) -> Self {
+    /// Empty queue holding `lead_ns` of media, under hard ceilings of
+    /// `max_frames` and `max_bytes`.
+    ///
+    /// The two bounds mean different things and that distinction is the whole
+    /// design. `lead_ns` is the *soft* bound: it is how far ahead of display
+    /// the caller decodes, it is reached in normal operation every second of
+    /// every stream, and reaching it simply means "stop decoding for now".
+    /// `max_frames` / `max_bytes` are the *hard* bound: memory that must not be
+    /// exceeded whatever the stream does, and reaching one means pacing has
+    /// failed and frames go out early ([`DueVerdict::EmitEarly`], counted).
+    ///
+    /// Before the delay moved into the packet queue these were the same bound,
+    /// so a Target Buffer that needed more decoded frames than the byte ceiling
+    /// allowed silently degraded into permanent early emission.
+    pub fn new(lead_ns: i64, max_frames: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),
             bytes: 0,
@@ -54,12 +68,27 @@ impl<F: PacedFrame> PacingQueue<F> {
             overflows: 0,
             max_frames,
             max_bytes,
+            lead_ns,
         }
     }
 
-    /// Whether another frame fits under both ceilings.
+    /// Whether the caller should decode another frame: the queue holds less
+    /// than its lead and is under both hard ceilings.
     pub fn has_room(&self) -> bool {
-        self.entries.len() < self.max_frames && self.bytes < self.max_bytes
+        self.span_ns() < self.lead_ns && !self.at_hard_ceiling()
+    }
+
+    /// Media time between the oldest and newest queued frame.
+    pub fn span_ns(&self) -> i64 {
+        match (self.entries.front(), self.entries.back()) {
+            (Some(front), Some(back)) => (back.pts_ns - front.pts_ns).max(0),
+            _ => 0,
+        }
+    }
+
+    /// At a memory ceiling: pacing cannot hold what it has been given.
+    fn at_hard_ceiling(&self) -> bool {
+        self.entries.len() >= self.max_frames || self.bytes >= self.max_bytes
     }
 
     /// Append a frame with its current due time.
@@ -98,7 +127,9 @@ impl<F: PacedFrame> PacingQueue<F> {
     /// counts an overflow even if the head happened to be due anyway.
     pub fn due_now(&mut self, now_ns: u64) -> Option<DueVerdict> {
         let due_ns = self.entries.front()?.due_ns;
-        let over = !self.has_room();
+        // Only a *hard* ceiling forces a frame out early. Sitting at the decode
+        // lead is the normal steady state and must not.
+        let over = self.at_hard_ceiling();
         let delta = due_ns as i64 - now_ns as i64;
 
         if !over && delta > consts::VIDEO_PACING_SLACK_NS {
@@ -186,6 +217,7 @@ mod tests {
 
     fn queue() -> PacingQueue<TestFrame> {
         PacingQueue::new(
+            i64::MAX,
             consts::VIDEO_PACING_MAX_FRAMES,
             consts::VIDEO_PACING_MAX_BYTES,
         )
@@ -193,7 +225,7 @@ mod tests {
 
     #[test]
     fn frame_ceiling_bounds_the_queue() {
-        let mut q = PacingQueue::new(consts::VIDEO_PACING_MAX_FRAMES, usize::MAX);
+        let mut q = PacingQueue::new(i64::MAX, consts::VIDEO_PACING_MAX_FRAMES, usize::MAX);
         for i in 0..consts::VIDEO_PACING_MAX_FRAMES {
             assert!(q.has_room(), "room at {i}");
             q.push(frame(i as i64), 0);
@@ -204,7 +236,7 @@ mod tests {
 
     #[test]
     fn byte_ceiling_bounds_the_queue() {
-        let mut q = PacingQueue::new(usize::MAX, consts::VIDEO_PACING_MAX_BYTES);
+        let mut q = PacingQueue::new(i64::MAX, usize::MAX, consts::VIDEO_PACING_MAX_BYTES);
         let mut pushed = 0;
         while q.has_room() {
             q.push(frame(pushed), 0);
@@ -287,13 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn over_the_ceiling_emits_early_and_counts_an_overflow() {
-        let mut q = PacingQueue::new(2, usize::MAX);
+    fn over_the_hard_ceiling_emits_early_and_counts_an_overflow() {
+        let mut q = PacingQueue::new(i64::MAX, 2, usize::MAX);
         q.push(frame(0), 1_000_000_000);
         q.push(frame(1), 1_016_000_000);
         assert!(!q.has_room());
 
-        // Not remotely due, but a ceiling binds.
+        // Not remotely due, but a memory ceiling binds.
         assert_eq!(q.due_now(0), Some(DueVerdict::EmitEarly));
         assert_eq!(q.overflows(), 1);
         q.pop();
@@ -301,6 +333,39 @@ mod tests {
         // Back under the ceiling: normal pacing resumes.
         assert_eq!(q.due_now(0), Some(DueVerdict::Wait(1_016_000_000)));
         assert_eq!(q.overflows(), 1);
+    }
+
+    /// The distinction the packet-paced design rests on: holding the decode
+    /// lead is the normal steady state and must never emit a frame early.
+    /// Before the split, "full" meant both things, so a Target Buffer that
+    /// needed more decoded frames than the byte ceiling allowed degraded into
+    /// permanent early emission instead of just decoding later.
+    #[test]
+    fn reaching_the_decode_lead_stops_intake_without_emitting_early() {
+        // 100ms of lead, 30fps frames, no memory ceiling in reach.
+        let mut q = PacingQueue::new(100_000_000, usize::MAX, usize::MAX);
+        let mut pts = 0;
+        while q.has_room() {
+            q.push(frame(pts), 1_000_000_000 + pts as u64);
+            pts += 33_000_000;
+        }
+        assert!(q.span_ns() >= 100_000_000, "span {}", q.span_ns());
+        assert!(!q.has_room());
+
+        // Full, but nothing is due: it waits, and nothing is counted as an
+        // overflow.
+        assert!(matches!(q.due_now(0), Some(DueVerdict::Wait(_))));
+        assert_eq!(q.overflows(), 0);
+    }
+
+    #[test]
+    fn the_span_is_the_media_time_held() {
+        let mut q = PacingQueue::new(i64::MAX, usize::MAX, usize::MAX);
+        assert_eq!(q.span_ns(), 0);
+        q.push(frame(1_000), 0);
+        assert_eq!(q.span_ns(), 0);
+        q.push(frame(34_000_000), 0);
+        assert_eq!(q.span_ns(), 33_999_000);
     }
 
     #[test]

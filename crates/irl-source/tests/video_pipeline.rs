@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use obs_irl_source::{receiver, shared, video};
+use obs_irl_source::{shared, video};
 
 use std::ffi::CString;
 use std::ptr::NonNull;
@@ -323,6 +323,8 @@ fn an_unmappable_frame_arrives_as_nv12_from_the_scaler() {
 
 /// 90 kHz, the usual MPEG-TS/RTMP video time base.
 const TB_90K: ffmpeg::Rational = ffmpeg::Rational::new(1, 90_000);
+const H264: ffmpeg::AVCodecID = ffmpeg::AVCodecID::AV_CODEC_ID_H264;
+const HEVC: ffmpeg::AVCodecID = ffmpeg::AVCodecID::AV_CODEC_ID_HEVC;
 
 fn video_frame(pts: i64, key: bool) -> ffmpeg::Frame {
     let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
@@ -333,162 +335,166 @@ fn video_frame(pts: i64, key: bool) -> ffmpeg::Frame {
     frame
 }
 
+/// Run the intake the way the video thread does: one decoded frame in, the
+/// frame to pace out (or `None` when it is gated or held).
+fn intake_frame(
+    shared: &Shared,
+    state: &mut video::DecodeState,
+    frame: &ffmpeg::Frame,
+    codec_id: ffmpeg::AVCodecID,
+) -> Option<ffmpeg::Frame> {
+    video::intake::handle_frame(shared, state, frame, TB_90K, codec_id)
+}
+
 #[test]
 fn the_keyframe_gate_drops_until_the_first_key_frame() {
     let shared = shared();
     assert!(shared.hot.wait_for_keyframe.load(Relaxed));
-    let mut flags = receiver::ReceiverFlags::default();
-    let mut intake = video::VideoIntake::new();
+    let mut state = video::DecodeState::default();
 
     for pts in [0, 3_000, 6_000] {
         let frame = video_frame(pts, false);
-        intake.handle_frame(
-            &shared,
-            &mut flags,
-            &frame,
-            TB_90K,
-            ffmpeg::AVCodecID::AV_CODEC_ID_H264,
+        assert!(
+            intake_frame(&shared, &mut state, &frame, H264).is_none(),
+            "nothing paced before the keyframe"
         );
     }
-    assert_eq!(shared.video.len(), 0, "nothing queued before the keyframe");
     assert_eq!(shared.conn.total_video_frames.load(Relaxed), 0);
-    assert!(!flags.first_keyframe_received);
+    assert!(!shared.video_flags.first_keyframe.load(Relaxed));
 
     // 9000 ticks at 90 kHz is 100 ms.
     let frame = video_frame(9_000, true);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &frame,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
+    let paced = intake_frame(&shared, &mut state, &frame, H264).expect("keyframe paced");
 
-    assert!(flags.first_keyframe_received);
-    assert_eq!(shared.video.len(), 1);
+    assert!(shared.video_flags.first_keyframe.load(Relaxed));
     assert_eq!(shared.conn.total_video_frames.load(Relaxed), 1);
-    assert_eq!((flags.last_video_width, flags.last_video_height), (64, 32));
-
-    let queued = shared
-        .video
-        .pop_in_flight(&shared.lifetime)
-        .expect("queued frame");
-    assert_eq!(
-        queued.frame().unwrap().pts(),
-        100_000_000,
-        "PTS rescaled to nanoseconds"
-    );
-    // The queue holds its own reference; the decoder's frame is untouched.
+    assert_eq!((state.last_width, state.last_height), (64, 32));
+    assert_eq!(paced.pts(), 100_000_000, "PTS rescaled to nanoseconds");
+    // The paced frame holds its own reference; the decoder's is untouched.
     assert_eq!(frame.pts(), 9_000);
 }
 
+/// The packet queue is where the stream's latency lives, so its bounds are
+/// what stop a sender from making the plugin allocate without limit. It is
+/// bounded by media duration and by bytes, not by a frame count, because a
+/// packet's size and its duration are unrelated.
 #[test]
-fn a_full_queue_drops_the_oldest_frame() {
+fn the_packet_queue_is_bounded_by_duration_and_bytes() {
     let shared = shared();
-    let mut flags = receiver::ReceiverFlags::default();
-    let mut intake = video::VideoIntake::new();
+    let ms = |n: i64| n * 1_000_000;
 
-    for index in 0..5 {
-        let frame = video_frame(index * 3_000, true);
-        intake.handle_frame(
-            &shared,
-            &mut flags,
-            &frame,
-            TB_90K,
-            ffmpeg::AVCodecID::AV_CODEC_ID_H264,
+    // Well past the duration ceiling: the oldest packets go.
+    for i in 0..40 {
+        shared.video.push_packet(
+            shared::TimedPacket {
+                packet: ffmpeg::Packet::new().unwrap(),
+                pts_ns: ms(i * 500),
+                bytes: 1024,
+            },
+            &shared.lifetime,
         );
     }
+    assert!(
+        shared.video.span_ns() <= ms(irl_core::consts::VIDEO_PACKET_QUEUE_MAX_MS),
+        "span {}ms over the ceiling",
+        shared.video.span_ns() / 1_000_000
+    );
+    assert!(shared.lifetime.video_queue_drops.load(Relaxed) > 0);
+}
 
-    assert_eq!(shared.video.len(), irl_core::consts::VIDEO_QUEUE_SIZE);
-    assert_eq!(shared.lifetime.video_queue_drops.load(Relaxed), 1);
-    assert_eq!(shared.conn.total_video_frames.load(Relaxed), 5);
+/// And by bytes, for a sender whose timestamps claim the queue is shallow: a
+/// duration bound alone would let it allocate without limit.
+#[test]
+fn the_packet_queue_is_bounded_by_bytes_whatever_the_timestamps_say() {
+    let big = shared();
+    for _ in 0..40 {
+        big.video.push_packet(
+            shared::TimedPacket {
+                packet: ffmpeg::Packet::new().unwrap(),
+                pts_ns: 0,
+                bytes: 4 * 1024 * 1024,
+            },
+            &big.lifetime,
+        );
+    }
+    assert!(
+        big.video.bytes() <= irl_core::consts::VIDEO_PACKET_QUEUE_MAX_BYTES,
+        "{} bytes queued",
+        big.video.bytes()
+    );
+}
 
-    // The survivor at the head is the second frame pushed (33.33 ms).
-    let head = shared
-        .video
-        .pop_in_flight(&shared.lifetime)
-        .expect("queued frame");
-    assert_eq!(head.frame().unwrap().pts(), 33_333_333);
+/// Packets are decoded by whichever decoder was installed before them, which
+/// is what makes a reconnect mid-queue safe.
+#[test]
+fn the_channel_delivers_packets_after_the_decoder_that_owns_them() {
+    let shared = shared();
+    shared.video.push_packet(
+        shared::TimedPacket {
+            packet: ffmpeg::Packet::new().unwrap(),
+            pts_ns: 0,
+            bytes: 1,
+        },
+        &shared.lifetime,
+    );
+    assert_eq!(shared.video.len(), 1);
+
+    assert!(matches!(
+        shared.video.pop(),
+        Some(shared::VideoMsg::Packet(_))
+    ));
+    assert_eq!(shared.video.len(), 0);
+    assert!(shared.video.pop().is_none());
 }
 
 #[test]
 fn hevc_frames_from_a_missing_reference_are_held_back() {
     let shared = shared();
-    let mut flags = receiver::ReceiverFlags::default();
-    let mut intake = video::VideoIntake::new();
+    let mut state = video::DecodeState::default();
 
     let key = video_frame(0, true);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &key,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_HEVC,
-    );
-    assert_eq!(shared.video.len(), 1);
+    assert!(intake_frame(&shared, &mut state, &key, HEVC).is_some());
 
     let mut corrupt = video_frame(3_000, false);
     unsafe {
         (*corrupt.as_mut_ptr()).flags |= ffmpeg::sys::AV_FRAME_FLAG_CORRUPT;
     }
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &corrupt,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_HEVC,
+    assert!(
+        intake_frame(&shared, &mut state, &corrupt, HEVC).is_none(),
+        "the damaged frame is not paced"
     );
-
-    assert_eq!(shared.video.len(), 1, "the damaged frame is not queued");
     assert_eq!(shared.conn.video_corrupt_held.load(Relaxed), 1);
     assert_eq!(shared.conn.video_corrupt_frames.load(Relaxed), 1);
-    assert!(flags.video_hold_logged);
+    assert!(state.hold_logged);
 
     // H.264 damage passes through instead, to preserve cadence.
     let mut damaged = video_frame(6_000, false);
     unsafe {
         (*damaged.as_mut_ptr()).flags |= ffmpeg::sys::AV_FRAME_FLAG_CORRUPT;
     }
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &damaged,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
-    assert_eq!(shared.video.len(), 2);
+    assert!(intake_frame(&shared, &mut state, &damaged, H264).is_some());
 }
 
 #[test]
 fn a_resolution_change_re_anchors_the_video_clock() {
     let shared = shared();
-    let mut flags = receiver::ReceiverFlags::default();
-    let mut intake = video::VideoIntake::new();
+    let mut state = video::DecodeState::default();
 
     let first = video_frame(0, true);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &first,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
+    assert!(intake_frame(&shared, &mut state, &first, H264).is_some());
     shared.conn.video_ts_init.store(true, Relaxed);
 
-    let mut second = ffmpeg::Frame::alloc_video(Pix::AV_PIX_FMT_YUV420P, 128, 64).unwrap();
+    let mut second = sw_frame(Pix::AV_PIX_FMT_YUV420P, 128, 64);
     second.set_pts(3_000);
     mark_keyframe(&mut second);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &second,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
+    assert!(intake_frame(&shared, &mut state, &second, H264).is_some());
 
-    assert!(!shared.conn.video_ts_init.load(Relaxed));
+    assert!(
+        !shared.conn.video_ts_init.load(Relaxed),
+        "the fallback clock re-anchors on a resolution change"
+    );
+    assert_eq!((state.last_width, state.last_height), (128, 64));
     assert_eq!(shared.conn.last_video_width.load(Relaxed), 128);
-    assert_eq!(shared.conn.last_video_height.load(Relaxed), 64);
 }
 
 /* ── The pacing loop ──────────────────────────────────────── */
@@ -502,7 +508,7 @@ fn a_queued_frame_is_transferred_paced_and_emitted() {
     // The receiver hands the queue nanosecond PTS.
     queued.set_pts(5_000_000_000);
     let source_plane = queued.plane(0).unwrap().as_ptr() as usize;
-    shared.video.push(queued, &shared.lifetime);
+    thread.pace_decoded(queued);
 
     // With no audio mapping the video-only anchor puts the first frame at
     // `now`, so one cycle takes it all the way out.
@@ -510,7 +516,6 @@ fn a_queued_frame_is_transferred_paced_and_emitted() {
 
     let emitted = recorder.only();
     assert_eq!(emitted.planes[0].0, source_plane, "still zero-copy");
-    assert_eq!(shared.video.len(), 0);
     assert_eq!(thread.paced_len(), 0);
     assert!(
         !wait.is_zero(),
@@ -531,13 +536,13 @@ fn a_future_frame_waits_instead_of_being_emitted() {
     // 200 ms into the future on the video-only anchor: the fallback anchors on
     // the first frame, so pace the *second* one forward.
     queued.set_pts(0);
-    shared.video.push(queued, &shared.lifetime);
+    thread.pace_decoded(queued);
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1, "the anchor frame goes out");
 
     let mut later = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     later.set_pts(200_000_000);
-    shared.video.push(later, &shared.lifetime);
+    thread.pace_decoded(later);
     let wait = thread.run_once(obs::time::gettime_ns());
 
     assert_eq!(recorder.emitted().len(), 1, "not due yet");
@@ -557,13 +562,13 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
 
     let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     queued.set_pts(0);
-    shared.video.push(queued, &shared.lifetime);
+    thread.pace_decoded(queued);
     thread.run_once(obs::time::gettime_ns());
     assert_eq!(recorder.emitted().len(), 1);
 
     let mut pending = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     pending.set_pts(10_000_000_000);
-    shared.video.push(pending, &shared.lifetime);
+    thread.pace_decoded(pending);
     thread.run_once(obs::time::gettime_ns());
     assert_eq!(thread.paced_len(), 1, "parked until its due time");
 
@@ -600,7 +605,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
 
     let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     queued.set_pts(10_000_000_000);
-    shared.video.push(queued, &shared.lifetime);
+    thread.pace_decoded(queued);
     thread.run_once(now);
 
     assert!(recorder.emitted().is_empty(), "due a second from now");
@@ -686,35 +691,19 @@ fn the_lead_stats_follow_the_mapping() {
 fn a_disabled_keyframe_gate_passes_non_key_frames() {
     let shared = shared();
     shared.hot.wait_for_keyframe.store(false, Relaxed);
-    let mut flags = receiver::ReceiverFlags::default();
-    let mut intake = video::VideoIntake::new();
+    let mut state = video::DecodeState::default();
 
     let frame = video_frame(0, false);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &frame,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
-    assert_eq!(
-        shared.video.len(),
-        1,
-        "non-key frame queued with the gate off"
+    assert!(
+        intake_frame(&shared, &mut state, &frame, H264).is_some(),
+        "non-key frame paced with the gate off"
     );
     assert!(
-        !flags.first_keyframe_received,
+        !shared.video_flags.first_keyframe.load(Relaxed),
         "first-keyframe bookkeeping still waits for a real key frame"
     );
 
     let frame = video_frame(9_000, true);
-    intake.handle_frame(
-        &shared,
-        &mut flags,
-        &frame,
-        TB_90K,
-        ffmpeg::AVCodecID::AV_CODEC_ID_H264,
-    );
-    assert!(flags.first_keyframe_received);
-    assert_eq!(shared.video.len(), 2);
+    assert!(intake_frame(&shared, &mut state, &frame, H264).is_some());
+    assert!(shared.video_flags.first_keyframe.load(Relaxed));
 }

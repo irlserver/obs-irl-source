@@ -1,6 +1,7 @@
 //! Video path (port of `receiver-video.c` + `video-handler.c`). W2-C owns
 //! this module; the signatures here are frozen.
 
+pub mod decode;
 pub mod intake;
 pub mod output;
 pub mod thread;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use crate::shared::Shared;
 
-pub use intake::VideoIntake;
+pub use intake::DecodeState;
 pub use thread::VideoThread;
 
 /// Where output frames go. Production is [`obs::SourceHandle`]; tests use a
@@ -28,8 +29,9 @@ impl VideoSink for obs::SourceHandle {
     }
 }
 
-/// Video thread body: pop the queue, transfer to system memory, pace, convert
-/// and output; consume clear requests; drain on exit.
+/// Video thread body: decode queued packets as they come due, transfer to
+/// system memory, pace, convert and output; consume clear requests; drain on
+/// exit.
 pub fn video_thread(shared: Arc<Shared>) {
     VideoThread::new(shared).run();
 }

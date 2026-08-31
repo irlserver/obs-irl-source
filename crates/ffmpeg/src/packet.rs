@@ -4,9 +4,10 @@ use crate::Error;
 
 pub struct Packet(*mut ffmpeg_sys_next::AVPacket);
 
-// SAFETY: an AVPacket is a plain owned allocation with no thread affinity; the
-// receiver thread owns the one the plugin uses for its whole lifetime, and
-// nothing else holds a pointer to it.
+// SAFETY: an AVPacket is a plain owned allocation with no thread affinity. The
+// receiver thread owns the one it reads into for the whole run; the references
+// it hands to the video thread through `new_ref` are separate allocations
+// sharing a refcounted AVBufferRef, whose refcount is atomic.
 unsafe impl Send for Packet {}
 
 impl Packet {
@@ -32,6 +33,41 @@ impl Packet {
     pub fn pts(&self) -> i64 {
         // SAFETY: as above.
         unsafe { (*self.0).pts }
+    }
+
+    pub fn dts(&self) -> i64 {
+        // SAFETY: as above.
+        unsafe { (*self.0).dts }
+    }
+
+    /// Presentation timestamp, falling back to the decode timestamp, `None`
+    /// when neither is set. Mirrors [`crate::Frame::best_effort_pts`]: live
+    /// demuxers leave one or both unset often enough that the caller must not
+    /// see `AV_NOPTS_VALUE` as a number.
+    pub fn pts_or_dts(&self) -> Option<i64> {
+        // SAFETY: as above.
+        let (pts, dts) = unsafe { ((*self.0).pts, (*self.0).dts) };
+        [pts, dts]
+            .into_iter()
+            .find(|&v| v != ffmpeg_sys_next::AV_NOPTS_VALUE)
+    }
+
+    /// A new packet sharing this one's buffer (`av_packet_ref`).
+    ///
+    /// The receiver reads every packet into one reusable `Packet` and unrefs
+    /// it immediately, so anything handed to another thread needs its own
+    /// reference. The payload is not copied — both packets point at the same
+    /// refcounted buffer, and it is freed when the last one drops.
+    pub fn new_ref(&self) -> crate::Result<Self> {
+        let dst = Self::new()?;
+        // SAFETY: `dst` is a fresh blank packet and `self.0` is a live one;
+        // av_packet_ref takes a reference to the source's buffer (or copies it
+        // when the source is not refcounted) and leaves the source untouched.
+        let ret = unsafe { ffmpeg_sys_next::av_packet_ref(dst.0, self.0) };
+        if ret < 0 {
+            return Err(Error(ret));
+        }
+        Ok(dst)
     }
 
     pub fn size(&self) -> i32 {

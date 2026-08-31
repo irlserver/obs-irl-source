@@ -17,8 +17,10 @@ use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
 use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacedFrame, PacingQueue};
 
-use crate::shared::Shared;
+use crate::shared::{Shared, VideoDecoder, VideoMsg};
 use crate::video::VideoSink;
+use crate::video::decode;
+use crate::video::intake::DecodeState;
 
 /// A frame waiting for its due time. `pts_ns` and `bytes` are cached at
 /// intake: the pacing queue re-derives due times from the PTS every cycle, and
@@ -64,6 +66,15 @@ impl PacedFrame for Paced {
 /// [`LifetimeStats`]: crate::shared::LifetimeStats
 pub struct VideoThread {
     pub(crate) shared: Arc<Shared>,
+    /// The video decoder, handed over by the receiver when a connection opens.
+    /// Owned here because *when* a packet is decoded is this thread's decision.
+    decoder: Option<VideoDecoder>,
+    /// Reusable destination for `receive_frame`.
+    scratch: Frame,
+    /// Reusable output list for one packet's frames.
+    decoded: Vec<Frame>,
+    /// Decode and intake state, owned outright by this thread.
+    state: DecodeState,
     pacing: PacingQueue<Paced>,
     /// Last known stream-PTS → OBS-clock offset and when it was taken.
     pub(crate) playout_offset_ns: i64,
@@ -98,7 +109,12 @@ impl VideoThread {
     pub fn with_sink(shared: Arc<Shared>, sink: Box<dyn VideoSink>) -> Self {
         Self {
             shared,
+            decoder: None,
+            scratch: Frame::new().expect("frame allocation"),
+            decoded: Vec::new(),
+            state: DecodeState::default(),
             pacing: PacingQueue::new(
+                consts::VIDEO_DECODE_LEAD_MS * 1_000_000,
                 consts::VIDEO_PACING_MAX_FRAMES,
                 consts::VIDEO_PACING_MAX_BYTES,
             ),
@@ -157,7 +173,7 @@ impl VideoThread {
             return Duration::ZERO;
         }
 
-        self.pacing_intake();
+        self.decode_intake();
         // Before both the emit and the sleep below, so each cycle schedules
         // against the offset as it is now rather than as it was when the
         // frames were decoded.
@@ -169,45 +185,77 @@ impl VideoThread {
         self.sleep_hint(obs::time::gettime_ns())
     }
 
-    /// Exit path: drop everything and give the decoder its surfaces back.
+    /// Exit path: drop everything, including the decoder this thread owns.
     fn finish(&mut self) {
         self.pacing.drain();
+        self.decoded.clear();
         self.xfer_pool_release();
         self.shared.video.drain();
+        self.decoder = None;
     }
 
     /* ── Pacing ───────────────────────────────────────────── */
 
-    /// `pacing_intake`: move everything the receiver has decoded into the
-    /// pacing queue, copying it out of the hardware frame pool on the way so
-    /// the decoder gets its surfaces back. Runs before every emit and wait,
-    /// because holding a decoded frame in the channel is what stalls the
-    /// decoder.
-    fn pacing_intake(&mut self) {
-        // A local handle: `InFlight` borrows the channel, and `to_sysmem`
-        // needs `&mut self`.
+    /// Decode packets into the pacing queue until it holds its lead.
+    ///
+    /// This is the whole point of the design: the queue's soft bound is
+    /// [`consts::VIDEO_DECODE_LEAD_MS`] of *media*, not the stream's latency,
+    /// so only a quarter second of decoded frames is ever resident however deep
+    /// the Target Buffer is. Everything behind that stays compressed in the
+    /// channel. Each frame is copied out of the hardware pool immediately, so a
+    /// decoder surface is pinned only for the length of one transfer.
+    fn decode_intake(&mut self) {
         let shared = self.shared.clone();
+        if shared.video_flags.timeline_reset.swap(false, Relaxed) {
+            self.state.reset_timeline();
+        }
         while self.pacing.has_room() {
-            let Some(mut in_flight) = shared.video.pop_in_flight(&shared.lifetime) else {
+            let Some(msg) = shared.video.pop() else {
                 return;
             };
-            let Some(decoded) = in_flight.take() else {
-                return;
-            };
-
-            let sysmem = self.to_sysmem(&decoded);
-            let due_ns = match &sysmem {
-                Some(frame) => self.due_time(frame),
-                None => 0,
-            };
-            // The decoder's frame (and, on the hardware path, its surface) is
-            // released here, before the guard clears the pinned accounting.
-            drop(decoded);
-            drop(in_flight);
-
-            if let Some(frame) = sysmem {
-                self.pacing.push(Paced::new(frame), due_ns);
+            match msg {
+                VideoMsg::Decoder(decoder) => {
+                    // A new connection. Anything the old decoder produced is
+                    // already paced or was cleared with the disconnect.
+                    self.decoder = Some(*decoder);
+                    self.state.reset();
+                }
+                VideoMsg::Packet(packet) => {
+                    let mut produced = std::mem::take(&mut self.decoded);
+                    if let Some(decoder) = self.decoder.as_mut() {
+                        decode::decode_packet(
+                            decoder,
+                            &mut self.scratch,
+                            &shared,
+                            &mut self.state,
+                            &packet.packet,
+                            &mut produced,
+                        );
+                    }
+                    for frame in produced.drain(..) {
+                        self.pace_decoded(frame);
+                    }
+                    self.decoded = produced;
+                }
             }
+        }
+    }
+
+    /// Copy one decoded frame out of the hardware pool and schedule it.
+    ///
+    /// Public as the seam the pacing tests use to put a frame in front of the
+    /// loop without a decoder; production reaches it only through
+    /// [`Self::decode_intake`].
+    pub fn pace_decoded(&mut self, frame: Frame) {
+        let sysmem = self.to_sysmem(&frame);
+        let due_ns = match &sysmem {
+            Some(f) => self.due_time(f),
+            None => 0,
+        };
+        // Releases the decoder's surface before the next packet is sent.
+        drop(frame);
+        if let Some(f) = sysmem {
+            self.pacing.push(Paced::new(f), due_ns);
         }
     }
 

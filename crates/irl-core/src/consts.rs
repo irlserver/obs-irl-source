@@ -195,10 +195,31 @@ pub const DECODER_WARNING_INTERVAL_US: u64 = 1_000_000;
 pub const DECODER_ERROR_BURST: i32 = 3;
 /// Video thread count handed to the decoder.
 pub const VIDEO_DECODER_THREADS: i32 = 4;
-/// Receiver → video queue depth.
-pub const VIDEO_QUEUE_SIZE: usize = 4;
-/// `extra_hw_frames`: the queue plus the two frames in flight around it.
-pub const VIDEO_EXTRA_HW_FRAMES: i32 = VIDEO_QUEUE_SIZE as i32 + 2;
+/// `extra_hw_frames`: headroom above what the decoder itself needs. Decoded
+/// frames are transferred to system memory on the decoding thread and never
+/// queued as hardware surfaces, so this is slack, not a queue depth.
+pub const VIDEO_EXTRA_HW_FRAMES: i32 = 6;
+
+/// How much decoded video the video thread keeps ahead of the display point.
+///
+/// This — not the Target Buffer — is what bounds decoded-frame memory. The
+/// stream's whole latency is held as compressed packets in the receiver → video
+/// queue, and decode happens just before display, so a 4K60 stream at an 8s
+/// target costs ~20MB of packets instead of ~6GB of decoded frames.
+///
+/// It has to cover the decoder's own pipeline (reordering, hardware surfaces in
+/// flight) plus jitter in the video thread's wakeups, and nothing more: every
+/// millisecond here is decoded frames resident in RAM.
+pub const VIDEO_DECODE_LEAD_MS: i64 = 250;
+
+/// Compressed packets the receiver → video queue may hold, in milliseconds of
+/// media. The queue carries the whole configured latency, so it must clear the
+/// largest Target Buffer with room for the burst that arrives when a stalled
+/// sender catches up.
+pub const VIDEO_PACKET_QUEUE_MAX_MS: i64 = BUFFER_TARGET_MAX_MS as i64 + 4000;
+/// Byte ceiling on the same queue: 12s of a 40Mbps feed, and a hard bound on
+/// what a sender that lies about its timestamps can make the plugin allocate.
+pub const VIDEO_PACKET_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 // ── Video timing / pacing ──
 
@@ -342,8 +363,12 @@ mod tests {
         assert_eq!(DECODER_WARNING_INTERVAL_US, 1_000_000); // receiver-decode.c
         assert_eq!(DECODER_ERROR_BURST, 3); // receiver-decode.c
         assert_eq!(VIDEO_DECODER_THREADS, 4); // receiver-stream.c
-        assert_eq!(VIDEO_QUEUE_SIZE, 4); // IRL_VIDEO_QUEUE_SIZE
         assert_eq!(VIDEO_EXTRA_HW_FRAMES, 6); // receiver-stream.c
+        // No C ancestor: the C decoded eagerly on the receiver thread and held
+        // the whole lead as decoded frames.
+        assert_eq!(VIDEO_DECODE_LEAD_MS, 250);
+        assert_eq!(VIDEO_PACKET_QUEUE_MAX_MS, 12_000);
+        assert_eq!(VIDEO_PACKET_QUEUE_MAX_BYTES, 67_108_864);
 
         // ── video timing / pacing ──
         assert_eq!(OBS_ASYNC_FRAME_BUDGET, 24); // IRL_OBS_ASYNC_FRAME_BUDGET

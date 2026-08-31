@@ -8,7 +8,7 @@ use irl_core::{HwDecode, consts};
 
 use crate::audio;
 use crate::receiver::{Receiver, probe};
-use crate::shared::{AudioState, Shared};
+use crate::shared::{AudioState, Shared, VideoDecoder};
 
 /// `nvdec_get_format`. Installed only for forced NVDEC, where a software
 /// fallback is exactly what must not happen.
@@ -265,13 +265,11 @@ impl Receiver {
             shared,
             fmt,
             audio_dec,
-            video_dec,
             hw_device,
             audio_stream_idx,
             video_stream_idx,
             audio_tb,
             video_tb,
-            video_codec_id,
             using_hw_decode,
             flags,
             ..
@@ -288,7 +286,6 @@ impl Receiver {
                             *video_stream_idx = index as i32;
                             flags.has_video_stream = true;
                             *video_tb = stream.time_base();
-                            *video_codec_id = codec_id;
                             // This reports the requested decode path; the
                             // first-keyframe log reports the ground truth from
                             // the actual decoded frame.
@@ -305,7 +302,16 @@ impl Receiver {
                                 ffmpeg::codec_name(codec_id),
                                 i32::from(*using_hw_decode)
                             );
-                            *video_dec = Some(dec);
+                            // The video thread owns the decoder from here:
+                            // it decides when each packet is decoded, and this
+                            // thread spends a stall blocked in av_read_frame.
+                            // Ordering in the channel is what binds the
+                            // decoder to the packets that follow it.
+                            shared.video.install_decoder(VideoDecoder {
+                                ctx: dec,
+                                time_base: stream.time_base(),
+                                codec_id,
+                            });
                         }
                         None => irl_warn!(
                             "Failed to open video decoder for stream {index} ({})",
@@ -375,7 +381,10 @@ impl Receiver {
     /// touched here.
     pub(super) fn close_ffmpeg(&mut self) {
         self.audio_dec = None;
-        self.video_dec = None;
+        // The video decoder belongs to the video thread; it drops it on the
+        // next `install_decoder` or when the run ends. Its own reference to the
+        // hardware device (taken by `avcodec_open2`) keeps that alive past the
+        // line below.
         self.hw_device = None;
         self.fmt = None;
 
@@ -385,16 +394,14 @@ impl Receiver {
         self.using_hw_decode = false;
 
         self.audio_in.reset();
-        self.video_in.reset();
         self.flags.reset();
     }
 
     /// `irl_prepare_new_connection`.
     pub(super) fn prepare_new_connection(&mut self) {
         self.shared.flags.reconnecting.store(false, Relaxed);
-        self.flags.first_keyframe_received = false;
-        self.flags.video_pkt_gate_open = false;
-        self.flags.video_pkt_gate_start_us = 0;
+        self.shared.video_flags.first_keyframe.store(false, Relaxed);
+        self.shared.video_flags.corrupted.store(false, Relaxed);
         self.shared.conn.video_ts_init.store(false, Relaxed);
 
         let mut state = self.shared.audio_state();
@@ -522,7 +529,7 @@ impl Receiver {
              stream_chunk={}ms obs_chunk={}ms \
              restarts={} av_drift={}ms reanchors={} \
              vlead={}ms peak={}ms excess={} vfps={:.1} \
-             pinned_peak={}/{} paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
+             pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
             conn.total_audio_frames.load(Relaxed),
             buffer_fill_ms,
@@ -565,10 +572,15 @@ impl Receiver {
             } else {
                 0.0
             },
-            // peak pinned surfaces vs what extra_hw_frames budgeted; the pool
-            // must cover peak + the decoder's own frame.
-            lifetime.video_pinned_peak.load(Relaxed),
-            consts::VIDEO_EXTRA_HW_FRAMES,
+            // The compressed video queue: where the stream's latency is
+            // actually held. Its duration should track the Target Buffer, and
+            // its size is what a deep buffer costs at this bitrate — the
+            // decoded side is bounded by VIDEO_DECODE_LEAD_MS whatever this
+            // says.
+            shared.video.len(),
+            lifetime.video_queue_peak.load(Relaxed),
+            shared.video.bytes() / 1024,
+            shared.video.span_ns() / 1_000_000,
             lifetime.pacing_now.load(Relaxed),
             lifetime.pacing_peak.load(Relaxed),
             lifetime.pacing_bytes.load(Relaxed) / (1024 * 1024),
