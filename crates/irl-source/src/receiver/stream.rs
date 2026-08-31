@@ -200,6 +200,13 @@ impl Receiver {
             let _ = opts.set(&key, &value);
         }
 
+        // Whether this URL waits to be called decides whether the stall
+        // deadline applies before a connection exists. Latched per attempt,
+        // because a settings edit can change the URL.
+        self.shared
+            .interrupt
+            .set_awaits_caller(irl_core::url_awaits_caller(&url.to_string_lossy()));
+
         crate::log::log_input_url("Connecting to", &url);
 
         // Unrecognised options are dropped without a word, as `av_dict_free`

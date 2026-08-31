@@ -402,6 +402,56 @@ fn an_idle_pump_reports_when_it_next_has_work() {
     );
 }
 
+/// Low-latency mode emits no concealment, so an empty input cannot advance the
+/// sample counter. The output clock then sits still while wall clock moves, and
+/// the stall check used to read that as a stalled audio thread — restarting,
+/// re-anchoring, waiting one lead and tripping again, roughly every 150ms for
+/// as long as the source stayed quiet.
+#[test]
+fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
+    let shared = make_shared(true, true); // low latency
+    let clock = Arc::new(AtomicU64::new(1_000_000_000));
+    let recorder = Recorder::new(CHANNELS as usize);
+    let mut pump = make_pump(&shared, &clock, &recorder);
+
+    // Prime on real audio.
+    let mut pts_ns = 0i64;
+    for _ in 0..6 {
+        write_chunk(&shared, pts_ns, 0.1);
+        pts_ns += CHUNK_NS as i64;
+    }
+    while pump.pump_once() {}
+    assert!(shared.audio_state().primed, "never primed");
+
+    // The input goes quiet. Wall clock runs well past the stall threshold.
+    for _ in 0..40 {
+        clock.fetch_add(50_000_000, Relaxed);
+        while pump.pump_once() {}
+    }
+
+    assert_eq!(
+        shared.conn.audio_output_restarts.load(Relaxed),
+        0,
+        "a quiet low-latency source must not restart the output clock"
+    );
+    assert!(
+        !shared.audio_state().primed,
+        "the clock should be stood down, not left running"
+    );
+
+    // Real audio returns: the normal prime path establishes one new clock.
+    for _ in 0..6 {
+        write_chunk(&shared, pts_ns, 0.2);
+        pts_ns += CHUNK_NS as i64;
+    }
+    while pump.pump_once() {}
+    assert!(
+        shared.audio_state().primed,
+        "did not re-prime on real audio"
+    );
+    assert_eq!(shared.conn.audio_output_restarts.load(Relaxed), 0);
+}
+
 /// AAC decodes 1024 frames at a time, which does not divide a 120ms target
 /// (5760 frames). Reads and writes are both whole chunks, so before the read
 /// alignment the residual could only be a multiple of 1024 and the loop had to

@@ -72,6 +72,8 @@ pub struct Receiver {
     /// settings-forced restart always probes in full.
     prev_had_video: bool,
     prev_had_audio: bool,
+    /// Start of the current unbroken run of EAGAIN reads (FFmpeg µs), or 0.
+    eagain_since_us: u64,
     using_hw_decode: bool,
     flags: ReceiverFlags,
     audio_in: AudioIntake,
@@ -98,6 +100,7 @@ impl Receiver {
             video_tb: ffmpeg::Rational::new(0, 1),
             prev_had_video: false,
             prev_had_audio: false,
+            eagain_since_us: 0,
             using_hw_decode: false,
             flags: ReceiverFlags::default(),
             audio_in,
@@ -117,6 +120,26 @@ impl Receiver {
             .map_or(0, irl_core::AudioBuffer::fill_ms)
     }
 
+    /// Handle `av_read_frame` returning EAGAIN. Returns true when the caller
+    /// should retry rather than treat it as a read error.
+    ///
+    /// EAGAIN is a non-blocking demuxer saying "nothing yet", not a failure.
+    /// Treating it as one tore down a healthy connection — closing the input,
+    /// resetting PTS repair, fading the buffered audio out and clearing the
+    /// source — for a normal empty poll.
+    ///
+    /// Bounded, because a retry re-arms the interrupt watch on every pass and
+    /// the watch only measures one `av_read_frame` call: unbounded, a demuxer
+    /// wedged in permanent EAGAIN would spin here forever, past the point where
+    /// the same wedge on a blocking read would have been aborted and
+    /// reconnected. Past that timeout it falls through to the error path.
+    fn retry_eagain(&mut self, now_us: u64) -> bool {
+        if self.eagain_since_us == 0 {
+            self.eagain_since_us = now_us;
+        }
+        now_us - self.eagain_since_us < consts::IO_STALL_TIMEOUT_US
+    }
+
     /// The `av_read_frame` loop.
     fn run(&mut self) {
         crate::log::log_input_url("Receiver thread started for", &self.shared.cfg.url);
@@ -129,6 +152,7 @@ impl Receiver {
 
         while self.shared.is_active() {
             if self.fmt.is_none() {
+                self.eagain_since_us = 0;
                 if !self.open_stream() {
                     if !self.wait_for_reconnect() {
                         break;
@@ -149,6 +173,16 @@ impl Receiver {
                 // `ctx->io_start_us = av_gettime()` before `av_read_frame`.
                 fmt.read_frame(pkt)
             };
+            match &read {
+                Err(err) if err.is_eagain() => {
+                    if self.retry_eagain(ffmpeg::gettime_us() as u64) {
+                        self.pkt.unref();
+                        ffmpeg::usleep(1000);
+                        continue;
+                    }
+                }
+                _ => self.eagain_since_us = 0,
+            }
             if let Err(err) = read {
                 self.handle_stream_read_error(err);
                 continue;

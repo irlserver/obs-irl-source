@@ -158,6 +158,26 @@ impl AudioPump {
             shared.conn.set_current_speed(1.0);
         }
 
+        // Read before the primed block, which needs to know whether the input
+        // is empty to tell a stalled output thread from a merely quiet source.
+        // The hidden trim underneath only acts before priming, so running it
+        // earlier in the cycle changes nothing about when it fires.
+        let peek = shared.audio_buf().as_ref().and_then(|b| b.peek_state());
+        let has_audio = peek.is_some();
+        let mut fill_ms = peek.map_or(0, |s| s.fill_ms);
+        // Only read before the low-latency trim below, which is the one path
+        // that can move the fill between here and the read.
+        let buffered_frames = peek.map_or(0, |s| s.fill_frames);
+        let chunk_count = peek.map_or(0, |s| s.chunk_count);
+        // The receiver thread reads this for the stats line; the audio state
+        // lock is held for the whole pump, so the publish is covered.
+        LifetimeStats::note_peak_i32(&shared.lifetime.audio_fill_peak_ms, fill_ms);
+
+        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
+        {
+            return true;
+        }
+
         if state.primed {
             // Cap runaway concealment latency before it desyncs A/V. Runs
             // even on a healthy-lead cycle: the offset inflates from past
@@ -184,6 +204,13 @@ impl AudioPump {
             // instead of letting OBS add permanent audio buffering for a late
             // source.
             if now > next_ts && now - next_ts > consts::AUDIO_OUT_MAX_LAG_MS as u64 * 1_000_000 {
+                // An empty low-latency input is a quiet source, not a stalled
+                // thread: that mode emits no concealment, so nothing there can
+                // advance the sample counter. Stand the clock down instead.
+                if low_latency && !has_audio {
+                    suspend_low_latency_clock(shared, state, now - next_ts);
+                    return false;
+                }
                 shared.conn.audio_output_restarts.fetch_add(1, Relaxed);
                 shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 irl_warn!(
@@ -194,22 +221,6 @@ impl AudioPump {
                 state.samples = 0;
                 state.conceal_fade_pending = true;
             }
-        }
-
-        let peek = shared.audio_buf().as_ref().and_then(|b| b.peek_state());
-        let has_audio = peek.is_some();
-        let mut fill_ms = peek.map_or(0, |s| s.fill_ms);
-        // Only read before the low-latency trim below, which is the one path
-        // that can move the fill between here and the read.
-        let buffered_frames = peek.map_or(0, |s| s.fill_frames);
-        let chunk_count = peek.map_or(0, |s| s.chunk_count);
-        // The receiver thread reads this for the stats line; the audio state
-        // lock is held for the whole pump, so the publish is covered.
-        LifetimeStats::note_peak_i32(&shared.lifetime.audio_fill_peak_ms, fill_ms);
-
-        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
-        {
-            return true;
         }
 
         if !state.primed {
@@ -557,6 +568,43 @@ impl BufferFormat {
             target_ms: buf.target_ms(),
         })
     }
+}
+
+/// Stand the low-latency output clock down until real audio returns.
+///
+/// Low-latency mode deliberately emits no concealment, so an empty input
+/// cannot advance the sample counter. The output clock then sits still while
+/// wall clock moves, and the stall check reads that as a stalled audio thread —
+/// which it is not. Restarting it there re-anchors, waits one lead and trips
+/// again, so a silent input produced a "restarting output clock" warning every
+/// ~150ms for as long as it stayed silent, with `audio_output_restarts` and
+/// `audio_quality_events` climbing on a source that was merely quiet.
+///
+/// Drop the stale mapping instead and let the normal prime path establish one
+/// new clock when a real chunk arrives. Counted as an underrun, which is what
+/// it is. Buffered mode is untouched: its concealment keeps the counter moving,
+/// so a late clock there really is an output-side stall.
+fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64) {
+    state.primed = false;
+    state.anchor_ns = 0;
+    state.samples = 0;
+    state.latest_obs_end_ts_ns = 0;
+    state.latest_buffered_end_pts_ns = 0;
+    state.offset_baseline_set = false;
+    state.conceal_fade_pending = true;
+    shared.conn.last_obs_lead_ns.store(0, Relaxed);
+
+    shared.conn.audio_underruns.fetch_add(1, Relaxed);
+    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
+    super::mark_audio_recovery(
+        state,
+        ffmpeg::gettime_us() as u64,
+        consts::AUDIO_RECOVERY_HOLD_US,
+    );
+    irl_warn!(
+        "Low-latency audio input empty for {}ms; suspending output clock until audio resumes",
+        lag_ns / 1_000_000
+    );
 }
 
 /// `irl_audio_maybe_reanchor_offset`.

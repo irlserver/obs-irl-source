@@ -34,3 +34,4 @@ pub use speed::{
     DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,
 };
 pub use stats::{StatKind, StatValue, StatsSnapshot};
+pub use url_opts::url_awaits_caller;

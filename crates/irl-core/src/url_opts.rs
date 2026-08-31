@@ -126,6 +126,57 @@ pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Does this URL wait to be called, rather than dialing out?
+///
+/// It decides whether the I/O stall deadline applies before a connection
+/// exists. `srt://` and `rist://` both spell it in the query string, and
+/// rendezvous waits the same way from the caller's point of view.
+///
+/// The test is on the query only: a path or a passphrase that happens to
+/// contain the word must not decide this.
+pub fn url_awaits_caller(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    query.contains("mode=listener")
+        || query.contains("mode=rendezvous")
+        || query.contains("listen=1")
+}
+
+#[cfg(test)]
+mod awaits_caller_tests {
+    use super::url_awaits_caller;
+
+    #[test]
+    fn listener_and_rendezvous_urls_wait_to_be_called() {
+        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=listener"));
+        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=rendezvous"));
+        assert!(url_awaits_caller("rist://0.0.0.0:7000?listen=1"));
+        assert!(url_awaits_caller(
+            "srt://0.0.0.0:7000?latency=200000&mode=listener"
+        ));
+    }
+
+    #[test]
+    fn caller_urls_dial_out() {
+        assert!(!url_awaits_caller("srt://host.example:7000"));
+        assert!(!url_awaits_caller("srt://host.example:7000?mode=caller"));
+        assert!(!url_awaits_caller("rtmp://host.example/app/key"));
+        assert!(!url_awaits_caller(""));
+    }
+
+    #[test]
+    fn only_the_query_decides() {
+        // A path or a passphrase containing the word must not flip it: a
+        // caller URL that never times out would hang on a dead host forever.
+        assert!(!url_awaits_caller("file:///media/mode=listener/clip.ts"));
+        assert!(!url_awaits_caller("srt://host.example:7000#mode=listener"));
+        assert!(url_awaits_caller(
+            "srt://host:7000?passphrase=mode%3Dlistener&mode=listener"
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

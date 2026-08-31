@@ -20,6 +20,14 @@ pub struct InterruptWatch {
     active: Arc<AtomicBool>,
     io_start_us: AtomicU64,
     timeout_us: u64,
+    /// This URL waits for the far end to dial in rather than dialing out, so
+    /// having no connection yet is its normal idle state and not a stall.
+    awaits_caller: AtomicBool,
+    /// The context being operated on, so the callback can see whether bytes
+    /// are still arriving. Null while no context is open.
+    fmt: core::sync::atomic::AtomicPtr<ffmpeg_sys_next::AVFormatContext>,
+    /// Byte count the deadline was last measured against.
+    io_bytes_read: core::sync::atomic::AtomicI64,
 }
 
 impl InterruptWatch {
@@ -28,7 +36,31 @@ impl InterruptWatch {
             active,
             io_start_us: AtomicU64::new(0),
             timeout_us,
+            awaits_caller: AtomicBool::new(false),
+            fmt: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            io_bytes_read: core::sync::atomic::AtomicI64::new(0),
         })
+    }
+
+    /// Latch whether this URL waits to be called (see
+    /// `irl_core::url_awaits_caller`). Set before opening.
+    pub fn set_awaits_caller(&self, awaits: bool) {
+        self.awaits_caller.store(awaits, Ordering::Relaxed);
+    }
+
+    /// Point the watch at the context being opened, so it can read
+    /// `pb->bytes_read`. Cleared when the context goes away.
+    fn track(&self, ptr: *mut ffmpeg_sys_next::AVFormatContext) {
+        self.fmt.store(ptr, Ordering::Relaxed);
+        self.io_bytes_read.store(0, Ordering::Relaxed);
+    }
+
+    fn untrack(&self) {
+        self.fmt.store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
+
+    fn deadline_passed(&self, start: u64) -> bool {
+        (crate::gettime_us() as u64).wrapping_sub(start) > self.timeout_us
     }
 
     /// Record the start of a blocking call (`av_gettime()`).
@@ -42,14 +74,69 @@ impl InterruptWatch {
             .store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
-    /// The interrupt decision. Touches only atomics and `av_gettime`, so it is
-    /// safe to run inside FFmpeg's callback without `catch_unwind`.
+    /// The interrupt decision. Touches only atomics, `av_gettime` and two
+    /// plain field reads, so it is safe to run inside FFmpeg's callback
+    /// without `catch_unwind`.
+    ///
+    /// "Without progress" is meant literally, and neither half of that was
+    /// true before:
+    ///
+    /// - No `AVIOContext` yet means no connection yet, and for a listener URL
+    ///   that is the source's normal idle state, not a fault.
+    ///   `srt://0.0.0.0:7000?mode=listener` sits inside `srt_accept()` until
+    ///   the sender calls in — which can be hours — and libsrt polls this
+    ///   callback throughout. Timing that out tore the listening socket down
+    ///   every 10s and rebound it after the reconnect delay, so the port was
+    ///   dark for a slice of every cycle and any handshake in flight died with
+    ///   the socket. A caller URL keeps the deadline: it is dialing a host that
+    ///   either answers or does not, and libsrt's own `SRTO_CONNTIMEO` bounds
+    ///   it besides.
+    /// - Once connected, the stall is measured from the last byte that
+    ///   actually arrived rather than from the start of the call.
+    ///   `avformat_open_input` accepts the connection and then probes over the
+    ///   same deadline, so without this a sender that arrived nine seconds into
+    ///   the accept got one second to deliver a PAT/PMT — a healthy stream
+    ///   failing on a stopwatch.
+    ///
+    /// Reported as "IRL Source fails to open an SRT stream that OBS's Media
+    /// Source opens immediately" (irlserver/obs-irl-source#28): the media
+    /// source's interrupt callback only checks for shutdown, so it just waits.
     pub fn should_abort(&self) -> bool {
         if !self.active.load(Ordering::Relaxed) {
             return true;
         }
         let start = self.io_start_us.load(Ordering::Relaxed);
-        start != 0 && (crate::gettime_us() as u64).wrapping_sub(start) > self.timeout_us
+        if start == 0 {
+            return false;
+        }
+
+        let fmt = self.fmt.load(Ordering::Relaxed);
+        // SAFETY: `fmt` is the context this watch was pointed at by
+        // `FormatContext::open`, which clears it before the context is freed
+        // and on a failed open. FFmpeg only invokes this callback from inside
+        // a call on that same context, on the thread that owns it, so the
+        // pointer (and its `pb`, which FFmpeg owns) is live for the read.
+        let pb = if fmt.is_null() {
+            core::ptr::null()
+        } else {
+            unsafe { (*fmt).pb }
+        };
+        if pb.is_null() {
+            // Not connected. Waiting to be called is not a stall.
+            return !self.awaits_caller.load(Ordering::Relaxed) && self.deadline_passed(start);
+        }
+
+        // SAFETY: as above; `pb` is a live AVIOContext owned by the format
+        // context, and `bytes_read` is a plain counter field.
+        let bytes = unsafe { (*pb).bytes_read };
+        if bytes != self.io_bytes_read.load(Ordering::Relaxed) {
+            self.io_bytes_read.store(bytes, Ordering::Relaxed);
+            self.io_start_us
+                .store(crate::gettime_us() as u64, Ordering::Relaxed);
+            return false;
+        }
+
+        self.deadline_passed(start)
     }
 }
 
@@ -179,6 +266,7 @@ impl FormatContext {
             (*ptr).interrupt_callback.opaque = Arc::as_ptr(&watch) as *mut c_void;
         }
 
+        watch.track(ptr);
         watch.arm();
         // SAFETY: `&mut ptr` is a valid `AVFormatContext**` holding our
         // allocated context, `url` is NUL-terminated, and `opts` is our owned
@@ -193,12 +281,15 @@ impl FormatContext {
             )
         };
         if ret < 0 {
+            watch.untrack();
             if !ptr.is_null() {
                 // SAFETY: the context survived the failure; close it ourselves.
                 unsafe { ffmpeg_sys_next::avformat_close_input(&mut ptr) };
             }
             return Err(Error(ret));
         }
+        // avformat_open_input can replace the context it was given.
+        watch.track(ptr);
 
         let unrecognised = opts.remaining_keys();
         Ok((Self { ptr, watch }, unrecognised))
@@ -255,6 +346,10 @@ impl FormatContext {
 
 impl Drop for FormatContext {
     fn drop(&mut self) {
+        // The watch must stop reading `pb->bytes_read` through this pointer
+        // before the context is freed. It is an Arc the receiver also holds and
+        // reuses for the next connection, so this cannot wait for its Drop.
+        self.watch.untrack();
         // SAFETY: `&mut self.ptr` is our sole owning pointer. This runs before
         // `self.watch` is dropped (Rust drops the body first, then the fields),
         // so the interrupt callback's opaque stays valid until the context is
