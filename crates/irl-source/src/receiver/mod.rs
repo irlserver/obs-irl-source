@@ -144,10 +144,7 @@ impl Receiver {
 
     /// The `av_read_frame` loop.
     fn run(&mut self) {
-        irl_info!(
-            "Receiver thread started for: {}",
-            self.shared.cfg.url.to_string_lossy()
-        );
+        crate::log::log_input_url("Receiver thread started for", &self.shared.cfg.url);
 
         // A new thread means a new stream configuration (create, or a
         // restart-forcing settings edit): nothing learned about the previous
