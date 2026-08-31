@@ -117,6 +117,14 @@ struct Sim {
     /// loop actually holds rather than one sample of a value that dithers
     /// between two grid points a chunk apart.
     fill_history: Vec<i32>,
+    /// Playback speed sampled once per tick.
+    speed_history: Vec<f32>,
+    /// Deliver everything the sender has produced only every N ticks, instead
+    /// of as it is produced. A remux hop (MediaMTX, an RTMP relay) hands its
+    /// clients batches rather than a smooth stream, and the jitter buffer sees
+    /// a sawtooth rather than a steady arrival.
+    burst_ticks: u32,
+    since_delivery: u32,
     /// Sender-side PTS of the next chunk, in nanoseconds.
     next_pts_ns: i64,
     /// Fractional chunk debt, so a non-integer sender rate is exact over time.
@@ -183,6 +191,9 @@ impl Sim {
             sender_rate: 1.0,
             pending: Vec::new(),
             fill_history: Vec::new(),
+            speed_history: Vec::new(),
+            burst_ticks: 1,
+            since_delivery: 0,
             next_pts_ns: 0,
             chunk_debt: 0.0,
             delivered: Vec::new(),
@@ -241,7 +252,9 @@ impl Sim {
             self.next_pts_ns += CHUNK_NS as i64;
         }
 
-        if link == Link::Up {
+        self.since_delivery += 1;
+        if link == Link::Up && self.since_delivery >= self.burst_ticks {
+            self.since_delivery = 0;
             for pts in std::mem::take(&mut self.pending) {
                 let frame = Self::decoded_chunk(pts, 0.25);
                 self.intake
@@ -259,6 +272,7 @@ impl Sim {
 
         // The audio thread runs whatever the receiver is doing.
         while self.pump.pump_once() {}
+        self.speed_history.push(self.shared.conn.current_speed());
         self.clock.fetch_add(CHUNK_NS, Relaxed);
     }
 
@@ -278,6 +292,26 @@ impl Sim {
         let tail = &self.fill_history[self.fill_history.len().saturating_sub(ticks)..];
         assert!(!tail.is_empty(), "no fill history");
         tail.iter().map(|&f| f as f64).sum::<f64>() / tail.len() as f64
+    }
+
+    /// Peak-to-trough playback speed over the last `secs`. What a listener
+    /// hears as pitch modulation, and — because video due times are the audio
+    /// playout offset — what a viewer sees as judder.
+    fn speed_swing(&self, secs: f64) -> (f32, f32) {
+        let ticks = ((secs * 1_000_000_000.0) as u64 / CHUNK_NS) as usize;
+        let tail = &self.speed_history[self.speed_history.len().saturating_sub(ticks)..];
+        let lo = tail.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = tail.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        (lo, hi)
+    }
+
+    fn fill_swing(&self, secs: f64) -> (i32, i32) {
+        let ticks = ((secs * 1_000_000_000.0) as u64 / CHUNK_NS) as usize;
+        let tail = &self.fill_history[self.fill_history.len().saturating_sub(ticks)..];
+        (
+            tail.iter().copied().min().unwrap_or(0),
+            tail.iter().copied().max().unwrap_or(0),
+        )
     }
 
     /// The libobs contract: `ts[n+1] == ts[n] + frames/rate`, exactly. A gap
@@ -312,12 +346,23 @@ impl Sim {
         );
     }
 
-    /// Content is never skipped once playback has primed: every chunk the
-    /// plugin accepted is still accounted for, as buffered audio or as audio
-    /// already emitted.
-    fn assert_no_audio_dropped(&self) {
+    /// Content is never skipped once playback has primed. Backlog is bled off
+    /// by playing faster instead, however deep it gets.
+    ///
+    /// The one sanctioned exception is the hidden trim, which runs only
+    /// *before* priming — nothing has been audible yet, so startup backlog is
+    /// free to drop. A batching upstream reaches the prime threshold in its
+    /// first batch and hits that path, which is correct. So the invariant is
+    /// not "nothing was skipped" but "everything skipped was inaudible".
+    fn assert_no_audible_audio_dropped(&self) {
         let skipped = self.shared.conn.audio_resync_skipped_chunks.load(Relaxed);
-        assert_eq!(skipped, 0, "audio was skipped rather than played faster");
+        let hidden = self.shared.conn.audio_hidden_trimmed_chunks.load(Relaxed);
+        assert_eq!(
+            skipped,
+            hidden,
+            "{} audible chunks were skipped rather than played faster",
+            skipped - hidden
+        );
     }
 
     fn underruns(&self) -> u64 {
@@ -327,13 +372,68 @@ impl Sim {
 
 // ── Scenarios ─────────────────────────────────────────────────
 
+/// An upstream that hands over batches rather than a smooth stream — a remux
+/// hop like MediaMTX, an RTMP relay — makes the buffer level sawtooth across
+/// the whole speed ramp at the batch period.
+///
+/// A controller that regulates the instantaneous level chases that sawtooth and
+/// modulates playback speed at the same period. Measured here before the level
+/// was smoothed: 1.2% peak-to-peak at a 500ms batch and 3.3% at a 1s batch.
+/// 1% is 17 cents, so that is plainly audible pitch wobble — and because video
+/// due times are the frame PTS plus the audio playout offset, the same
+/// modulation lands on video as judder that looks like the picture repeatedly
+/// speeding up and catching up.
+///
+/// Regulating the smoothed level instead leaves the batch period alone while
+/// still tracking anything that lasts: a stall's backlog persists for tens of
+/// seconds, a batch for under one.
+#[test]
+fn a_batching_upstream_does_not_modulate_playback_speed() {
+    // Batch period, and a target big enough to cover it — the configuration
+    // that should simply work.
+    for (batch_ticks, target_ms) in [(25u32, 500), (50, 500), (10, 120)] {
+        let mut sim = Sim::new(target_ms);
+        sim.burst_ticks = batch_ticks;
+        sim.run(180.0, Link::Up);
+
+        let (lo, hi) = sim.speed_swing(60.0);
+        let swing = (hi - lo) * 100.0;
+        assert!(
+            swing < 0.5,
+            "a {}ms batch at a {target_ms}ms target modulated playback {swing:.2}% (speed {lo:.4}..{hi:.4})",
+            batch_ticks * 20,
+        );
+        sim.assert_clock_only_jumps_where_declared();
+        sim.assert_no_audible_audio_dropped();
+    }
+}
+
+/// The other half of that: a batch period longer than the whole cushion cannot
+/// be smoothed away by any controller, because the buffer genuinely runs dry
+/// between batches. It must still not be made *worse* than the arithmetic
+/// requires — no skipped audio, no silent clock jumps. The fix for that case is
+/// a Target Buffer above the batch period, not a cleverer loop.
+#[test]
+fn a_batch_longer_than_the_buffer_underruns_but_stays_honest() {
+    let mut sim = Sim::new(120);
+    sim.burst_ticks = 50; // 1s batches against a 120ms cushion
+    sim.run(120.0, Link::Up);
+
+    assert!(
+        sim.underruns() > 0,
+        "a 1s batch against a 120ms buffer has to underrun"
+    );
+    sim.assert_clock_only_jumps_where_declared();
+    sim.assert_no_audible_audio_dropped();
+}
+
 #[test]
 fn a_clean_link_holds_the_target_and_never_breaks_the_clock() {
     let mut sim = Sim::new(120);
     sim.run(60.0, Link::Up);
 
     sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audio_dropped();
+    sim.assert_no_audible_audio_dropped();
     assert_eq!(sim.underruns(), 0, "a clean link must not underrun");
 
     // The centred read alignment puts the two reachable levels half a chunk
@@ -371,7 +471,7 @@ fn a_three_second_stall_conceals_then_recovers_without_skipping() {
     sim.run(60.0, Link::Up);
 
     sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audio_dropped();
+    sim.assert_no_audible_audio_dropped();
     let fill = sim.fill_ms();
     assert!(
         fill < 120 + 60,
@@ -391,7 +491,7 @@ fn repeated_short_dropouts_do_not_ratchet_latency() {
     }
 
     sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audio_dropped();
+    sim.assert_no_audible_audio_dropped();
     let fill = sim.fill_ms();
     assert!(
         fill < 200 + 100,
@@ -410,7 +510,7 @@ fn a_sender_whose_clock_is_not_wall_clock_still_holds_the_target() {
         sim.run(240.0, Link::Up);
 
         sim.assert_clock_only_jumps_where_declared();
-        sim.assert_no_audio_dropped();
+        sim.assert_no_audible_audio_dropped();
         // Without the integral trim a proportional loop parks tens of
         // milliseconds off target here, permanently, and the latency parks
         // with it.
@@ -432,7 +532,7 @@ fn an_unwinnably_fast_sender_is_bounded_rather_than_unbounded() {
     sim.run(120.0, Link::Up);
 
     sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audio_dropped();
+    sim.assert_no_audible_audio_dropped();
     let fill = sim.fill_ms();
     assert!(
         fill <= consts::BLEED_PACE_FILL_MS * 4,

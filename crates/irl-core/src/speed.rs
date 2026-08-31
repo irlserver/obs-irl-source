@@ -152,12 +152,19 @@ impl SpeedTrim {
 #[derive(Debug, Clone)]
 pub struct SpeedController {
     current: f32,
+    /// Smoothed buffer level: what the ramp and the trim actually read. See
+    /// [`consts::AUDIO_SPEED_LEVEL_SMOOTHING`]. Negative until the first
+    /// sample seeds it.
+    level: f32,
 }
 
 impl SpeedController {
     /// Starts at 1.0.
     pub fn new() -> Self {
-        Self { current: 1.0 }
+        Self {
+            current: 1.0,
+            level: -1.0,
+        }
     }
 
     /// Advance one pump cycle and return the smoothed speed.
@@ -172,6 +179,18 @@ impl SpeedController {
             trim.reset();
             return 1.0;
         }
+
+        // Regulate the smoothed level, not the instantaneous one. An upstream
+        // that hands over batches rather than a smooth stream — a remux hop, a
+        // relay — makes the level sawtooth across the whole ramp, and a
+        // controller that chases that modulates playback speed at the batch
+        // period. That is audible as pitch wobble and, because video due times
+        // ride the audio playout offset, visible as judder.
+        if self.level < 0.0 {
+            self.level = fill_ms as f32;
+        }
+        self.level += (fill_ms as f32 - self.level) * consts::AUDIO_SPEED_LEVEL_SMOOTHING;
+        let fill_ms = self.level.round() as i32;
 
         let ramp = Self::ramp(fill_ms, inp.wm, inp.max_speed);
         trim.update(fill_ms, inp.wm.target_ms, ramp, &inp);
@@ -232,6 +251,7 @@ impl SpeedController {
     /// touched here.
     pub fn reset(&mut self) {
         self.current = 1.0;
+        self.level = -1.0;
     }
 }
 

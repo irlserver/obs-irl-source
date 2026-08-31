@@ -93,6 +93,44 @@ would otherwise credit the whole gap to the sender's clock.
 
 Simulated, a 3s stall plus its backlog now moves the trim by +0.0002%.
 
+## Not every upstream hands over a smooth stream
+
+The controller regulated the level as it read it, once per emitted chunk. That
+is correct when media arrives at roughly the rate it is consumed, and it is
+wrong the moment something upstream batches.
+
+A remux hop — MediaMTX, an RTMP relay, anything that reads from one socket and
+writes to another on its own schedule — delivers in clumps. The jitter buffer
+then sawtooths at the batch period, sweeping the whole speed ramp, and a
+controller reading the instantaneous level chases it. Measured in the network
+simulation against the pre-fix controller:
+
+| batch period | target | playback speed swing |
+| --- | --- | --- |
+| 200ms | 120ms | 0.5% |
+| 500ms | 120ms | 1.5% |
+| 1s | 120ms | 2.2% |
+| 1s | 500ms | 3.3% |
+
+1% is 17 cents, so 2-3% is plainly audible pitch wobble. Worse, video due times
+are the frame PTS plus the audio playout offset, so the same modulation lands on
+video at the same time: the picture repeatedly speeds up, catches up and slows
+down. It reads as a rendering or frame-rate problem and is neither.
+
+The ramp's own EMA does not help. Its time constant is ~0.4s, which is shorter
+than the batch periods that cause this, so the sawtooth passes straight through.
+
+`AUDIO_SPEED_LEVEL_SMOOTHING` is the fix: regulate a ~2.5s EMA of the level
+rather than the level. That is an order of magnitude longer than any batch
+period worth smoothing and an order of magnitude shorter than a post-stall
+drain, which lasts tens of seconds and must survive. It measured slightly
+*faster* recovery from a stall, not slower, because the smoothed level holds the
+ramp at full drain authority instead of relaxing on each dip.
+
+What it cannot fix, and nothing can: a batch period longer than the whole
+cushion. The buffer genuinely runs dry between batches, and the answer is a
+Target Buffer above the batch period, not a cleverer loop.
+
 ## The resampler cannot apply arbitrarily small speeds
 
 `apply_output_speed` asks swresample for a whole number of output samples per
@@ -182,10 +220,30 @@ above will not happen to me", and the honest answer to that is a stability
 requirement across independent windows, which costs most of the latency
 advantage that motivated it in the first place.
 
+## The buffer level has no single value
+
+The level moves in whole chunks and both reads and writes are whole chunks, so
+within every cycle it steps down by a chunk at the read and up by a chunk at the
+write. *Where* you sample decides the number you get: before the pump's read —
+the level the controller regulates — a 120ms target holds 117ms with the
+reachable pair at 110/130; sampled after the pump has taken what it wants, the
+same run reads 97ms.
+
+Neither is wrong, but a test that samples one and quotes it as "the cushion" is.
+This cost two false alarms while building the network simulation, both looking
+like a controller that had drifted a chunk low. The stats line's `buf=` is a
+sample of the same oscillation at an arbitrary phase, which is why it reads
+below target as often as not.
+
 ## Verify by simulation, not by reading
 
 Every defect above was invisible on inspection and obvious in a 200-line
-harness. `crates/irl-core/examples/speed-controller-sim.rs` is that harness. It
+harness. `crates/irl-core/examples/speed-controller-sim.rs` is that harness for
+the controller in isolation, and `crates/irl-source/tests/network_sim.rs` is the
+end-to-end one: a synthetic sender with programmable stalls, batching and clock
+skew driving the real buffer, controller and queues on a virtual clock. The
+batching defect above was found by writing that scenario, not by reading the
+code. It
 is not run by CI, so run it by hand when you touch this code:
 
 ```shell

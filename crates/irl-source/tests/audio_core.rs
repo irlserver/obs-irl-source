@@ -449,21 +449,29 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
 
     // Then hold the sender at exactly real time: one chunk in per chunk of
     // wall clock. Whatever the level settles on is the loop's own choice.
+    //
+    // Sampled before the pump reads, which is the level the speed controller
+    // sees and regulates. The level swings a whole chunk within every cycle,
+    // so sampling after the pump has taken what it wants measures the trough
+    // and says more about the sampling point than about the cushion.
+    let mut levels = Vec::new();
     for _ in 0..3000 {
         write(&shared, &mut pts_ns);
+        levels.push(fill_ms(&shared));
         while pump.pump_once() {}
         clock.fetch_add(AAC_NS, Relaxed);
     }
 
     assert!(shared.audio_state().primed, "never primed");
-    let settled = fill_ms(&shared);
-    let chunk_ms = (AAC_NS / 1_000_000) as i32;
-    // The level can only ever be one of two values a chunk apart; centring
-    // puts them half a chunk either side of the target, so any snapshot is
-    // within half a chunk (+1ms of rounding) rather than a whole one below.
+    let tail = &levels[levels.len() - 1000..];
+    let mean = tail.iter().map(|&f| f as f64).sum::<f64>() / tail.len() as f64;
+    let chunk_ms = (AAC_NS / 1_000_000) as f64;
+    // Centring puts the two reachable levels half a chunk either side of the
+    // target, so the average is the configured cushion even though no single
+    // sample can be.
     assert!(
-        (settled - 120).abs() <= chunk_ms / 2 + 1,
-        "settled at {settled}ms, further than half a {chunk_ms}ms chunk from the 120ms target"
+        (mean - 120.0).abs() <= chunk_ms / 2.0 + 1.0,
+        "held {mean:.1}ms on average, further than half a {chunk_ms}ms chunk from the 120ms target"
     );
 }
 

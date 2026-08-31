@@ -118,6 +118,23 @@ pub const AUDIO_SPEED_MIN: f32 = 0.98;
 pub const AUDIO_SPEED_DEADBAND_MS: i32 = 20;
 /// EMA factor applied to the speed target per pump cycle.
 pub const AUDIO_SPEED_SMOOTHING: f32 = 0.05;
+/// EMA factor applied to the *level* the controller reads, per pump cycle.
+///
+/// Not everything upstream hands over a smooth stream. A remux hop (MediaMTX,
+/// an RTMP relay) delivers in batches, and the buffer level then sawtooths
+/// across the whole ramp at the batch period. A controller reading the
+/// instantaneous level chases that and modulates playback speed at the same
+/// period — measured in the network simulation at 1.2 % peak-to-peak on a
+/// 500 ms batch and 3.3 % on a 1 s batch, where 1 % is 17 cents. That is
+/// audible as pitch wobble, and since video due times are the frame PTS plus
+/// the audio playout offset, it is visible as judder at the same time.
+///
+/// ~2.5 s at a 20 ms chunk: an order of magnitude longer than any batch period
+/// worth smoothing, and an order of magnitude shorter than the drain after a
+/// stall, which lasts tens of seconds and must not be damped away. Measured, it
+/// makes that drain slightly *faster*, because the smoothed level holds the
+/// ramp at full authority instead of relaxing on every dip.
+pub const AUDIO_SPEED_LEVEL_SMOOTHING: f32 = 0.008;
 
 /// Speed at the edge of the deadband.
 ///
@@ -342,6 +359,8 @@ mod tests {
         assert_eq!(AUDIO_SPEED_MIN, 0.98); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_DEADBAND_MS, 20); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_SMOOTHING, 0.05); // receiver-audio.c
+        // No C ancestor: the C regulated the instantaneous level.
+        assert_eq!(AUDIO_SPEED_LEVEL_SMOOTHING, 0.008);
         assert_eq!(AUDIO_SPEED_DEADBAND_SLOPE, 0.002); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_TRIM_GAIN, 0.0025); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_TRIM_MAX, 0.01); // receiver-audio.c
