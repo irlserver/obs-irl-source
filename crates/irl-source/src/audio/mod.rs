@@ -79,6 +79,7 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
     state.offset_baseline_set = false;
     state.recovery_until_us = 0;
     state.speed_carry.reset();
+    state.align_read_pending = false;
     state.latest_audio_stream_pts_ns = 0;
     state.latest_buffered_end_pts_ns = 0;
     state.latest_obs_end_ts_ns = 0;

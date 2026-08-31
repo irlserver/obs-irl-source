@@ -14,6 +14,9 @@ pub struct BufferState {
     pub oldest_pts_ns: i64,
     /// Fill in milliseconds.
     pub fill_ms: i32,
+    /// Fill in whole frames. `fill_ms` is rounded and cannot express the
+    /// sub-millisecond residual the read alignment works in.
+    pub fill_frames: i64,
     /// Chunks queued.
     pub chunk_count: usize,
 }
@@ -272,6 +275,7 @@ impl AudioBuffer {
         Some(BufferState {
             oldest_pts_ns: self.oldest_pts(),
             fill_ms: self.fill_ms(),
+            fill_frames: self.fill_frames(),
             chunk_count: self.chunk_count,
         })
     }
@@ -325,6 +329,16 @@ impl AudioBuffer {
         }
         let samples = (self.fill / self.frame_size()) as i64;
         (samples * 1000 / self.sample_rate as i64) as i32
+    }
+
+    /// Fill in bytes.
+    /// Fill in whole frames (`fill_bytes / frame_size`).
+    pub fn fill_frames(&self) -> i64 {
+        let frame = self.frame_size();
+        if frame == 0 {
+            return 0;
+        }
+        (self.fill_bytes() / frame) as i64
     }
 
     /// Fill in bytes.

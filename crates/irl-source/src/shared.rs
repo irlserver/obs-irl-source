@@ -127,6 +127,10 @@ pub struct AudioState {
     /// Fractional output-sample debt carried between chunks, cleared by
     /// `reset_audio_timing_state` for the same reason.
     pub speed_carry: SpeedCarry,
+    /// Set at priming: the next read is sized to put the target on the
+    /// buffer's residual grid instead of leaving the loop to straddle it. See
+    /// [`irl_core::timing::aligning_read_frames`].
+    pub align_read_pending: bool,
 }
 
 impl AudioState {
@@ -151,6 +155,7 @@ impl AudioState {
             drain: DrainWatch::default(),
             speed_trim: SpeedTrim::new(),
             speed_carry: SpeedCarry::new(),
+            align_read_pending: false,
         }
     }
 }

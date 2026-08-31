@@ -359,6 +359,71 @@ fn the_catchup_setting_bounds_the_drain_end_to_end() {
     );
 }
 
+/// AAC decodes 1024 frames at a time, which does not divide a 120ms target
+/// (5760 frames). Reads and writes are both whole chunks, so before the read
+/// alignment the residual could only be a multiple of 1024 and the loop had to
+/// straddle the target at 106ms or 128ms — up to a whole chunk of cushion the
+/// user configured and never got.
+///
+/// The existing tests all use 960-frame chunks, where 120ms *is* on the grid,
+/// so none of them could see this.
+#[test]
+fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
+    const AAC_FRAMES: usize = 1024;
+    const AAC_NS: u64 = AAC_FRAMES as u64 * 1_000_000_000 / RATE as u64;
+
+    let shared = make_shared(false, true);
+    let clock = Arc::new(AtomicU64::new(1_000_000_000));
+    let recorder = Recorder::new(CHANNELS as usize);
+
+    *shared.audio_buf() = AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320);
+    shared.audio_state().decoded_frame_samples = AAC_FRAMES as i32;
+    let mut pump = {
+        let ns = Arc::clone(&clock);
+        let us = Arc::clone(&clock);
+        AudioPump::with_sink(Arc::clone(&shared), Box::new(recorder.clone()))
+            .with_clock(Box::new(move || ns.load(Relaxed)))
+            // The same virtual time, in the FFmpeg domain: the speed trim
+            // integrates against this, and it has to advance with the buffer
+            // or the loop under test never closes.
+            .with_us_clock(Box::new(move || us.load(Relaxed) / 1000))
+    };
+
+    let mut pts_ns = 0i64;
+    let write = |shared: &Shared, pts: &mut i64| {
+        let mut bytes = Vec::with_capacity(AAC_FRAMES * CHANNELS as usize * 4);
+        for _ in 0..AAC_FRAMES * CHANNELS as usize {
+            bytes.extend_from_slice(&0.1f32.to_le_bytes());
+        }
+        shared.audio_buf().as_mut().unwrap().write_pts(&bytes, *pts);
+        *pts += AAC_NS as i64;
+    };
+
+    // Prime: the threshold is target + lead = 200ms, so ~10 chunks.
+    for _ in 0..10 {
+        write(&shared, &mut pts_ns);
+    }
+
+    // Then hold the sender at exactly real time: one chunk in per chunk of
+    // wall clock. Whatever the level settles on is the loop's own choice.
+    for _ in 0..3000 {
+        write(&shared, &mut pts_ns);
+        while pump.pump_once() {}
+        clock.fetch_add(AAC_NS, Relaxed);
+    }
+
+    assert!(shared.audio_state().primed, "never primed");
+    let settled = fill_ms(&shared);
+    let chunk_ms = (AAC_NS / 1_000_000) as i32;
+    // The level can only ever be one of two values a chunk apart; centring
+    // puts them half a chunk either side of the target, so any snapshot is
+    // within half a chunk (+1ms of rounding) rather than a whole one below.
+    assert!(
+        (settled - 120).abs() <= chunk_ms / 2 + 1,
+        "settled at {settled}ms, further than half a {chunk_ms}ms chunk from the 120ms target"
+    );
+}
+
 /// The receiver-side intake: warm-up discard, then float passthrough into the
 /// jitter buffer with the published chunk size and stream PTS.
 #[test]

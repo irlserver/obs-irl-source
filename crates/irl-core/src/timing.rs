@@ -84,6 +84,58 @@ pub fn prime_threshold_ms(target_ms: i32, lead_ns: u64, low_latency: bool) -> i3
     target_ms + (lead_ns / 1_000_000) as i32
 }
 
+/// Frames to read this cycle so the buffer's reachable levels straddle the
+/// target evenly instead of landing wherever priming happened to leave them.
+///
+/// Reads and writes are both whole decoded chunks, so the level can only ever
+/// be `phase + k · chunk` — 21.3 ms steps for 1024-sample AAC. It dithers
+/// between the two grid points either side of the target as writes and reads
+/// alternate, and `phase` is set by accident at priming. On a 120 ms target
+/// with AAC that was 106 ms and 128 ms: the low state is 14 ms short, so the
+/// *average* cushion the user gets is up to a chunk below what they asked for.
+/// See "The buffer level is quantised to one chunk" in
+/// `docs/audio-timing-pitfalls.md`.
+///
+/// One read of a different size moves `phase`, permanently. Centring the pair
+/// on the target — reachable levels at `target ± chunk/2` — makes the average
+/// cushion the configured one and halves the worst-case shortfall. Note that
+/// putting a grid point *on* the target would be worse, not better: the pair
+/// becomes `target` and `target − chunk`, so the average sits half a chunk low.
+///
+/// Nothing is skipped or duplicated — this cycle consumes a little more or less
+/// and the remainder is still there next cycle. It is a phase correction, not a
+/// rate one, so it cannot fight the speed controller, which owns the rate: over
+/// any window the average read size still equals the average write size.
+///
+/// Returns `base_frames` when the grid is already centred, and otherwise a size
+/// within half a chunk of a normal read — long rather than absurdly short when
+/// the correction is large. The caller must have that many frames buffered,
+/// which after priming it does by construction (priming waits for the target
+/// plus the output lead).
+pub fn aligning_read_frames(fill_frames: i64, target_frames: i64, base_frames: i32) -> i32 {
+    if base_frames <= 0 || fill_frames <= 0 {
+        return base_frames;
+    }
+    let base = base_frames as i64;
+    // After a read of `r` the level is `fill - r` and the grid it then walks is
+    // everything congruent to that mod `base`. We want that grid to pass half a
+    // chunk above the target, so the pair straddles it: `fill - r == target +
+    // base/2 (mod base)`, hence `r == fill - target - base/2 (mod base)`.
+    let delta = (fill_frames - target_frames - base / 2).rem_euclid(base);
+    if delta == 0 {
+        return base_frames;
+    }
+    // `delta` and `delta + base` both satisfy that. Take whichever is nearer a
+    // normal chunk, so the one odd read stays within half a chunk of the usual
+    // size rather than being a stub.
+    let frames = if delta * 2 >= base {
+        delta
+    } else {
+        delta + base
+    };
+    frames as i32
+}
+
 /// Nanoseconds for `frames` at `rate`, truncating (the C `chunk_ns` /
 /// `stream_duration_ns` form: plain integer division, not `av_rescale`).
 pub fn frames_to_ns(frames: u64, rate: u32) -> u64 {
@@ -91,6 +143,114 @@ pub fn frames_to_ns(frames: u64, rate: u32) -> u64 {
         return 0;
     }
     (frames as u128 * 1_000_000_000 / rate as u128) as u64
+}
+
+#[cfg(test)]
+mod alignment_tests {
+    use super::*;
+
+    /// 1024-sample AAC frames at 48 kHz: the case the quantisation note in
+    /// `docs/audio-timing-pitfalls.md` is written about.
+    const BASE: i32 = 1024;
+
+    fn ms(v: f64) -> i64 {
+        (v * 48.0) as i64
+    }
+
+    /// The property the whole function exists for: after one aligning read the
+    /// reachable levels sit half a chunk either side of the target, so the
+    /// dither averages to the cushion the user configured.
+    fn straddles_target(fill: i64, target: i64, base: i32) -> bool {
+        let read = aligning_read_frames(fill, target, base) as i64;
+        (fill - read - target).rem_euclid(base as i64) == base as i64 / 2
+    }
+
+    #[test]
+    fn one_read_centres_the_dither_on_the_target() {
+        // The log this came from: primed at 213ms against a 120ms target and
+        // dithering between 106ms and 128ms, so the average cushion ran short.
+        assert!(straddles_target(ms(213.0), ms(120.0), BASE));
+        // And from wherever else priming happens to land.
+        for fill_ms in [100, 121, 150, 200, 213, 400, 874, 8000] {
+            assert!(
+                straddles_target(ms(fill_ms as f64), ms(120.0), BASE),
+                "fill {fill_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn putting_a_grid_point_on_the_target_would_be_worse() {
+        // Pins the reasoning, because "align it exactly" is the obvious wrong
+        // answer: the pair becomes target and target - chunk, so the average
+        // cushion sits half a chunk low instead of on the target.
+        let (target, base) = (ms(120.0), BASE as i64);
+        let read = aligning_read_frames(ms(213.0), target, BASE) as i64;
+        let after = ms(213.0) - read;
+        assert_ne!(
+            (after - target).rem_euclid(base),
+            0,
+            "grid landed on target"
+        );
+        // The two reachable levels either side of the target are equidistant.
+        let above = (after - target).rem_euclid(base);
+        assert_eq!(above, base - above);
+    }
+
+    #[test]
+    fn it_holds_for_every_target_and_both_common_frame_sizes() {
+        // AAC 1024 and Opus 960, across the whole Target Buffer slider.
+        for base in [960, 1024] {
+            for target_ms in [20, 40, 120, 500, 2000, 8000] {
+                let target = ms(target_ms as f64);
+                for extra in 0..base as i64 {
+                    let fill = target + 4 * base as i64 + extra;
+                    assert!(
+                        straddles_target(fill, target, base),
+                        "base {base} target {target_ms}ms extra {extra}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_odd_read_stays_within_half_a_chunk_of_a_normal_one() {
+        // A stub of a chunk would be emitted to OBS as a 3-sample buffer; the
+        // clock stays contiguous either way, but there is no reason to.
+        for extra in 0..BASE as i64 {
+            let read = aligning_read_frames(ms(120.0) + 4 * BASE as i64 + extra, ms(120.0), BASE);
+            assert!(
+                (BASE / 2..=BASE * 3 / 2).contains(&read),
+                "extra {extra} gave a {read}-frame read"
+            );
+        }
+    }
+
+    #[test]
+    fn an_already_centred_grid_is_left_alone() {
+        // No correction means no odd chunk, which is the steady state: this
+        // runs once per priming, not once per cycle.
+        let target = ms(120.0);
+        let centred = target + BASE as i64 / 2 + 4 * BASE as i64;
+        assert_eq!(aligning_read_frames(centred, target, BASE), BASE);
+    }
+
+    #[test]
+    fn degenerate_inputs_fall_back_to_a_normal_read() {
+        assert_eq!(aligning_read_frames(0, 5760, BASE), BASE);
+        assert_eq!(aligning_read_frames(-1, 5760, BASE), BASE);
+        assert_eq!(aligning_read_frames(10_000, 5760, 0), 0);
+        assert_eq!(aligning_read_frames(10_000, 5760, -1), -1);
+    }
+
+    #[test]
+    fn a_target_above_the_fill_still_centres() {
+        // Priming can only happen above the target, but a live retune can drop
+        // the level below it, and the modulo has to stay well behaved there.
+        assert!(straddles_target(ms(50.0), ms(120.0), BASE));
+        assert!(straddles_target(ms(1.0), ms(8000.0), BASE));
+    }
 }
 
 #[cfg(test)]

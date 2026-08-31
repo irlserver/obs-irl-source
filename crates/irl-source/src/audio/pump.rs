@@ -51,6 +51,13 @@ pub struct AudioPump {
     /// The OBS clock. Injectable so tests can drive the output clock without
     /// a running libobs; production always reads `os_gettime_ns`.
     now_ns: Box<dyn Fn() -> u64 + Send>,
+    /// The FFmpeg-domain clock (`av_gettime`), which times the speed trim's
+    /// integration and the underrun recovery hold. Injectable alongside
+    /// [`Self::now_ns`] and for the same reason: a test that steps the OBS
+    /// clock while this one runs at wall speed makes the trim integrate
+    /// hundreds of times too slowly, so the loop it is meant to close never
+    /// closes. The two are always the same real clock in production.
+    now_us: Box<dyn Fn() -> u64 + Send>,
 }
 
 impl AudioPump {
@@ -70,6 +77,7 @@ impl AudioPump {
             speed: SpeedController::new(),
             float: FloatEdit::default(),
             now_ns: Box::new(obs::time::gettime_ns),
+            now_us: Box::new(|| ffmpeg::gettime_us() as u64),
         }
     }
 
@@ -78,6 +86,15 @@ impl AudioPump {
     #[must_use]
     pub fn with_clock(mut self, now_ns: Box<dyn Fn() -> u64 + Send>) -> Self {
         self.now_ns = now_ns;
+        self
+    }
+
+    /// Replace the FFmpeg-domain clock (tests only). A test that steps
+    /// [`Self::with_clock`] should step this one with it, or the speed trim
+    /// integrates against wall time while the buffer moves in virtual time.
+    #[must_use]
+    pub fn with_us_clock(mut self, now_us: Box<dyn Fn() -> u64 + Send>) -> Self {
+        self.now_us = now_us;
         self
     }
 
@@ -156,6 +173,9 @@ impl AudioPump {
         let peek = shared.audio_buf().as_ref().and_then(|b| b.peek_state());
         let has_audio = peek.is_some();
         let mut fill_ms = peek.map_or(0, |s| s.fill_ms);
+        // Only read before the low-latency trim below, which is the one path
+        // that can move the fill between here and the read.
+        let buffered_frames = peek.map_or(0, |s| s.fill_frames);
         let chunk_count = peek.map_or(0, |s| s.chunk_count);
         // The receiver thread reads this for the stats line; the audio state
         // lock is held for the whole pump, so the publish is covered.
@@ -175,6 +195,13 @@ impl AudioPump {
             state.primed = true;
             state.anchor_ns = now + chunk_ns;
             state.samples = 0;
+            // Reads and writes are both whole decoded chunks, so the residual
+            // can only ever be a multiple of one: a 120ms target is not a
+            // level the buffer can hold, and the loop straddles it at 106 or
+            // 128ms. One differently-sized read moves that grid onto the
+            // target, permanently, and priming is the moment to spend it —
+            // nothing has been emitted yet, so there is no cadence to disturb.
+            state.align_read_pending = true;
             irl_info!(
                 "Audio output primed (fill={}ms lead={}ms rate={})",
                 fill_ms,
@@ -191,7 +218,7 @@ impl AudioPump {
                 return false;
             }
 
-            let now_us = ffmpeg::gettime_us() as u64;
+            let now_us = (self.now_us)();
             if !super::audio_recovery_active(state, now_us) {
                 irl_info!("Audio underrun: concealing with silence");
             }
@@ -224,7 +251,26 @@ impl AudioPump {
             }
         }
 
-        let frame_bytes = base_samples as usize * fmt.frame_size;
+        // Normally one decoded chunk; once, just after priming, whatever puts
+        // the target on the buffer's residual grid. Bounded to 1.5 chunks by
+        // `aligning_read_frames`, and priming guarantees at least target plus
+        // the output lead is queued, so the long case is always satisfiable.
+        let read_frames = if state.align_read_pending && !low_latency {
+            state.align_read_pending = false;
+            let target_frames = fmt.target_ms as i64 * fmt.rate as i64 / 1000;
+            let aligned =
+                timing::aligning_read_frames(buffered_frames, target_frames, base_samples);
+            if aligned != base_samples {
+                irl_debug!(
+                    "Aligning audio read to the target: {aligned} frames instead of {base_samples}"
+                );
+            }
+            aligned
+        } else {
+            base_samples
+        };
+
+        let frame_bytes = read_frames as usize * fmt.frame_size;
         ensure_scratch(&mut self.pump_scratch, frame_bytes);
 
         let (got, chunk_pts_ns) = {
@@ -248,7 +294,7 @@ impl AudioPump {
         // stuck-drain watch all have to agree on the same values, and the
         // slider applies live.
         let max_speed = shared.hot.max_speed();
-        let now_us = ffmpeg::gettime_us() as u64;
+        let now_us = (self.now_us)();
         let recovery_active = super::audio_recovery_active(state, now_us);
         let speed = self.speed.update(
             fill_ms,
