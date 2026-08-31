@@ -121,7 +121,10 @@ fn shared() -> Arc<Shared> {
 
 fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>) {
     let recorder = Arc::new(Recorder::default());
-    let thread = VideoThread::with_sink(shared, Box::new(RecorderSink(recorder.clone())));
+    // No libobs is running, so the real canvas tick would fault; 60fps is
+    // what a default OBS install reports.
+    let thread = VideoThread::with_sink(shared, Box::new(RecorderSink(recorder.clone())))
+        .with_canvas_tick(Box::new(|| Some(16_666_667)));
     (thread, recorder)
 }
 
@@ -498,6 +501,50 @@ fn a_resolution_change_re_anchors_the_video_clock() {
 }
 
 /* ── The pacing loop ──────────────────────────────────────── */
+
+/// Frames go to libobs a couple of canvas ticks *before* they are due.
+///
+/// libobs is a scheduler too: `ready_async_frame()` advances its play head by
+/// wall-clock deltas and takes the frame it has just passed, so a frame already
+/// queued lands on a deterministic tick while one handed over at its due time
+/// slips to the next — sometimes, depending on this thread's wakeup jitter. At
+/// 30fps on a 60fps canvas that is every frame holding two ticks versus frames
+/// alternating between one and three.
+#[test]
+fn a_frame_is_handed_over_a_lead_before_it_is_due() {
+    let shared = shared();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    // Anchor the play head first: the very first frame out deliberately gets
+    // no lead, so a second frame is needed to see one.
+    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    first.set_pts(obs::time::gettime_ns() as i64);
+    thread.pace_decoded(first);
+    thread.run_once(obs::time::gettime_ns());
+    assert_eq!(recorder.emitted().len(), 1, "anchor frame emitted");
+
+    // A frame due 25ms out: inside two 60fps ticks (33.3ms) of the lead, so
+    // it should go now even though its due time has not arrived.
+    let now = obs::time::gettime_ns();
+    let mut soon = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    soon.set_pts(now as i64 + 25_000_000);
+    thread.pace_decoded(soon);
+    thread.run_once(now);
+    assert_eq!(
+        recorder.emitted().len(),
+        2,
+        "a frame inside the delivery lead should have been handed over"
+    );
+
+    // One due far out still waits.
+    let now = obs::time::gettime_ns();
+    let mut later = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    later.set_pts(now as i64 + 500_000_000);
+    thread.pace_decoded(later);
+    let wait = thread.run_once(now);
+    assert_eq!(recorder.emitted().len(), 2, "not due, not delivered");
+    assert!(!wait.is_zero(), "should sleep toward the lead");
+}
 
 /// A queued packet is only work if there is room for what it decodes.
 ///

@@ -95,6 +95,14 @@ pub struct VideoThread {
     pub(crate) pts_base: i64,
     /// Throttle for the "Video lead" line.
     pub(crate) lead_warn_time_ns: u64,
+    /// Set while libobs's async play head is unanchored, so the next frame out
+    /// goes at its due time rather than a lead early. See
+    /// [`Self::emit_slack_ns`].
+    anchor_pending: bool,
+    /// The OBS canvas tick. Injectable so tests can drive pacing without a
+    /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
+    /// video state and faults when `obs_startup` never ran.
+    canvas_tick_ns: Box<dyn Fn() -> Option<u64> + Send>,
     pub(crate) sink: Box<dyn VideoSink>,
 }
 
@@ -129,6 +137,9 @@ impl VideoThread {
             sys_base: 0,
             pts_base: 0,
             lead_warn_time_ns: 0,
+            // A fresh source has libobs's `last_frame_ts` at 0 too.
+            anchor_pending: true,
+            canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
         }
     }
@@ -171,20 +182,27 @@ impl VideoThread {
             // one brings its own PTS epoch.
             self.playout_offset_ns = 0;
             self.playout_offset_time_ns = 0;
+            // `obs_source_output_video(NULL)` resets libobs's `last_frame_ts`
+            // to 0, so the next frame re-anchors the play head.
+            self.anchor_pending = true;
             self.sink.output_video_none();
             return Duration::ZERO;
         }
+
+        // Sampled once for both the emit and the sleep, so a canvas frame
+        // rate changed mid-cycle cannot make them disagree.
+        let slack_ns = self.emit_slack_ns();
 
         self.decode_intake();
         // Before both the emit and the sleep below, so each cycle schedules
         // against the offset as it is now rather than as it was when the
         // frames were decoded.
         self.pacing_reschedule();
-        self.pacing_emit_due(now_ns);
+        self.pacing_emit_due(now_ns, slack_ns);
         self.publish_counters();
         // Fresh clock for the sleep, as in the C: the emit above may have
         // taken long enough to make the next frame due already.
-        self.sleep_hint(obs::time::gettime_ns())
+        self.sleep_hint(obs::time::gettime_ns(), slack_ns)
     }
 
     /// Exit path: drop everything, including the decoder this thread owns.
@@ -297,8 +315,8 @@ impl VideoThread {
     /// ceilings the head goes out early rather than being dropped — too-early
     /// video is what the un-paced path did all the time, and it beats a hole
     /// in the picture.
-    fn pacing_emit_due(&mut self, now_ns: u64) {
-        while let Some(verdict) = self.pacing.due_now(now_ns) {
+    fn pacing_emit_due(&mut self, now_ns: u64, slack_ns: i64) {
+        while let Some(verdict) = self.pacing.due_now(now_ns, slack_ns) {
             if let DueVerdict::Wait(_) = verdict {
                 return;
             }
@@ -309,7 +327,36 @@ impl VideoThread {
                 return;
             };
             self.output_frame(paced.frame(), due_ns);
+            // That frame anchored libobs's play head; the rest of this drain
+            // and every cycle after it gets the delivery lead.
+            self.anchor_pending = false;
         }
+    }
+
+    /// How early a frame is handed to libobs: the emit slack plus the delivery
+    /// lead.
+    ///
+    /// The frame keeps its due time as its timestamp, so this changes when
+    /// libobs *receives* it, not when it is shown — see
+    /// [`consts::VIDEO_PACING_LEAD_TICKS`].
+    ///
+    /// The one exception is the frame that re-anchors libobs's play head.
+    /// `get_closest_frame()` shows the first frame after `last_frame_ts` hits
+    /// zero the moment it arrives, whatever its timestamp, and anchors the play
+    /// head to it; the head only advances by wall-clock deltas from there. So
+    /// anchoring from a frame handed over two ticks early would run the whole
+    /// connection two ticks ahead of the schedule the audio mapping set — a
+    /// permanent ~33ms video-leads-audio offset at a 60fps canvas, in the more
+    /// noticeable of the two directions. That frame goes at its due time; the
+    /// jitter the lead guards against cannot show on a frame displayed on
+    /// arrival regardless.
+    fn emit_slack_ns(&self) -> i64 {
+        if self.anchor_pending {
+            return consts::VIDEO_PACING_SLACK_NS;
+        }
+        let tick = (self.canvas_tick_ns)().unwrap_or(consts::VIDEO_CANVAS_TICK_DEFAULT_NS);
+        let lead = (tick * consts::VIDEO_PACING_LEAD_TICKS).min(consts::VIDEO_PACING_MAX_LEAD_NS);
+        lead as i64 + consts::VIDEO_PACING_SLACK_NS
     }
 
     /// Mirror the pacing counters for the stats line.
@@ -328,14 +375,17 @@ impl VideoThread {
     /// How long to sleep: until the head frame is due, capped at
     /// `VIDEO_PACING_MAX_WAIT_MS`, never below 1 ms, and zero when the head is
     /// already due (go round again).
-    fn sleep_hint(&self, now_ns: u64) -> Duration {
+    fn sleep_hint(&self, now_ns: u64, slack_ns: i64) -> Duration {
         let mut wait_ms = consts::VIDEO_PACING_MAX_WAIT_MS;
         if let Some(due_ns) = self.pacing.next_due() {
             let until_ns = due_ns as i64 - now_ns as i64;
-            if until_ns <= consts::VIDEO_PACING_SLACK_NS {
+            if until_ns <= slack_ns {
                 return Duration::ZERO; // due already; go round again
             }
-            let ms = (until_ns / 1_000_000) as u64;
+            // Wake at the moment the head enters the delivery lead, not at its
+            // due time: sleeping the whole way would hand it over late by
+            // exactly the lead.
+            let ms = ((until_ns - slack_ns) / 1_000_000) as u64;
             if ms < wait_ms {
                 wait_ms = ms;
             }
@@ -344,6 +394,13 @@ impl VideoThread {
     }
 
     /* ── Test seams ───────────────────────────────────────── */
+
+    /// Replace the canvas-tick source (tests only).
+    #[must_use]
+    pub fn with_canvas_tick(mut self, tick: Box<dyn Fn() -> Option<u64> + Send>) -> Self {
+        self.canvas_tick_ns = tick;
+        self
+    }
 
     /// Whether the pacing queue can take another frame (test seam; the thread
     /// passes this to [`crate::shared::VideoChannel::wait`]).

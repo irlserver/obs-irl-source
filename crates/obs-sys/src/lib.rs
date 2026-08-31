@@ -554,6 +554,8 @@ unsafe extern "C" {
 
     // ── obs.h: core ────────────────────────────────────────────────────
     pub fn obs_get_video_info(ovi: *mut obs_video_info) -> bool;
+    /// Nanoseconds between OBS canvas render ticks; 0 before video is set up.
+    pub fn obs_get_frame_interval_ns() -> u64;
     pub fn obs_get_proc_handler() -> *mut proc_handler_t;
     pub fn obs_enum_sources(
         enum_proc: Option<

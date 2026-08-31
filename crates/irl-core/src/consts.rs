@@ -262,6 +262,33 @@ pub const VIDEO_PACING_MAX_FRAMES: usize = 1024;
 pub const VIDEO_PACING_MAX_BYTES: usize = 1024 * 1024 * 1024;
 /// Emit rather than sleep again when this close to due.
 pub const VIDEO_PACING_SLACK_NS: i64 = 1_000_000;
+
+/// How far ahead of its due time a frame is handed to libobs, in OBS canvas
+/// ticks.
+///
+/// The frame still carries its due time as its timestamp, so libobs shows it
+/// at the same moment either way; what the lead buys is that the frame is
+/// already queued when the render tick it belongs to runs.
+///
+/// `ready_async_frame()` advances its play head by exact wall-clock deltas and
+/// takes the frame whose timestamp it has just passed, so a frame already in
+/// the async queue lands on a deterministic tick. A frame handed over *at* its
+/// due time has not been queued yet when that tick runs and slips to the next
+/// one — but only sometimes, because what decides it is the video thread's
+/// wakeup jitter: millisecond-granular at best, and far coarser on a Windows
+/// box whose timer resolution nothing has raised. For a 30fps source on a
+/// 60fps canvas that is the difference between every frame holding two ticks
+/// and frames alternating between one and three — judder, on exactly the
+/// panning shots where it shows most.
+///
+/// Two ticks covers that jitter, and still leaves a queue depth of one to four
+/// source frames, far under the 30 at which `cache_video()` discards the whole
+/// async queue.
+pub const VIDEO_PACING_LEAD_TICKS: u64 = 2;
+/// Ceiling on that lead, for a canvas running at an unusually low frame rate.
+pub const VIDEO_PACING_MAX_LEAD_NS: u64 = 50_000_000;
+/// Canvas tick assumed when libobs has not reported one yet (60fps).
+pub const VIDEO_CANVAS_TICK_DEFAULT_NS: u64 = 16_666_667;
 /// Ceiling on a single pacing sleep.
 pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// How long the last audio playout offset is reused after it goes away.
@@ -398,6 +425,9 @@ mod tests {
         assert_eq!(VIDEO_PACING_MAX_FRAMES, 1024); // IRL_VIDEO_PACING_MAX_FRAMES
         assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824); // IRL_VIDEO_PACING_MAX_BYTES
         assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
+        assert_eq!(VIDEO_PACING_LEAD_TICKS, 2); // IRL_VIDEO_PACING_LEAD_TICKS
+        assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
+        assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667); // IRL_VIDEO_CANVAS_TICK_DEFAULT_NS
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS
         assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000); // IRL_VIDEO_OFFSET_HOLD_NS
         assert_eq!(VIDEO_TS_CLAMP_NS, 500_000_000); // video-handler.c

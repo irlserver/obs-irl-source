@@ -4,8 +4,6 @@
 
 use std::collections::VecDeque;
 
-use crate::consts;
-
 /// What the queue needs to know about a frame.
 pub trait PacedFrame {
     /// Stream PTS in nanoseconds.
@@ -125,14 +123,18 @@ impl<F: PacedFrame> PacingQueue<F> {
     /// too-early video is what the un-paced path did all the time, and it
     /// beats a hole in the picture. As in C, a cycle spent over a ceiling
     /// counts an overflow even if the head happened to be due anyway.
-    pub fn due_now(&mut self, now_ns: u64) -> Option<DueVerdict> {
+    /// `slack_ns` is how early a frame may go out: the emit slack plus the
+    /// delivery lead (see [`consts::VIDEO_PACING_LEAD_TICKS`]). The caller
+    /// samples it per cycle, because the canvas frame rate is a setting the
+    /// user can change while the source runs.
+    pub fn due_now(&mut self, now_ns: u64, slack_ns: i64) -> Option<DueVerdict> {
         let due_ns = self.entries.front()?.due_ns;
         // Only a *hard* ceiling forces a frame out early. Sitting at the decode
         // lead is the normal steady state and must not.
         let over = self.at_hard_ceiling();
         let delta = due_ns as i64 - now_ns as i64;
 
-        if !over && delta > consts::VIDEO_PACING_SLACK_NS {
+        if !over && delta > slack_ns {
             return Some(DueVerdict::Wait(delta as u64));
         }
         if over {
@@ -189,6 +191,7 @@ impl<F: PacedFrame> PacingQueue<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consts;
 
     /// A 1080p NV12 frame's worth of bytes.
     const FRAME_BYTES: usize = 1920 * 1080 * 3 / 2;
@@ -285,7 +288,7 @@ mod tests {
     #[test]
     fn empty_queue_has_no_verdict() {
         let mut q = queue();
-        assert_eq!(q.due_now(1_000), None);
+        assert_eq!(q.due_now(1_000, consts::VIDEO_PACING_SLACK_NS), None);
         assert_eq!(q.next_due(), None);
     }
 
@@ -293,7 +296,10 @@ mod tests {
     fn a_frame_in_the_future_waits() {
         let mut q = queue();
         q.push(frame(0), 100_000_000);
-        assert_eq!(q.due_now(50_000_000), Some(DueVerdict::Wait(50_000_000)));
+        assert_eq!(
+            q.due_now(50_000_000, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Wait(50_000_000))
+        );
         assert_eq!(q.overflows(), 0);
     }
 
@@ -304,17 +310,29 @@ mod tests {
 
         // Exactly one slack unit out: emit.
         let now = 100_000_000 - consts::VIDEO_PACING_SLACK_NS as u64;
-        assert_eq!(q.due_now(now), Some(DueVerdict::Emit));
+        assert_eq!(
+            q.due_now(now, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Emit)
+        );
         // One nanosecond further out: sleep.
-        assert_eq!(q.due_now(now - 1), Some(DueVerdict::Wait(1_000_001)));
+        assert_eq!(
+            q.due_now(now - 1, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Wait(1_000_001))
+        );
     }
 
     #[test]
     fn a_due_or_late_frame_emits() {
         let mut q = queue();
         q.push(frame(0), 100_000_000);
-        assert_eq!(q.due_now(100_000_000), Some(DueVerdict::Emit));
-        assert_eq!(q.due_now(500_000_000), Some(DueVerdict::Emit));
+        assert_eq!(
+            q.due_now(100_000_000, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Emit)
+        );
+        assert_eq!(
+            q.due_now(500_000_000, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Emit)
+        );
         assert_eq!(q.overflows(), 0);
     }
 
@@ -326,12 +344,18 @@ mod tests {
         assert!(!q.has_room());
 
         // Not remotely due, but a memory ceiling binds.
-        assert_eq!(q.due_now(0), Some(DueVerdict::EmitEarly));
+        assert_eq!(
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::EmitEarly)
+        );
         assert_eq!(q.overflows(), 1);
         q.pop();
 
         // Back under the ceiling: normal pacing resumes.
-        assert_eq!(q.due_now(0), Some(DueVerdict::Wait(1_016_000_000)));
+        assert_eq!(
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Wait(1_016_000_000))
+        );
         assert_eq!(q.overflows(), 1);
     }
 
@@ -354,7 +378,10 @@ mod tests {
 
         // Full, but nothing is due: it waits, and nothing is counted as an
         // overflow.
-        assert!(matches!(q.due_now(0), Some(DueVerdict::Wait(_))));
+        assert!(matches!(
+            q.due_now(0, consts::VIDEO_PACING_SLACK_NS),
+            Some(DueVerdict::Wait(_))
+        ));
         assert_eq!(q.overflows(), 0);
     }
 
