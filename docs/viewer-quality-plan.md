@@ -32,7 +32,8 @@ so a single log line describes the health of the whole path.
 - Real medium gaps get silence insertion, not time compression.
 - Buffered audio stays near native rate by default. Steady-state latency
   recovery is done with bounded speed correction (build at -2%, drain at up to
-  +5%), which is smoothed and less audible than skips or pops.
+  the Catch-Up Speed, +5% by default), which is smoothed and less audible
+  than skips or pops.
 - Audible buffered audio is never trimmed just to reduce delay. Hidden-backlog
   trimming runs only before playback primes (nothing was audible yet).
 - Underruns emit shaped concealment silence so OBS timestamps remain monotonic.

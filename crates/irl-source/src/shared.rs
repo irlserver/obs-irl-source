@@ -25,12 +25,14 @@
 
 use std::ffi::CString;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed,
+};
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-use irl_core::{AudioBuffer, DrainWatch, HwDecode, LastSample, Watermarks};
+use irl_core::{AudioBuffer, DrainWatch, HwDecode, LastSample, SpeedCarry, SpeedTrim, Watermarks};
 
 /// Settings latched when the stream opens; changing any of them forces a
 /// restart (`config_requires_restart`).
@@ -48,6 +50,8 @@ pub struct StreamConfig {
 pub struct HotConfig {
     pub reconnect_delay_s: AtomicI32,
     pub adaptive_speed: AtomicBool,
+    /// Percent above native rate the drain may reach (Catch-Up Speed).
+    pub catchup_percent: AtomicI32,
     pub wait_for_keyframe: AtomicBool,
     pub clear_on_disconnect: AtomicBool,
     /// The three watermarks publish together, after `AudioBuffer::resize`
@@ -58,6 +62,13 @@ pub struct HotConfig {
 impl HotConfig {
     pub fn watermarks(&self) -> Watermarks {
         *self.watermarks.lock()
+    }
+
+    /// The drain ceiling this cycle. Derived per read rather than cached: the
+    /// slider applies live, and every consumer of it inside one controller
+    /// cycle has to see the same value.
+    pub fn max_speed(&self) -> f32 {
+        irl_core::catchup_speed_max(self.catchup_percent.load(Relaxed))
     }
 }
 
@@ -106,6 +117,16 @@ pub struct AudioState {
     /// Underrun recovery hold (FFmpeg µs domain).
     pub recovery_until_us: u64,
     pub drain: DrainWatch,
+
+    /// The speed controller's integral term. Written only by the audio
+    /// thread, but it lives here because its lifetime is not the pump's: it
+    /// survives a decoder flush (`reset_audio_timing_state`) and is cleared by
+    /// a stream reset (`reset_stream_timing_state`), and both of those are
+    /// called from the receiver thread.
+    pub speed_trim: SpeedTrim,
+    /// Fractional output-sample debt carried between chunks, cleared by
+    /// `reset_audio_timing_state` for the same reason.
+    pub speed_carry: SpeedCarry,
 }
 
 impl AudioState {
@@ -128,6 +149,8 @@ impl AudioState {
             latest_video_stream_pts_ns: 0,
             recovery_until_us: 0,
             drain: DrainWatch::default(),
+            speed_trim: SpeedTrim::new(),
+            speed_carry: SpeedCarry::new(),
         }
     }
 }
@@ -265,7 +288,9 @@ impl VideoChannel {
     pub fn new() -> Self {
         Self {
             q: Mutex::new(VideoQueue {
-                frames: std::collections::VecDeque::with_capacity(irl_core::consts::VIDEO_QUEUE_SIZE),
+                frames: std::collections::VecDeque::with_capacity(
+                    irl_core::consts::VIDEO_QUEUE_SIZE,
+                ),
                 in_flight: 0,
                 clear_pending: false,
             }),
@@ -310,7 +335,10 @@ impl VideoChannel {
         let pinned = (q.frames.len() + q.in_flight) as i32;
         LifetimeStats::note_peak_i32(&lifetime.video_pinned_peak, pinned);
         drop(q);
-        Some(InFlight { channel: self, frame: Some(frame) })
+        Some(InFlight {
+            channel: self,
+            frame: Some(frame),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -368,9 +396,17 @@ pub struct Shared {
 impl Shared {
     /// Build the state for a fresh run. `hot` carries the current hot values
     /// (the OBS thread's authoritative config); `lifetime` survives runs.
-    pub fn new(source: obs::SourceHandle, cfg: StreamConfig, hot: HotValues, lifetime: Arc<LifetimeStats>) -> Arc<Self> {
+    pub fn new(
+        source: obs::SourceHandle,
+        cfg: StreamConfig,
+        hot: HotValues,
+        lifetime: Arc<LifetimeStats>,
+    ) -> Arc<Self> {
         let thread_active = Arc::new(AtomicBool::new(false));
-        let interrupt = ffmpeg::InterruptWatch::new(thread_active.clone(), irl_core::consts::IO_STALL_TIMEOUT_US);
+        let interrupt = ffmpeg::InterruptWatch::new(
+            thread_active.clone(),
+            irl_core::consts::IO_STALL_TIMEOUT_US,
+        );
         Arc::new(Self {
             source,
             audio_state: Mutex::new(AudioState::new(irl_core::consts::STARTUP_AUDIO_WARMUP_MS)),
@@ -382,6 +418,7 @@ impl Shared {
             hot: HotConfig {
                 reconnect_delay_s: AtomicI32::new(hot.reconnect_delay_s),
                 adaptive_speed: AtomicBool::new(hot.adaptive_speed),
+                catchup_percent: AtomicI32::new(hot.catchup_percent),
                 wait_for_keyframe: AtomicBool::new(hot.wait_for_keyframe),
                 clear_on_disconnect: AtomicBool::new(hot.clear_on_disconnect),
                 watermarks: Mutex::new(hot.watermarks),
@@ -416,6 +453,7 @@ impl Shared {
 pub struct HotValues {
     pub reconnect_delay_s: i32,
     pub adaptive_speed: bool,
+    pub catchup_percent: i32,
     pub wait_for_keyframe: bool,
     pub clear_on_disconnect: bool,
     pub watermarks: Watermarks,
@@ -425,14 +463,21 @@ pub struct HotValues {
 /// flagged inactive (which also trips the FFmpeg interrupt watch so a receiver
 /// blocked in `av_read_frame` unblocks) and the video sleeper is woken, after
 /// which the normal stop/reconnect path takes over.
-pub fn spawn_worker(name: &'static str, shared: Arc<Shared>, body: fn(Arc<Shared>)) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new().name(name.to_owned()).spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shared.clone())));
-        if let Err(payload) = result {
-            let msg = obs::panic::payload_message(payload.as_ref());
-            irl_error!("{name} thread panicked: {msg}; stopping the stream");
-            shared.flags.thread_active.store(false, Relaxed);
-            shared.video.wake_all();
-        }
-    })
+pub fn spawn_worker(
+    name: &'static str,
+    shared: Arc<Shared>,
+    body: fn(Arc<Shared>),
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shared.clone())));
+            if let Err(payload) = result {
+                let msg = obs::panic::payload_message(payload.as_ref());
+                irl_error!("{name} thread panicked: {msg}; stopping the stream");
+                shared.flags.thread_active.store(false, Relaxed);
+                shared.video.wake_all();
+            }
+        })
 }

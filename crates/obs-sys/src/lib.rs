@@ -652,6 +652,18 @@ unsafe extern "C" {
         max: c_int,
         step: c_int,
     ) -> *mut obs_property_t;
+    /// The slider variant of `obs_properties_add_int`: same value, drawn as a
+    /// slider plus a spin box instead of a bare spin box.
+    pub fn obs_properties_add_int_slider(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        description: *const c_char,
+        min: c_int,
+        max: c_int,
+        step: c_int,
+    ) -> *mut obs_property_t;
+    /// Unit drawn after the value of an int property (`"%"`, `"ms"`, …).
+    pub fn obs_property_int_set_suffix(p: *mut obs_property_t, suffix: *const c_char);
     pub fn obs_properties_add_bool(
         props: *mut obs_properties_t,
         name: *const c_char,

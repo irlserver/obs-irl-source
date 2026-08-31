@@ -86,6 +86,35 @@ impl Properties {
         };
     }
 
+    /// `obs_properties_add_int_slider`: the same value as [`Self::add_int`],
+    /// drawn as a slider. The returned handle exists so a unit suffix can be
+    /// attached.
+    pub fn add_int_slider(
+        &self,
+        id: &CStr,
+        description: &CStr,
+        min: i32,
+        max: i32,
+        step: i32,
+    ) -> IntProperty<'_> {
+        // SAFETY: as above; the property belongs to this properties object,
+        // which the returned handle borrows.
+        let ptr = unsafe {
+            obs_sys::obs_properties_add_int_slider(
+                self.0.as_ptr(),
+                id.as_ptr(),
+                description.as_ptr(),
+                min,
+                max,
+                step,
+            )
+        };
+        IntProperty(
+            NonNull::new(ptr).expect("obs_properties_add_int_slider returned NULL"),
+            PhantomData,
+        )
+    }
+
     pub fn add_bool(&self, id: &CStr, description: &CStr) {
         // SAFETY: as above.
         unsafe {
@@ -141,6 +170,23 @@ pub struct IntList<'p>(
     NonNull<obs_sys::obs_property_t>,
     PhantomData<&'p Properties>,
 );
+
+/// One int property inside a [`Properties`], borrowed for as long as the
+/// properties object it belongs to. libobs owns the property itself.
+#[derive(Debug)]
+pub struct IntProperty<'a>(
+    NonNull<obs_sys::obs_property_t>,
+    PhantomData<&'a Properties>,
+);
+
+impl IntProperty<'_> {
+    /// `obs_property_int_set_suffix`: the unit drawn after the value.
+    pub fn set_suffix(&self, suffix: &CStr) {
+        // SAFETY: live property owned by the borrowed properties object;
+        // libobs copies the string.
+        unsafe { obs_sys::obs_property_int_set_suffix(self.0.as_ptr(), suffix.as_ptr()) };
+    }
+}
 
 impl IntList<'_> {
     /// `obs_property_list_add_int`.

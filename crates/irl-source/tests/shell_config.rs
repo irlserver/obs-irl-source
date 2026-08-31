@@ -22,6 +22,7 @@ fn config() -> Config {
         hot: HotValues {
             reconnect_delay_s: consts::DEFAULT_RECONNECT_DELAY_S as i32,
             adaptive_speed: consts::DEFAULT_ADAPTIVE_SPEED,
+            catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
             wait_for_keyframe: consts::DEFAULT_WAIT_FOR_KEYFRAME,
             clear_on_disconnect: consts::DEFAULT_CLEAR_ON_DISCONNECT,
             watermarks: Watermarks::derive(consts::DEFAULT_BUFFER_TARGET_MS as i32),
@@ -71,6 +72,10 @@ fn every_other_setting_is_applied_in_place() {
     let mut adaptive = config();
     adaptive.hot.adaptive_speed = !base.hot.adaptive_speed;
     assert!(!base.requires_restart(&adaptive));
+
+    let mut catchup = config();
+    catchup.hot.catchup_percent = consts::CATCHUP_PERCENT_MAX;
+    assert!(!base.requires_restart(&catchup));
 
     let mut keyframe = config();
     keyframe.hot.wait_for_keyframe = !base.hot.wait_for_keyframe;

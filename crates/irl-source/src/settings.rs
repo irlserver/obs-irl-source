@@ -18,6 +18,7 @@ pub fn defaults(settings: &Data<'_>) {
 
     settings.set_default_i64(c"buffer_target_ms", consts::DEFAULT_BUFFER_TARGET_MS);
     settings.set_default_bool(c"adaptive_speed", consts::DEFAULT_ADAPTIVE_SPEED);
+    settings.set_default_i64(c"catchup_percent", consts::DEFAULT_CATCHUP_PERCENT);
 
     settings.set_default_str(c"ffmpeg_options", c"");
     settings.set_default_i64(c"hw_decode", HwDecode::default().as_i64());
@@ -47,10 +48,12 @@ pub fn properties(_instance: Option<&IrlSource>) -> Properties {
 
     // ── Audio Buffer ──
     //
-    // Up to 2s: IRL uplinks routinely stall for over a second (a field log
-    // showed 1.7s gaps with 287 underruns at the 120ms default), and riding
-    // those out is the only way to avoid the concealment that inflates the
-    // A/V mapping and holds video back with it.
+    // IRL uplinks routinely stall for over a second (a field log showed 1.7s
+    // gaps with 287 underruns at the 120ms default), and riding those out is
+    // the only way to avoid the concealment that inflates the A/V mapping and
+    // holds video back with it. High-bitrate senders with deep buffering of
+    // their own stall for longer still, which is why the ceiling is
+    // `BUFFER_TARGET_MAX_MS` rather than the 2s it was.
     props.add_int(
         c"buffer_target_ms",
         module_text(c"TargetBuffer"),
@@ -59,6 +62,17 @@ pub fn properties(_instance: Option<&IrlSource>) -> Properties {
         consts::BUFFER_TARGET_STEP_MS,
     );
     props.add_bool(c"adaptive_speed", module_text(c"AdaptiveLatency"));
+    // Only meaningful with Adaptive Latency Control on: it is the ceiling on
+    // that loop's drain direction.
+    props
+        .add_int_slider(
+            c"catchup_percent",
+            module_text(c"CatchUpSpeed"),
+            consts::CATCHUP_PERCENT_MIN,
+            consts::CATCHUP_PERCENT_MAX,
+            1,
+        )
+        .set_suffix(c"%");
     props.add_text(
         c"audio_buffer_help",
         module_text(c"AudioBufferHelp"),

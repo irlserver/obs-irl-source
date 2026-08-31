@@ -58,6 +58,11 @@ impl Config {
             hot: HotValues {
                 reconnect_delay_s: settings.get_i64(c"reconnect_delay") as i32,
                 adaptive_speed: settings.get_bool(c"adaptive_speed"),
+                // The slider bounds this, but a scene collection can carry
+                // anything, including a value saved by a build with different
+                // bounds.
+                catchup_percent: (settings.get_i64(c"catchup_percent") as i32)
+                    .clamp(consts::CATCHUP_PERCENT_MIN, consts::CATCHUP_PERCENT_MAX),
                 wait_for_keyframe: settings.get_bool(c"wait_for_keyframe"),
                 clear_on_disconnect: settings.get_bool(c"clear_on_disconnect"),
                 // A non-positive target falls back to the default, as
@@ -131,6 +136,10 @@ impl Config {
             .hot
             .adaptive_speed
             .store(self.hot.adaptive_speed, Relaxed);
+        shared
+            .hot
+            .catchup_percent
+            .store(self.hot.catchup_percent, Relaxed);
         shared
             .hot
             .wait_for_keyframe

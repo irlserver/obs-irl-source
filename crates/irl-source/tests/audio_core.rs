@@ -90,6 +90,7 @@ fn make_shared(low_latency: bool, adaptive: bool) -> Arc<Shared> {
     let hot = HotValues {
         reconnect_delay_s: 2,
         adaptive_speed: adaptive,
+        catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
         wait_for_keyframe: true,
         clear_on_disconnect: true,
         watermarks: Watermarks {
@@ -122,7 +123,11 @@ fn write_chunk(shared: &Shared, pts_ns: i64, value: f32) {
     for _ in 0..CHUNK_FRAMES * CHANNELS as usize {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    shared.audio_buf().as_mut().unwrap().write_pts(&bytes, pts_ns);
+    shared
+        .audio_buf()
+        .as_mut()
+        .unwrap()
+        .write_pts(&bytes, pts_ns);
 }
 
 fn fill_ms(shared: &Shared) -> i32 {
@@ -163,7 +168,11 @@ fn output_timestamps_are_contiguous_over_ten_thousand_chunks() {
         pts_ns += CHUNK_NS as i64;
 
         guard += 1;
-        assert!(guard < 20_000, "pump stalled after {} chunks", recorder.len());
+        assert!(
+            guard < 20_000,
+            "pump stalled after {} chunks",
+            recorder.len()
+        );
     }
 
     let emitted = recorder.emitted.lock();
@@ -184,7 +193,10 @@ fn output_timestamps_are_contiguous_over_ten_thousand_chunks() {
     // A fed stream must never conceal, and the clock must never restart.
     assert_eq!(shared.conn.audio_underruns.load(Relaxed), 0);
     assert_eq!(shared.conn.audio_output_restarts.load(Relaxed), 0);
-    assert_eq!(shared.conn.total_audio_frames.load(Relaxed), emitted.len() as u64);
+    assert_eq!(
+        shared.conn.total_audio_frames.load(Relaxed),
+        emitted.len() as u64
+    );
 }
 
 /// A dry buffer must still produce a chunk every cycle (a silent OBS tick
@@ -278,14 +290,18 @@ fn speed_compensation_emits_fewer_frames_than_it_reads() {
     }
 
     let speed = shared.conn.current_speed();
+    let max_speed = irl_core::catchup_speed_max(consts::DEFAULT_CATCHUP_PERCENT as i32);
     assert!(
-        speed >= consts::AUDIO_SPEED_MAX - 0.001,
-        "speed should ramp to +5%, got {speed}"
+        speed >= max_speed - 0.001,
+        "speed should ramp to the catch-up ceiling, got {speed}"
     );
 
     let emitted = recorder.emitted.lock();
     let last = emitted.last().unwrap();
-    assert_eq!(last.rate, RATE as u32, "the submitted rate must never change");
+    assert_eq!(
+        last.rate, RATE as u32,
+        "the submitted rate must never change"
+    );
     assert!(
         (last.frames as usize) < CHUNK_FRAMES,
         "at +5% a {CHUNK_FRAMES}-frame chunk must come out shorter, got {}",
@@ -293,6 +309,54 @@ fn speed_compensation_emits_fewer_frames_than_it_reads() {
     );
     // ~960 / 1.05.
     assert!(last.frames >= 900, "compensation overshot: {}", last.frames);
+}
+
+/// The Catch-Up Speed setting is the drain ceiling, applied live: the same
+/// backlog drains at whatever the slider says, not at a compiled-in +5 %.
+#[test]
+fn the_catchup_setting_bounds_the_drain_end_to_end() {
+    let shared = make_shared(false, true);
+    shared
+        .hot
+        .catchup_percent
+        .store(consts::CATCHUP_PERCENT_MIN, Relaxed);
+
+    let clock = Arc::new(AtomicU64::new(1_000_000_000));
+    let recorder = Recorder::new(CHANNELS as usize);
+    let mut pump = make_pump(&shared, &clock, &recorder);
+
+    let mut pts_ns = 0i64;
+    for _ in 0..12 {
+        write_chunk(&shared, pts_ns, 0.1);
+        pts_ns += CHUNK_NS as i64;
+    }
+
+    // Same runaway backlog as the test above, so the only difference is the
+    // setting.
+    for _ in 0..600 {
+        while fill_ms(&shared) < 450 {
+            write_chunk(&shared, pts_ns, 0.1);
+            pts_ns += CHUNK_NS as i64;
+        }
+        while pump.pump_once() {}
+        clock.fetch_add(CHUNK_NS, Relaxed);
+    }
+
+    let speed = shared.conn.current_speed();
+    let min_ceiling = irl_core::catchup_speed_max(consts::CATCHUP_PERCENT_MIN);
+    assert!(
+        (speed - min_ceiling).abs() < 0.001,
+        "speed should pin at the 2% ceiling, got {speed}"
+    );
+
+    // ~960 / 1.02, so measurably longer than the ~914 the +5 % ceiling gives.
+    let emitted = recorder.emitted.lock();
+    let last = emitted.last().unwrap();
+    assert!(
+        (last.frames as usize) < CHUNK_FRAMES && last.frames > 930,
+        "at +2% a {CHUNK_FRAMES}-frame chunk should come out around 941, got {}",
+        last.frames
+    );
 }
 
 /// The receiver-side intake: warm-up discard, then float passthrough into the

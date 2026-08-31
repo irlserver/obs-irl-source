@@ -30,5 +30,7 @@ pub use config::{HwDecode, Watermarks};
 pub use dsp::LastSample;
 pub use pacing::{DueVerdict, PacedFrame, PacingQueue};
 pub use pts_repair::{PtsAction, PtsRepair, Verdict};
-pub use speed::{DrainWatch, SpeedController, StuckReport};
+pub use speed::{
+    DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,
+};
 pub use stats::{StatKind, StatValue, StatsSnapshot};

@@ -78,6 +78,7 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
     state.offset_baseline_ns = 0;
     state.offset_baseline_set = false;
     state.recovery_until_us = 0;
+    state.speed_carry.reset();
     state.latest_audio_stream_pts_ns = 0;
     state.latest_buffered_end_pts_ns = 0;
     state.latest_obs_end_ts_ns = 0;
@@ -101,6 +102,15 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
 /// `audio_state`.
 pub fn reset_stream_timing_state(shared: &Shared, state: &mut AudioState) {
     reset_audio_timing_state(shared, state);
+
+    // The trim is a property of the sender, so it deliberately survives the
+    // audio-only reset above (a throttled decoder flush must not cost two
+    // minutes of relearning). It does not survive this one: a PTS-repair reset
+    // means the timeline broke badly enough that the level no longer maps to
+    // the sender's clock, and a reconnect may not even be the same encoder.
+    // Relearning costs nothing worse than the behaviour before the trim
+    // existed.
+    state.speed_trim.reset();
 
     state.latest_video_stream_pts_ns = 0;
 

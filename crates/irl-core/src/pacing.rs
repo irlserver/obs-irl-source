@@ -199,7 +199,7 @@ mod tests {
             q.push(frame(i as i64), 0);
         }
         assert!(!q.has_room());
-        assert_eq!(q.len(), 512);
+        assert_eq!(q.len(), consts::VIDEO_PACING_MAX_FRAMES);
     }
 
     #[test]

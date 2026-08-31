@@ -22,14 +22,38 @@ pub const RECONNECT_DELAY_MAX_S: i32 = 60;
 pub const NETWORK_BUFFER_MB: i64 = 2;
 /// Target jitter buffer fill.
 pub const DEFAULT_BUFFER_TARGET_MS: i64 = 120;
-/// Target buffer property bounds and step.
+/// Target buffer property floor.
 pub const BUFFER_TARGET_MIN_MS: i32 = 20;
-/// Target buffer property bounds and step.
-pub const BUFFER_TARGET_MAX_MS: i32 = 2000;
-/// Target buffer property bounds and step.
+/// Target buffer property ceiling.
+///
+/// Not a limit of the controller — it is where holding the cushion stops
+/// being free. Every millisecond of audio buffer is also a millisecond of
+/// decoded video held in the pacing queue (see [`VIDEO_PACING_MAX_FRAMES`] /
+/// [`VIDEO_PACING_MAX_BYTES`]), and the whole target is paid as startup delay
+/// before playback primes. High-bitrate uplinks with deep sender-side
+/// buffering do stall for several seconds, though, and 2s could not ride
+/// those out, so the ceiling is set by what the video side can still pace
+/// rather than by what the audio side needs.
+pub const BUFFER_TARGET_MAX_MS: i32 = 8000;
+/// Target buffer property step.
 pub const BUFFER_TARGET_STEP_MS: i32 = 10;
 /// Adaptive latency control default.
 pub const DEFAULT_ADAPTIVE_SPEED: bool = true;
+
+/// Catch-up (drain) speed authority, as a percentage above native rate.
+///
+/// The build direction stays fixed at an inaudible −2 %; this is the drain
+/// direction, which is the audible one — 5 % is ~85 cents, obvious on music
+/// and unremarkable on speech. Lower it to make a recovery slower but
+/// inaudible, raise it to clear a backlog faster. Bounded below by the speed
+/// trim's own ±1 % authority (a ceiling under that would leave the integral
+/// term with nothing to work in) and above by where the pitch shift stops
+/// sounding like anything but a fast-forward.
+pub const DEFAULT_CATCHUP_PERCENT: i64 = 5;
+/// Catch-up speed slider floor. See [`DEFAULT_CATCHUP_PERCENT`].
+pub const CATCHUP_PERCENT_MIN: i32 = 2;
+/// Catch-up speed slider ceiling. See [`DEFAULT_CATCHUP_PERCENT`].
+pub const CATCHUP_PERCENT_MAX: i32 = 15;
 /// Wait for the first keyframe before showing video.
 pub const DEFAULT_WAIT_FOR_KEYFRAME: bool = true;
 /// Low-latency (unbuffered) audio mode default.
@@ -86,13 +110,53 @@ pub const AUDIO_OUT_LEAD_MS: i32 = 80;
 /// Output clock lag past which the clock line is restarted.
 pub const AUDIO_OUT_MAX_LAG_MS: i64 = 150;
 /// Slowest playback speed (buffer building).
+///
+/// The fast end is not a constant: it is the Catch-Up Speed setting, read per
+/// use through [`crate::speed::catchup_speed_max`].
 pub const AUDIO_SPEED_MIN: f32 = 0.98;
-/// Fastest playback speed (backlog drain).
-pub const AUDIO_SPEED_MAX: f32 = 1.05;
-/// Fill deadband around target where speed is 1.0.
+/// Fill deadband around target where the ramp is nearly flat.
 pub const AUDIO_SPEED_DEADBAND_MS: i32 = 20;
 /// EMA factor applied to the speed target per pump cycle.
 pub const AUDIO_SPEED_SMOOTHING: f32 = 0.05;
+
+/// Speed at the edge of the deadband.
+///
+/// The deadband used to be flat: dead-on 1.0 anywhere within 20 ms of target.
+/// That is fine for a proportional-only loop, and fatal once the trim is added
+/// — a region with zero proportional feedback leaves the integrator undamped,
+/// and the pair limit-cycles through it forever (simulated: ±20 ms of fill on
+/// a ~2 minute period, never settling). A shallow slope through the deadband
+/// restores the damping. At 0.2 % it is 3.5 cents at the very edge, an order
+/// of magnitude under anything audible, and it makes the ramp continuous where
+/// it used to step.
+pub const AUDIO_SPEED_DEADBAND_SLOPE: f32 = 0.002;
+
+/// Integral gain of the speed trim, in 1/s² (error in seconds of buffer, dt
+/// in seconds).
+///
+/// Deliberately far slower than the ramp. Their jobs are separated in time,
+/// not in signal: the ramp owns transients (closed-loop time constant of a few
+/// seconds), the trim owns the constant underneath them and converges over a
+/// minute or two. Picked as the natural frequency of the level/trim loop,
+/// ω = √gain ≈ 0.05 rad/s, which is ~20× slower than the ramp and so cannot
+/// beat against it.
+pub const AUDIO_SPEED_TRIM_GAIN: f64 = 0.0025;
+/// Authority of the speed trim: enough for any real crystal (<0.01 %) or
+/// frame-rate mismatch (~0.1 %), far below audibility (±1 % is 17 cents), and
+/// small enough that the ramp keeps essentially all of its own authority.
+pub const AUDIO_SPEED_TRIM_MAX: f32 = 0.01;
+/// Only integrate while the level is within this much of target.
+///
+/// Further out the loop is working a transient — a backlog draining, a buffer
+/// refilling — and the level is reporting that transient, not the sender's
+/// rate. Three deadbands is comfortably wider than the standing error any rate
+/// inside the trim's own authority can produce, so nothing the trim is meant
+/// to correct falls outside the window.
+pub const AUDIO_SPEED_TRIM_ERR_WINDOW_MS: i32 = 3 * AUDIO_SPEED_DEADBAND_MS;
+/// A dt this long means the audio thread was not running (debugger, laptop
+/// sleep, starvation). Integrating across it would credit the whole gap to the
+/// sender's clock.
+pub const AUDIO_SPEED_TRIM_MAX_DT_US: u64 = 1_000_000;
 /// Low-latency mode: skip old chunks above this fill.
 pub const AUDIO_LL_MAX_FILL_MS: i32 = 100;
 /// A drain at full authority that has not progressed for this long is stuck.
@@ -138,7 +202,13 @@ pub const VIDEO_INTERVAL_MAX_NS: i64 = 100_000_000;
 /// Interval estimate before enough frames have arrived.
 pub const VIDEO_INTERVAL_DEFAULT_NS: i64 = 33_333_333;
 /// Pacing queue frame ceiling.
-pub const VIDEO_PACING_MAX_FRAMES: usize = 512;
+///
+/// It has to carry the largest Target Buffer at the highest frame rate anyone
+/// streams: the lead is the audio buffer, so 8 s at 120 fps is 960 frames. At
+/// 512 the count bound, not the byte bound, was what decided when pacing gave
+/// up — and it did so at a different latency for every frame rate. The byte
+/// ceiling below is the one that should bind.
+pub const VIDEO_PACING_MAX_FRAMES: usize = 1024;
 /// Pacing queue byte ceiling (1 GiB).
 pub const VIDEO_PACING_MAX_BYTES: usize = 1024 * 1024 * 1024;
 /// Emit rather than sleep again when this close to due.
@@ -200,10 +270,13 @@ mod tests {
         assert_eq!(RECONNECT_DELAY_MAX_S, 60); // settings.c
         assert_eq!(NETWORK_BUFFER_MB, 2); // IRL_DEFAULT_NETWORK_BUFFER_MB
         assert_eq!(DEFAULT_BUFFER_TARGET_MS, 120); // IRL_DEFAULT_BUFFER_TARGET_MS
-        assert_eq!(BUFFER_TARGET_MIN_MS, 20); // settings.c
-        assert_eq!(BUFFER_TARGET_MAX_MS, 2000); // settings.c
+        assert_eq!(BUFFER_TARGET_MIN_MS, 20); // IRL_BUFFER_TARGET_MIN_MS
+        assert_eq!(BUFFER_TARGET_MAX_MS, 8000); // IRL_BUFFER_TARGET_MAX_MS
         assert_eq!(BUFFER_TARGET_STEP_MS, 10); // settings.c
         const { assert!(DEFAULT_ADAPTIVE_SPEED) }; // IRL_DEFAULT_ADAPTIVE_SPEED
+        assert_eq!(DEFAULT_CATCHUP_PERCENT, 5); // IRL_DEFAULT_CATCHUP_PERCENT
+        assert_eq!(CATCHUP_PERCENT_MIN, 2); // IRL_CATCHUP_PERCENT_MIN
+        assert_eq!(CATCHUP_PERCENT_MAX, 15); // IRL_CATCHUP_PERCENT_MAX
         const { assert!(DEFAULT_WAIT_FOR_KEYFRAME) }; // IRL_DEFAULT_WAIT_KEYFRAME
         const { assert!(!DEFAULT_LOW_LATENCY_AUDIO) }; // IRL_DEFAULT_LOW_LATENCY_AUDIO
         const { assert!(!DEFAULT_CLOSE_WHEN_INACTIVE) }; // IRL_DEFAULT_CLOSE_WHEN_INACTIVE
@@ -235,9 +308,13 @@ mod tests {
         assert_eq!(AUDIO_OUT_LEAD_MS, 80); // receiver-audio.c
         assert_eq!(AUDIO_OUT_MAX_LAG_MS, 150); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_MIN, 0.98); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_MAX, 1.05); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_DEADBAND_MS, 20); // receiver-audio.c
         assert_eq!(AUDIO_SPEED_SMOOTHING, 0.05); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_DEADBAND_SLOPE, 0.002); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_TRIM_GAIN, 0.0025); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_TRIM_MAX, 0.01); // receiver-audio.c
+        assert_eq!(AUDIO_SPEED_TRIM_ERR_WINDOW_MS, 60); // receiver-audio.c (3 * deadband)
+        assert_eq!(AUDIO_SPEED_TRIM_MAX_DT_US, 1_000_000); // receiver-audio.c
         assert_eq!(AUDIO_LL_MAX_FILL_MS, 100); // receiver-audio.c
         assert_eq!(AUDIO_DRAIN_STUCK_US, 20_000_000); // receiver-audio.c
         assert_eq!(AUDIO_DRAIN_STUCK_PROGRESS_MS, 100); // receiver-audio.c
@@ -261,7 +338,7 @@ mod tests {
         assert_eq!(VIDEO_INTERVAL_MIN_NS, 4_000_000); // IRL_VIDEO_INTERVAL_MIN_NS
         assert_eq!(VIDEO_INTERVAL_MAX_NS, 100_000_000); // IRL_VIDEO_INTERVAL_MAX_NS
         assert_eq!(VIDEO_INTERVAL_DEFAULT_NS, 33_333_333); // IRL_VIDEO_INTERVAL_DEFAULT_NS
-        assert_eq!(VIDEO_PACING_MAX_FRAMES, 512); // IRL_VIDEO_PACING_MAX_FRAMES
+        assert_eq!(VIDEO_PACING_MAX_FRAMES, 1024); // IRL_VIDEO_PACING_MAX_FRAMES
         assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824); // IRL_VIDEO_PACING_MAX_BYTES
         assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS

@@ -56,12 +56,15 @@ pub struct Watermarks {
 impl Watermarks {
     /// `min = max(target / 2, 20)`, `max = target + 200`.
     ///
-    /// A non-positive target falls back to the default, as `config_load` does.
+    /// A non-positive target falls back to the default, as `config_load` does,
+    /// and anything else is clamped to the slider's range: the dialog bounds
+    /// it, but a scene collection can carry any value, including a target
+    /// saved by a build with a different ceiling.
     pub fn derive(target_ms: i32) -> Self {
         let target_ms = if target_ms <= 0 {
             consts::DEFAULT_BUFFER_TARGET_MS as i32
         } else {
-            target_ms
+            target_ms.clamp(consts::BUFFER_TARGET_MIN_MS, consts::BUFFER_TARGET_MAX_MS)
         };
         let mut min_ms = target_ms / consts::BUFFER_MIN_DIVISOR as i32;
         if min_ms < consts::BUFFER_MIN_FLOOR_MS as i32 {
@@ -106,6 +109,7 @@ mod tests {
     fn maximum_watermark_is_target_plus_two_hundred() {
         assert_eq!(Watermarks::derive(20).max_ms, 220);
         assert_eq!(Watermarks::derive(2000).max_ms, 2200);
+        assert_eq!(Watermarks::derive(8000).max_ms, 8200);
     }
 
     #[test]
@@ -113,6 +117,24 @@ mod tests {
         let wm = Watermarks::derive(0);
         assert_eq!(wm.target_ms, 120);
         assert_eq!(Watermarks::derive(-1).target_ms, 120);
+    }
+
+    #[test]
+    fn a_target_outside_the_slider_is_clamped() {
+        // A scene collection saved by a build with a 2s ceiling, or one hand
+        // edited, must not size the ring past what the pacing queue can hold.
+        assert_eq!(
+            Watermarks::derive(1).target_ms,
+            consts::BUFFER_TARGET_MIN_MS
+        );
+        assert_eq!(
+            Watermarks::derive(60_000).target_ms,
+            consts::BUFFER_TARGET_MAX_MS
+        );
+        assert_eq!(
+            Watermarks::derive(i32::MAX).target_ms,
+            consts::BUFFER_TARGET_MAX_MS
+        );
     }
 
     #[test]

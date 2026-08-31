@@ -101,6 +101,7 @@ fn hot_values() -> HotValues {
     HotValues {
         reconnect_delay_s: irl_core::consts::DEFAULT_RECONNECT_DELAY_S as i32,
         adaptive_speed: true,
+        catchup_percent: irl_core::consts::DEFAULT_CATCHUP_PERCENT as i32,
         wait_for_keyframe: true,
         clear_on_disconnect: true,
         watermarks: irl_core::Watermarks::derive(irl_core::consts::DEFAULT_BUFFER_TARGET_MS as i32),
@@ -696,7 +697,11 @@ fn a_disabled_keyframe_gate_passes_non_key_frames() {
         TB_90K,
         ffmpeg::AVCodecID::AV_CODEC_ID_H264,
     );
-    assert_eq!(shared.video.len(), 1, "non-key frame queued with the gate off");
+    assert_eq!(
+        shared.video.len(),
+        1,
+        "non-key frame queued with the gate off"
+    );
     assert!(
         !flags.first_keyframe_received,
         "first-keyframe bookkeeping still waits for a real key frame"

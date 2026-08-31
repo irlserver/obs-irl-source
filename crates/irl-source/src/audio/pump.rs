@@ -22,13 +22,14 @@
 //! Buffer regulation is done by playback speed only, never by audible trims.
 //! Backlog is trimmed only before playback primes; after that, content is
 //! preserved: the read loop applies transport backpressure above a fill
-//! ceiling and playback bleeds the excess at up to +5 %.
+//! ceiling and playback bleeds the excess at up to the configured Catch-Up
+//! Speed.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::Resampler;
-use irl_core::{SpeedController, consts, dsp, timing};
+use irl_core::{SpeedCarry, SpeedController, SpeedInputs, consts, dsp, timing};
 
 use crate::audio::AudioSink;
 use crate::shared::{AudioState, LifetimeStats, Shared};
@@ -160,7 +161,8 @@ impl AudioPump {
         // lock is held for the whole pump, so the publish is covered.
         LifetimeStats::note_peak_i32(&shared.lifetime.audio_fill_peak_ms, fill_ms);
 
-        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency) {
+        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
+        {
             return true;
         }
 
@@ -241,9 +243,25 @@ impl AudioPump {
 
         let watermarks = shared.hot.watermarks();
         let adaptive = shared.hot.adaptive_speed.load(Relaxed);
-        let speed = self
-            .speed
-            .update(fill_ms, watermarks, adaptive, low_latency);
+        // One reading of the catch-up ceiling and one of the clock for the
+        // whole cycle: the ramp, the anti-windup, the actuator clamp and the
+        // stuck-drain watch all have to agree on the same values, and the
+        // slider applies live.
+        let max_speed = shared.hot.max_speed();
+        let now_us = ffmpeg::gettime_us() as u64;
+        let recovery_active = super::audio_recovery_active(state, now_us);
+        let speed = self.speed.update(
+            fill_ms,
+            &mut state.speed_trim,
+            SpeedInputs {
+                wm: watermarks,
+                adaptive,
+                low_latency,
+                max_speed,
+                now_us,
+                recovery_active,
+            },
+        );
         shared.conn.set_current_speed(speed);
 
         // Unwinnable-drain detection: once per emitted chunk, with the fill
@@ -251,7 +269,7 @@ impl AudioPump {
         if let Some(report) =
             state
                 .drain
-                .observe(fill_ms, speed, watermarks.target_ms, ffmpeg::gettime_us() as u64)
+                .observe(fill_ms, speed, watermarks.target_ms, max_speed, now_us)
         {
             irl_warn!(
                 "Audio buffer stuck at {}ms (target {}ms) with playback at +{:.0}% for {}s: \
@@ -270,6 +288,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
             let produced = Self::apply_output_speed(
                 &mut self.speed_swr,
                 &mut self.speed_scratch,
+                &mut state.speed_carry,
                 &self.pump_scratch[..got],
                 in_frames,
                 fmt.rate,
@@ -354,9 +373,10 @@ Video stays in sync with it; check the sender's frame rate and clock",
         let channels = fmt.channels as usize;
         let rate = fmt.rate;
         let last = state.out_last;
-        self.float.edit(&mut self.pump_scratch[..silence_bytes], |pcm| {
-            dsp::shape_silence_from_last(pcm, channels, rate, &last);
-        });
+        self.float
+            .edit(&mut self.pump_scratch[..silence_bytes], |pcm| {
+                dsp::shape_silence_from_last(pcm, channels, rate, &last);
+            });
         // Only the first concealment chunk decays from real audio;
         // subsequent ones are pure silence.
         state.out_last.forget();
@@ -390,9 +410,15 @@ Video stays in sync with it; check the sender's frame rate and clock",
     /// `apply_output_speed`: stretch/shrink one chunk by `speed` through the
     /// persistent output resampler. Returns the output frame count, or `None`
     /// to fall back to the unmodified input chunk.
+    ///
+    /// A free function rather than a method because it writes `speed_scratch`
+    /// while reading `pump_scratch`, which a `&mut self` receiver would not
+    /// allow.
+    #[allow(clippy::too_many_arguments)]
     fn apply_output_speed(
         swr: &mut Option<Resampler>,
         scratch: &mut Vec<u8>,
+        carry: &mut SpeedCarry,
         input: &[u8],
         in_frames: i32,
         rate: i32,
@@ -402,20 +428,20 @@ Video stays in sync with it; check the sender's frame rate and clock",
         // `ensure_speed_swr`: rebuild when the format moved; a failed build
         // leaves `None`, so the next chunk retries (as the C zeroed the
         // cached rate/channels).
-        if swr.as_ref().is_none_or(|s| !s.matches_params(rate, channels)) {
+        if swr
+            .as_ref()
+            .is_none_or(|s| !s.matches_params(rate, channels))
+        {
             *swr = Resampler::passthrough_f32(rate, channels).ok();
         }
         let swr = swr.as_mut()?;
 
-        let mut desired = (in_frames as f32 / speed + 0.5) as i32;
-        if desired < 1 {
-            desired = 1;
-        }
-        if desired != in_frames
-            && swr
-                .set_compensation(desired - in_frames, desired)
-                .is_err()
-        {
+        // Whole samples per chunk with the fractional remainder carried into
+        // the next one: rounding each chunk independently quantises the applied
+        // speed to multiples of 1/in_frames (~0.1 % at 1024 frames), which is
+        // the entire range the deadband slope and most of the trim live in.
+        let desired = carry.output_frames(in_frames, speed);
+        if desired != in_frames && swr.set_compensation(desired - in_frames, desired).is_err() {
             return None;
         }
 
@@ -507,8 +533,8 @@ fn maybe_reanchor_offset(
     }
 
     // Only reclaim latency the speed-drain cannot. While backlog is queued
-    // the inflation is real buffered audio, and draining it at up to +5 %
-    // preserves every sample, so leave it entirely to the speed controller
+    // the inflation is real buffered audio, and draining it at up to the
+    // catch-up speed preserves every sample, so leave it to the controller
     // (content is never skipped). We step in only once the buffer is back
     // at/below target, where the residual offset is phantom: concealment
     // silence with no backing audio (the concealed packets were dropped, not
@@ -545,7 +571,7 @@ fn maybe_reanchor_offset(
 /// backlog can be dropped for free. This is the only trim path. Once audio is
 /// live, content is never skipped: the read loop stops ingesting above a fill
 /// ceiling (transport backpressure) and playback bleeds the backlog off at up
-/// to `AUDIO_SPEED_MAX`.
+/// to the Catch-Up Speed.
 fn maybe_trim_hidden_backlog(
     shared: &Shared,
     state: &AudioState,
@@ -583,7 +609,8 @@ fn maybe_trim_hidden_backlog(
     let target_ms = shared.hot.watermarks().target_ms;
     let mut keep_ms = target_ms + chunk_ms;
     if out_rate > 0 {
-        keep_ms += (timing::output_lead_ns(chunk_samples, out_rate, low_latency) / 1_000_000) as i32;
+        keep_ms +=
+            (timing::output_lead_ns(chunk_samples, out_rate, low_latency) / 1_000_000) as i32;
     }
     if fill_ms <= keep_ms + consts::AUDIO_TRIM_TRIGGER_MS {
         return false;

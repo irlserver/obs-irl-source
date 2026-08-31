@@ -6,7 +6,7 @@ An OBS source built for IRL streams. Point it at your SRT or RTMP pull URL and i
 
 ## What it does for your stream
 
-**Audio survives a bad connection.** The plugin holds a small cushion of audio (120ms by default) so a hiccup on the way to your PC does not turn into a stutter on stream. When your connection craters and then comes back, it catches up by playing slightly fast (up to 5%) instead of cutting audio out. Nothing gets skipped.
+**Audio survives a bad connection.** The plugin holds a small cushion of audio (120ms by default) so a hiccup on the way to your PC does not turn into a stutter on stream. When your connection craters and then comes back, it catches up by playing slightly fast (up to 5% by default, and you can set how fast) instead of cutting audio out. Nothing gets skipped.
 
 **No pops, clicks or metallic garbage.** Timestamp jumps from cell tower handoffs and packet loss get repaired instead of passed through. If a piece of audio truly cannot be recovered, you get a short silence rather than something that sounds broken. Disconnects fade out instead of clicking.
 
@@ -27,7 +27,7 @@ OBS ships with a Media Source that can play SRT, RTMP and RIST. It works, but it
 | | Media Source | IRL Source |
 | --- | --- | --- |
 | Unstable connection | Relies on whatever cushion the protocol itself provides, and holds nothing after it | Adds its own cushion (120ms default) behind the protocol latency |
-| After a stall | Latency climbs and stays there, with no way to catch up | Catches up at up to +5% speed until latency is back on target, without skipping audio |
+| After a stall | Latency climbs and stays there, with no way to catch up | Catches up at up to the Catch-Up Speed until latency is back on target, without skipping audio |
 | Audio timing | Falls behind the mixer, so OBS adds up to a second of buffering that never goes away | Steady clock with a fixed lead, so OBS never adds hidden delay |
 | Timestamp jumps | Passed straight through, so you get pops and freezes | Repaired: small gaps smoothed, medium gaps filled with silence, large gaps get a clean reset |
 | Disconnect | Abrupt cutoff with a loud click | 50ms fade out, fade in on reconnect |
@@ -83,8 +83,9 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 | --- | --- | --- |
 | URL | | Your pull URL. SRT, RTMP, or anything else FFmpeg can open |
 | Reconnect Delay | 2s | How long to wait between reconnect attempts |
-| Target Buffer | 120ms | How much audio cushion to hold, 20ms to 2s. This is your main latency knob: higher rides out a worse connection, lower is snappier and less forgiving. If the stats show `underruns` climbing, this is the setting to raise — an underrun means the cushion ran dry, and the concealment that covers it delays video by the same amount to keep lip sync |
-| Adaptive Latency Control | On | Holds latency near your target by nudging playback speed (up to 2% slow, 5% fast) instead of dropping audio |
+| Target Buffer | 120ms | How much audio cushion to hold, 20ms to 8s. This is your main latency knob: higher rides out a worse connection, lower is snappier and less forgiving. If the stats show `underruns` climbing, this is the setting to raise — an underrun means the cushion ran dry, and the concealment that covers it delays video by the same amount to keep lip sync. The whole target is paid as delay before the source starts, and as decoded video held in memory, so raise it to what your connection actually needs rather than to the maximum |
+| Adaptive Latency Control | On | Holds latency near your target by nudging playback speed (up to 2% slow, and up to Catch-Up Speed fast) instead of dropping audio |
+| Catch-Up Speed | 5% | How fast playback may run while clearing a backlog, 2% to 15%. 5% recovers a second of backlog in about 20 seconds and is audible on music (roughly a semitone) but not on speech. Lower it if you play music and would rather the recovery take longer than be heard; raise it to get latency back sooner. Only applies with Adaptive Latency Control on |
 | FFmpeg Options | | Extra options for the stream reader, `key1=val1 key2=val2` style. Use this to set the SRT `latency`, for example |
 | Hardware Decode | Auto | Let the GPU decode video. Auto picks whatever your machine supports, Off forces the CPU, and NVDEC (Windows/Linux) explicitly requires NVIDIA CUDA/NVDEC |
 | Wait for Keyframe | On | Hold video back until a clean frame arrives, so you never see blocky garbage on join |
@@ -92,7 +93,7 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 | Show Nothing When the Stream Ends | On | Blank the source as soon as the stream drops, instead of leaving the last frame frozen on screen until it reconnects. Same idea as the media source's "Show nothing when playback ends" |
 | Close Stream When Inactive | Off | Stop pulling the stream when the source is neither showing nor active (the last frame goes black if Show Nothing When the Stream Ends is on), and reconnect when it becomes visible again |
 
-Target Buffer, Reconnect Delay, Adaptive Latency Control, Wait for Keyframe, Show Nothing When the Stream Ends and Close Stream When Inactive can be changed while the stream is running. The connection stays up and the stats counters keep counting. The one exception is turning Close Stream When Inactive on while the source is already hidden, which is a request to stop receiving: that drops the connection and resets the stats counters, as it would on any later hide. Changing Target Buffer mid-stream keeps every buffered sample and walks the latency to the new value at up to +5% or -2% speed, so you should not hear a seam. Changing URL, FFmpeg Options, Hardware Decode or Low Latency Audio reconnects, because those are set when the stream is opened.
+Target Buffer, Reconnect Delay, Adaptive Latency Control, Catch-Up Speed, Wait for Keyframe, Show Nothing When the Stream Ends and Close Stream When Inactive can be changed while the stream is running. The connection stays up and the stats counters keep counting. The one exception is turning Close Stream When Inactive on while the source is already hidden, which is a request to stop receiving: that drops the connection and resets the stats counters, as it would on any later hide. Changing Target Buffer mid-stream keeps every buffered sample and walks the latency to the new value at up to the Catch-Up Speed or -2%, so you should not hear a seam. Changing URL, FFmpeg Options, Hardware Decode or Low Latency Audio reconnects, because those are set when the stream is opened.
 
 Earlier versions exposed Min/Max Buffer, PTS gap thresholds, Network Buffer and Decoupled Audio. Those are now fixed or derived internally, so old scene collections keep working and ignore the stored values.
 
@@ -192,7 +193,7 @@ Everything below is for people who want to know how it works, or who want to bui
 The plugin optimizes for what viewers hear and see, not for preserving every damaged packet.
 
 - Audio must not sound jittery, glitchy, metallic, or artifacty. If audio cannot be reconstructed cleanly, short silence is preferred over audible corruption.
-- Audio content is never skipped once playback has started. Backlog from a stall is played back slightly sped up (up to +5%) until latency returns to target.
+- Audio content is never skipped once playback has started. Backlog from a stall is played back slightly sped up (up to the Catch-Up Speed, +5% by default) until latency returns to target.
 - Video cadence should stay smooth. During decoder damage, timestamped damaged frames are preferable to freezes as long as they are a picture: H.264 concealment produces one, so those pass through; HEVC has no concealment and renders a missing reference as flat gray, so those frames are held and the last good frame stays up until the next keyframe. Avoid gray/blank frames and decoder reset storms.
 - Latency may drift if that protects viewer quality, but it should stay far below the 2 to 3 second live delay typical of an IRL SRT stream through the OBS Media Source. The source must never fall behind the OBS mix window, because that is what makes OBS add global audio buffering it never gives back.
 - Diagnostics should make the recovery path visible: interpolation, silence insertion, resets, trims, underruns, and playback mode are tracked separately.
@@ -205,7 +206,7 @@ The audio core is built around three properties of libobs:
 2. Changing `samples_per_sec` between submissions makes OBS destroy and recreate its per-source resampler with no crossfade, which is a click every time. Playback speed is instead applied inside the plugin with a persistent swresample compensation, and the rate submitted to OBS never changes.
 3. The OBS mixer consumes 21.3ms ticks against the wall clock. A source that runs dry gets a tick of silence plus a time shifted splice (crackle), and a source that falls behind the mix window makes OBS permanently add global audio buffering. After priming, the pump always emits (real audio or shaped concealment silence) and keeps a fixed lead ahead of the wall clock.
 
-Buffer regulation happens through playback speed alone, asymmetric like IRLToolkit's player: it builds at an inaudible -2% and drains post-stall backlog at up to +5% (mild chipmunk). Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP and RTMP apply backpressure, SRT bounds itself through its latency window), and startup backlog is trimmed only before priming.
+Buffer regulation happens through playback speed alone, asymmetric like IRLToolkit's player: it builds at an inaudible -2% and drains post-stall backlog at up to the Catch-Up Speed (+5% by default, mild chipmunk). A slow integral trim underneath the proportional ramp removes the standing error a sender whose media clock is not wall clock would otherwise leave (see `docs/audio-timing-pitfalls.md`). Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP and RTMP apply backpressure, SRT bounds itself through its latency window), and startup backlog is trimmed only before priming.
 
 The jitter buffer is a ring sized in milliseconds with a parallel PTS chunk queue, so it adapts to any sample rate or channel count. The speed controller's watermarks derive from `Target Buffer`: low at half the target, full drain speed at target plus 200ms. Retuning the target live grows the ring if needed (it never shrinks) and moves the watermarks while keeping every queued sample.
 
