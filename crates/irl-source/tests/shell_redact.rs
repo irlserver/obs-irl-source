@@ -18,5 +18,8 @@ fn redaction_keeps_protocol_host_and_port_only() {
         "srt://[2001:db8::1]:9000"
     );
     assert_eq!(redacted_input_url(c"not a url"), "<redacted>");
-    assert_eq!(redacted_input_url(c"file:///home/user/secret.ts"), "file://<redacted>");
+    assert_eq!(
+        redacted_input_url(c"file:///home/user/secret.ts"),
+        "file://<redacted>"
+    );
 }

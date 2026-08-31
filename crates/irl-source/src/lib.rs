@@ -58,13 +58,15 @@ fn module_unload() {}
 fn spawn_deadlock_poller() {
     std::thread::Builder::new()
         .name("irl-deadlock-check".into())
-        .spawn(|| loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let deadlocks = parking_lot::deadlock::check_deadlock();
-            for (i, threads) in deadlocks.iter().enumerate() {
-                irl_error!("deadlock #{i} detected across {} threads", threads.len());
-                for t in threads {
-                    irl_error!("  thread {:?}:\n{:?}", t.thread_id(), t.backtrace());
+        .spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let deadlocks = parking_lot::deadlock::check_deadlock();
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    irl_error!("deadlock #{i} detected across {} threads", threads.len());
+                    for t in threads {
+                        irl_error!("  thread {:?}:\n{:?}", t.thread_id(), t.backtrace());
+                    }
                 }
             }
         })

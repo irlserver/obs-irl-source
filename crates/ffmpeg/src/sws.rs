@@ -166,7 +166,10 @@ mod tests {
     use super::*;
 
     fn nv12_buffers(width: usize, height: usize) -> (Vec<u8>, Vec<u8>) {
-        (vec![0u8; width * height], vec![0u8; width * height.div_ceil(2)])
+        (
+            vec![0u8; width * height],
+            vec![0u8; width * height.div_ceil(2)],
+        )
     }
 
     #[test]
@@ -191,7 +194,10 @@ mod tests {
 
         let (mut y, mut uv) = nv12_buffers(64, 48);
         scaler.scale_into_nv12(&src, &mut y, &mut uv, 64).unwrap();
-        assert!(y.iter().all(|&b| b == 0x80), "luma should pass through unchanged");
+        assert!(
+            y.iter().all(|&b| b == 0x80),
+            "luma should pass through unchanged"
+        );
         assert!(uv.iter().any(|&b| b != 0), "chroma plane was not written");
 
         // Reusable: a second call on the same context must work too.
@@ -213,8 +219,16 @@ mod tests {
         let mut scaler = Scaler::new(false).unwrap();
         let src = Frame::alloc_video(AVPixelFormat::AV_PIX_FMT_YUV444P, 64, 48).unwrap();
         let (mut y, mut uv) = nv12_buffers(64, 48);
-        assert!(scaler.scale_into_nv12(&src, &mut y[..100], &mut uv, 64).is_err());
-        assert!(scaler.scale_into_nv12(&src, &mut y, &mut uv[..10], 64).is_err());
+        assert!(
+            scaler
+                .scale_into_nv12(&src, &mut y[..100], &mut uv, 64)
+                .is_err()
+        );
+        assert!(
+            scaler
+                .scale_into_nv12(&src, &mut y, &mut uv[..10], 64)
+                .is_err()
+        );
         // A stride narrower than the picture is a caller bug, not a conversion.
         assert!(scaler.scale_into_nv12(&src, &mut y, &mut uv, 32).is_err());
     }

@@ -17,7 +17,8 @@ impl Dictionary {
         // SAFETY: `&mut self.0` is a valid `AVDictionary**` (null means "allocate
         // one"); both strings are NUL-terminated and live for the call, and flag
         // 0 makes av_dict_set copy them.
-        let ret = unsafe { ffmpeg_sys_next::av_dict_set(&mut self.0, key.as_ptr(), value.as_ptr(), 0) };
+        let ret =
+            unsafe { ffmpeg_sys_next::av_dict_set(&mut self.0, key.as_ptr(), value.as_ptr(), 0) };
         Error::check(ret)
     }
 

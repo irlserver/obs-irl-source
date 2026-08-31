@@ -28,5 +28,8 @@ fn main() {
         // only its #[no_mangle] items.
         _ => {}
     }
-    println!("cargo::rustc-env=IRL_PLUGIN_VERSION={}", std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!(
+        "cargo::rustc-env=IRL_PLUGIN_VERSION={}",
+        std::env::var("CARGO_PKG_VERSION").unwrap()
+    );
 }

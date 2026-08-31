@@ -106,7 +106,16 @@ impl FramePool {
         if pool.is_null() {
             return Err(Error::nomem());
         }
-        Ok((Self { pool, fmt, width, height, size }, size))
+        Ok((
+            Self {
+                pool,
+                fmt,
+                width,
+                height,
+                size,
+            },
+            size,
+        ))
     }
 
     /// The padded dimensions the pool's buffers are laid out for.
@@ -237,7 +246,10 @@ mod tests {
         let (pool, size) = FramePool::new(AVPixelFormat::AV_PIX_FMT_NV12, 1920, 1080).unwrap();
         assert_eq!(pool.dimensions(), (1920, 1088));
         assert!(pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1920, 1080));
-        assert!(pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1920, 1081), "same padded height");
+        assert!(
+            pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1920, 1081),
+            "same padded height"
+        );
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_YUV420P, 1920, 1080));
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1280, 720));
         assert_eq!(size, pool.buffer_size());
@@ -246,7 +258,10 @@ mod tests {
         let first = pool.acquire().unwrap();
         assert_eq!((first.width(), first.height()), (1920, 1088));
         let base = first.plane(0).unwrap().as_ptr();
-        assert_eq!(first.plane(0).unwrap().len(), first.plane_linesize(0) as usize * 1088);
+        assert_eq!(
+            first.plane(0).unwrap().len(),
+            first.plane_linesize(0) as usize * 1088
+        );
         drop(first);
 
         // The buffer is back in the pool, so the next acquire reuses it.

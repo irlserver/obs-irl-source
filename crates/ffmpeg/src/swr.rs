@@ -77,7 +77,15 @@ impl Resampler {
                 core::ptr::null_mut(),
             )
         };
-        let this = Self::adopt(ptr, ret, in_rate, in_channels, in_format, out_rate, out_channels)?;
+        let this = Self::adopt(
+            ptr,
+            ret,
+            in_rate,
+            in_channels,
+            in_format,
+            out_rate,
+            out_channels,
+        )?;
         this.init()
     }
 
@@ -140,7 +148,14 @@ impl Resampler {
         if ptr.is_null() {
             return Err(if ret < 0 { Error(ret) } else { Error::nomem() });
         }
-        let this = Self { ptr, in_rate, in_channels, in_format, out_rate, out_channels };
+        let this = Self {
+            ptr,
+            in_rate,
+            in_channels,
+            in_format,
+            out_rate,
+            out_channels,
+        };
         // `this` frees the context in Drop if the option set failed.
         Error::check(ret)?;
         Ok(this)
@@ -174,7 +189,11 @@ impl Resampler {
     }
 
     /// `swr_set_compensation(delta, distance)`.
-    pub fn set_compensation(&mut self, sample_delta: i32, compensation_distance: i32) -> Result<()> {
+    pub fn set_compensation(
+        &mut self,
+        sample_delta: i32,
+        compensation_distance: i32,
+    ) -> Result<()> {
         // SAFETY: `self.ptr` is an initialised context.
         Error::check(unsafe {
             ffmpeg_sys_next::swr_set_compensation(self.ptr, sample_delta, compensation_distance)
@@ -197,7 +216,11 @@ impl Resampler {
             return Err(Error::inval());
         }
         let need = (max_out_frames as usize).saturating_mul(self.out_frame_bytes());
-        if out.len() < need { Err(Error::inval()) } else { Ok(()) }
+        if out.len() < need {
+            Err(Error::inval())
+        } else {
+            Ok(())
+        }
     }
 
     /// `swr_convert(out, max_out_frames, frame.extended_data, nb_samples)`.
@@ -284,7 +307,9 @@ mod tests {
         let input = silent_stereo(1024);
         let max_out = swr.out_samples(1024).max(1024) + 32;
         let mut out = vec![0u8; max_out as usize * 2 * OUT_BYTES_PER_SAMPLE];
-        let got = swr.convert_interleaved(&mut out, max_out, &input, 1024).unwrap();
+        let got = swr
+            .convert_interleaved(&mut out, max_out, &input, 1024)
+            .unwrap();
         // A forced-active identity resampler keeps a small internal delay, so
         // the first call can come back a hair short; it must not exceed input.
         assert!(got > 0 && got <= 1024, "got {got}");
@@ -298,14 +323,19 @@ mod tests {
         let mut out = vec![0u8; max_out as usize * 2 * OUT_BYTES_PER_SAMPLE];
 
         // Prime the delay line so the steady-state count is stable.
-        swr.convert_interleaved(&mut out, max_out, &input, 1024).unwrap();
-        let baseline = swr.convert_interleaved(&mut out, max_out, &input, 1024).unwrap();
+        swr.convert_interleaved(&mut out, max_out, &input, 1024)
+            .unwrap();
+        let baseline = swr
+            .convert_interleaved(&mut out, max_out, &input, 1024)
+            .unwrap();
         assert_eq!(baseline, 1024);
 
         // Ask for 5% more output over the next chunk: playback slows down.
         let desired = 1075;
         swr.set_compensation(desired - 1024, desired).unwrap();
-        let stretched = swr.convert_interleaved(&mut out, max_out, &input, 1024).unwrap();
+        let stretched = swr
+            .convert_interleaved(&mut out, max_out, &input, 1024)
+            .unwrap();
         assert!(stretched > baseline, "{stretched} should exceed {baseline}");
     }
 
@@ -318,7 +348,10 @@ mod tests {
 
         let mut big = vec![0u8; 64 * 2 * OUT_BYTES_PER_SAMPLE];
         // Input too small for the frame count claimed.
-        assert!(swr.convert_interleaved(&mut big, 64, &input[..8], 64).is_err());
+        assert!(
+            swr.convert_interleaved(&mut big, 64, &input[..8], 64)
+                .is_err()
+        );
     }
 
     #[test]
@@ -336,7 +369,10 @@ mod tests {
             assert_eq!(ffmpeg_sys_next::av_frame_get_buffer(raw, 0), 0);
         }
         assert_eq!(frame.channels(), 2);
-        assert!(frame.interleaved_f32_bytes().is_none(), "planar is not interleaved");
+        assert!(
+            frame.interleaved_f32_bytes().is_none(),
+            "planar is not interleaved"
+        );
 
         let mut swr = Resampler::to_interleaved_f32(&frame, 2, 48_000).unwrap();
         assert!(swr.matches(&frame));

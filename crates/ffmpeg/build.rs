@@ -38,7 +38,11 @@ fn main() {
 
     let get = |k: &str| deps.get(k).cloned().unwrap_or_default();
     let list = |k: &str| -> Vec<String> {
-        get(k).split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect()
+        get(k)
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect()
     };
 
     println!("cargo::rustc-link-search=native={}", get("IRL_DEPS_LIBDIR"));
@@ -51,7 +55,12 @@ fn main() {
     for fw in list("IRL_DEPS_FRAMEWORKS") {
         println!("cargo::rustc-link-lib=framework={fw}");
     }
-    for key in ["IRL_DEPS_FFMPEG_VERSION", "IRL_DEPS_SRT_VERSION", "IRL_DEPS_LIBRIST_VERSION", "IRL_DEPS_MBEDTLS_VERSION"] {
+    for key in [
+        "IRL_DEPS_FFMPEG_VERSION",
+        "IRL_DEPS_SRT_VERSION",
+        "IRL_DEPS_LIBRIST_VERSION",
+        "IRL_DEPS_MBEDTLS_VERSION",
+    ] {
         println!("cargo::rustc-env={key}={}", get(key));
     }
     // Downstream crates (the plugin) can read these through DEP_IRL_DEPS_*.
@@ -68,6 +77,11 @@ fn parse(text: &str) -> HashMap<String, String> {
 }
 
 fn workspace_root() -> PathBuf {
-    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    manifest.parent().and_then(|p| p.parent()).map(PathBuf::from).expect("crates/<name>/ layout")
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .expect("crates/<name>/ layout")
 }

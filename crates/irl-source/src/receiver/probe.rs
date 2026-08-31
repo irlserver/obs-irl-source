@@ -47,8 +47,7 @@ pub fn pick_cuda_format(codec: &Codec, offered: &[AVPixelFormat]) -> AVPixelForm
     for &fmt in offered {
         for config in &configs {
             if config.device_type == AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
-                && (config.methods
-                    & (ffmpeg::sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32))
+                && (config.methods & (ffmpeg::sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32))
                     != 0
                 && config.pix_fmt == fmt
             {

@@ -28,7 +28,8 @@ fn should_log_decoder_warning(last_warning_time_us: &mut u64, now_us: u64) -> bo
 }
 
 fn should_flush_decoder(last_flush_time_us: &mut u64, now_us: u64) -> bool {
-    if *last_flush_time_us != 0 && now_us - *last_flush_time_us < consts::DECODER_FLUSH_COOLDOWN_US {
+    if *last_flush_time_us != 0 && now_us - *last_flush_time_us < consts::DECODER_FLUSH_COOLDOWN_US
+    {
         return false;
     }
     *last_flush_time_us = now_us;
@@ -171,7 +172,9 @@ impl Receiver {
             pkt,
             ..
         } = self;
-        let Some(dec) = audio_dec.as_mut() else { return };
+        let Some(dec) = audio_dec.as_mut() else {
+            return;
+        };
 
         let mut result = dec.send_packet(pkt);
         if result.as_ref().is_err_and(ffmpeg::Error::is_eagain) {
@@ -234,7 +237,9 @@ impl Receiver {
             pkt,
             ..
         } = self;
-        let Some(dec) = video_dec.as_mut() else { return };
+        let Some(dec) = video_dec.as_mut() else {
+            return;
+        };
 
         // Packet-level keyframe gate.
         if shared.hot.wait_for_keyframe.load(Relaxed)

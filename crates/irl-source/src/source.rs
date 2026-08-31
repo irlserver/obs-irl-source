@@ -283,8 +283,8 @@ impl Source for IrlSource {
         // Connected, but nothing on screen yet: the first connection attempt
         // is still in avformat_open_input, or the keyframe gate has not
         // opened.
-        let playing = running.shared.conn.video_ts_init.load(Relaxed)
-            || running.shared.audio_state().primed;
+        let playing =
+            running.shared.conn.video_ts_init.load(Relaxed) || running.shared.audio_state().primed;
         if playing {
             MediaState::Playing
         } else {

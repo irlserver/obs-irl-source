@@ -113,13 +113,19 @@ impl Rational {
 
 impl From<Rational> for sys::AVRational {
     fn from(r: Rational) -> Self {
-        sys::AVRational { num: r.num, den: r.den }
+        sys::AVRational {
+            num: r.num,
+            den: r.den,
+        }
     }
 }
 
 impl From<sys::AVRational> for Rational {
     fn from(r: sys::AVRational) -> Self {
-        Rational { num: r.num, den: r.den }
+        Rational {
+            num: r.num,
+            den: r.den,
+        }
     }
 }
 
@@ -180,7 +186,11 @@ pub fn url_split(url: &core::ffi::CStr) -> UrlParts {
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         String::from_utf8_lossy(&buf[..end]).into_owned()
     };
-    UrlParts { protocol: str_of(&proto), hostname: str_of(&host), port }
+    UrlParts {
+        protocol: str_of(&proto),
+        hostname: str_of(&host),
+        port,
+    }
 }
 
 /// `av_gettime()` in microseconds. FFmpeg-side timers only.
@@ -231,7 +241,11 @@ pub fn image_buffer_size(fmt: AVPixelFormat, width: i32, height: i32, align: i32
     // SAFETY: pure computation over scalars and the static pixel format table.
     let size = unsafe { sys::av_image_get_buffer_size(fmt, width, height, align) };
     if size <= 0 {
-        return Err(if size < 0 { Error(size) } else { Error::inval() });
+        return Err(if size < 0 {
+            Error(size)
+        } else {
+            Error::inval()
+        });
     }
     Ok(size as usize)
 }
@@ -263,7 +277,8 @@ pub(crate) const fn ffalign(x: i32, a: i32) -> i32 {
 /// make the transmute sound; anything outside becomes `AV_PIX_FMT_NONE`
 /// (which is how the C plugin's `default:` arms treat unknown formats too).
 pub(crate) fn pix_fmt_from_raw(raw: c_int) -> AVPixelFormat {
-    if raw < AVPixelFormat::AV_PIX_FMT_NONE as c_int || raw > AVPixelFormat::AV_PIX_FMT_NB as c_int {
+    if raw < AVPixelFormat::AV_PIX_FMT_NONE as c_int || raw > AVPixelFormat::AV_PIX_FMT_NB as c_int
+    {
         return AVPixelFormat::AV_PIX_FMT_NONE;
     }
     // SAFETY: `raw` is inside the enum's contiguous discriminant range,
@@ -317,14 +332,20 @@ mod tests {
         // 1 tick of 1/3 s into milliseconds: 333.33… rounds up to 334.
         let up = rescale_q_round_up(1, Rational::new(1, 3), Rational::new(1, 1000));
         assert_eq!(up, 334);
-        assert_eq!(rescale_q(1, Rational::new(1, 3), Rational::new(1, 1000)), 333);
+        assert_eq!(
+            rescale_q(1, Rational::new(1, 3), Rational::new(1, 1000)),
+            333
+        );
     }
 
     #[test]
     fn names_and_versions() {
         assert_eq!(codec_name(AVCodecID::AV_CODEC_ID_H264), "h264");
         assert_eq!(pix_fmt_name(AVPixelFormat::AV_PIX_FMT_NV12), "nv12");
-        assert_eq!(hwdevice_type_name(AVHWDeviceType::AV_HWDEVICE_TYPE_NONE), "none");
+        assert_eq!(
+            hwdevice_type_name(AVHWDeviceType::AV_HWDEVICE_TYPE_NONE),
+            "none"
+        );
         assert!(version_string().starts_with("libavcodec "));
     }
 
@@ -356,9 +377,15 @@ mod url_split_tests {
     #[test]
     fn splits_endpoint_and_drops_credentials() {
         let p = super::url_split(c"srt://host.example:9000?passphrase=secret");
-        assert_eq!((p.protocol.as_str(), p.hostname.as_str(), p.port), ("srt", "host.example", 9000));
+        assert_eq!(
+            (p.protocol.as_str(), p.hostname.as_str(), p.port),
+            ("srt", "host.example", 9000)
+        );
         let p = super::url_split(c"rtmp://user:pw@live.example/app/streamkey");
-        assert_eq!((p.protocol.as_str(), p.hostname.as_str(), p.port), ("rtmp", "live.example", -1));
+        assert_eq!(
+            (p.protocol.as_str(), p.hostname.as_str(), p.port),
+            ("rtmp", "live.example", -1)
+        );
         let p = super::url_split(c"srt://[2001:db8::1]:9000");
         assert_eq!(p.hostname, "2001:db8::1");
         assert_eq!(p.port, 9000);

@@ -248,7 +248,9 @@ impl Receiver {
 
         if self.audio_stream_idx >= 0 {
             let tb = self.audio_tb;
-            let Self { audio_in, shared, .. } = self;
+            let Self {
+                audio_in, shared, ..
+            } = self;
             audio_in.init_pts_repair(&shared.cfg, tb);
         }
 

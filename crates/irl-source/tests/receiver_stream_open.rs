@@ -11,7 +11,10 @@ use std::sync::atomic::AtomicBool;
 use irl_core::consts;
 
 fn watch(active: bool) -> Arc<ffmpeg::InterruptWatch> {
-    ffmpeg::InterruptWatch::new(Arc::new(AtomicBool::new(active)), consts::IO_STALL_TIMEOUT_US)
+    ffmpeg::InterruptWatch::new(
+        Arc::new(AtomicBool::new(active)),
+        consts::IO_STALL_TIMEOUT_US,
+    )
 }
 
 #[test]
@@ -76,7 +79,10 @@ fn the_probe_budget_follows_the_fast_probe_flag() {
         false,
     );
 
-    let probesize = |opts: &[(std::borrow::Cow<'static, str>, std::borrow::Cow<'static, str>)]| {
+    let probesize = |opts: &[(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    )]| {
         opts.iter()
             .rev()
             .find(|(key, _)| key == "probesize")

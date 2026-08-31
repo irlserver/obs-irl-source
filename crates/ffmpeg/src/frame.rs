@@ -207,8 +207,13 @@ impl Frame {
         }
         // SAFETY: `desc` is a live static descriptor; `nb_components` is at
         // most 4, the length of `comp`.
-        let (nb_components, log2_chroma_h, comp) =
-            unsafe { ((*desc).nb_components as usize, (*desc).log2_chroma_h, (*desc).comp) };
+        let (nb_components, log2_chroma_h, comp) = unsafe {
+            (
+                (*desc).nb_components as usize,
+                (*desc).log2_chroma_h,
+                (*desc).comp,
+            )
+        };
 
         let mut full_height = index == 0;
         let mut found = index == 0;
@@ -252,7 +257,9 @@ impl Frame {
         }
         let planes = (planes as usize).min(ffmpeg_sys_next::AV_NUM_DATA_POINTERS as usize);
         // SAFETY: `self.0` is live and every index is inside `data`.
-        (0..planes).take_while(|&i| !unsafe { (*self.0).data[i] }.is_null()).count()
+        (0..planes)
+            .take_while(|&i| !unsafe { (*self.0).data[i] }.is_null())
+            .count()
     }
 
     pub fn colorimetry(&self) -> Colorimetry {
@@ -300,7 +307,11 @@ impl Frame {
     pub fn best_effort_pts(&self) -> Option<i64> {
         // SAFETY: as above.
         let (best, pts) = unsafe { ((*self.0).best_effort_timestamp, (*self.0).pts) };
-        let value = if best != ffmpeg_sys_next::AV_NOPTS_VALUE { best } else { pts };
+        let value = if best != ffmpeg_sys_next::AV_NOPTS_VALUE {
+            best
+        } else {
+            pts
+        };
         (value != ffmpeg_sys_next::AV_NOPTS_VALUE).then_some(value)
     }
 
@@ -431,10 +442,16 @@ mod tests {
         src.set_pts(4242);
         let copy = src.new_ref().unwrap();
         assert_eq!(copy.pts(), 4242);
-        assert_eq!(copy.plane(0).unwrap().as_ptr(), src.plane(0).unwrap().as_ptr());
+        assert_eq!(
+            copy.plane(0).unwrap().as_ptr(),
+            src.plane(0).unwrap().as_ptr()
+        );
         drop(src);
         // The reference keeps the buffer alive.
-        assert_eq!(copy.plane(0).unwrap().len(), copy.plane_linesize(0) as usize * 16);
+        assert_eq!(
+            copy.plane(0).unwrap().len(),
+            copy.plane_linesize(0) as usize * 16
+        );
     }
 
     #[test]

@@ -69,8 +69,7 @@ fn cuda_formats(codec: &Codec) -> Vec<AVPixelFormat> {
         .into_iter()
         .filter(|config| {
             config.device_type == AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
-                && (config.methods
-                    & (ffmpeg::sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32))
+                && (config.methods & (ffmpeg::sys::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32))
                     != 0
         })
         .map(|config| config.pix_fmt)

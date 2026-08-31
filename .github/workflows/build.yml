@@ -61,6 +61,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Formatting and spelling are checked once, on Linux: they are
+      # platform-independent, so running them per platform only buys three
+      # copies of the same failure. `make style` fixes both locally.
+      - name: Format check
+        run: make style-check
+
+      - name: Spell check
+        run: |
+          pipx install codespell
+          make spell-check
+
       # libobs-dev is installed here, so the test binaries that touch libobs
       # symbols (obs, irl-source) link and run on this runner only.
       - name: Test

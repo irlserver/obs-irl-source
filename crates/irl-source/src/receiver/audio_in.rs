@@ -153,9 +153,8 @@ impl AudioIntake {
             shared.conn.pts_last_gap_ms.store(gap_ms, Relaxed);
             shared.conn.pts_max_gap_ms.fetch_max(gap_ms, Relaxed);
 
-            let frame_sized_normalization = verdict.action == PtsAction::Interpolate
-                && frame_ms > 0
-                && gap_ms <= frame_ms + 2;
+            let frame_sized_normalization =
+                verdict.action == PtsAction::Interpolate && frame_ms > 0 && gap_ms <= frame_ms + 2;
             if frame_sized_normalization {
                 shared.conn.pts_normalizations.fetch_add(1, Relaxed);
             } else {
@@ -193,19 +192,16 @@ impl AudioIntake {
             in_scratch = true;
         }
 
-        let data_bytes =
-            out_samples as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
+        let data_bytes = out_samples as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
         if data_bytes == 0 {
             return;
         }
 
         if inserted_silence {
             let channels = out_channels as usize;
-            edit_floats(
-                &mut self.float,
-                &mut self.scratch[..data_bytes],
-                |pcm| dsp::apply_fade_in(pcm, channels, out_rate),
-            );
+            edit_floats(&mut self.float, &mut self.scratch[..data_bytes], |pcm| {
+                dsp::apply_fade_in(pcm, channels, out_rate)
+            });
         }
 
         if shared.hot.wait_for_keyframe.load(Relaxed)
@@ -259,8 +255,7 @@ impl AudioIntake {
 
         let mut duration = frame.duration();
         if duration <= 0 && out_rate > 0 && frame.nb_samples() > 0 {
-            duration =
-                ffmpeg::rescale_q(frame.nb_samples() as i64, Rational::new(1, out_rate), tb);
+            duration = ffmpeg::rescale_q(frame.nb_samples() as i64, Rational::new(1, out_rate), tb);
         }
         if duration <= 0 {
             duration = 1;
@@ -344,14 +339,12 @@ impl AudioIntake {
             self.scratch.resize(silence_bytes, 0);
         }
         let last = self.last_sample;
-        edit_floats(
-            &mut self.float,
-            &mut self.scratch[..silence_bytes],
-            |pcm| dsp::shape_silence_from_last(pcm, channels, rate, &last),
-        );
+        edit_floats(&mut self.float, &mut self.scratch[..silence_bytes], |pcm| {
+            dsp::shape_silence_from_last(pcm, channels, rate, &last)
+        });
 
-        let mut silence_pts_ns = ffmpeg::rescale_q(corrected_pts, pts_tb, NS_TB)
-            - silence_ms as i64 * 1_000_000;
+        let mut silence_pts_ns =
+            ffmpeg::rescale_q(corrected_pts, pts_tb, NS_TB) - silence_ms as i64 * 1_000_000;
         if silence_pts_ns < 0 {
             silence_pts_ns = 0;
         }
@@ -401,7 +394,11 @@ impl AudioIntake {
         let out_samples = swr
             .convert_from_frame(&mut self.scratch[..need], max_out, frame)
             .ok()?;
-        if out_samples <= 0 { None } else { Some(out_samples) }
+        if out_samples <= 0 {
+            None
+        } else {
+            Some(out_samples)
+        }
     }
 }
 

@@ -132,7 +132,11 @@ impl CodecBuilder {
         if ptr.is_null() {
             return Err(Error::nomem());
         }
-        let this = Self { ptr, codec, get_format: None };
+        let this = Self {
+            ptr,
+            codec,
+            get_format: None,
+        };
         // SAFETY: `ptr` is a fresh context and `codecpar` a live parameter set
         // owned by the borrowed format context.
         let ret = unsafe {
@@ -217,7 +221,12 @@ impl CodecBuilder {
         let mut ptr = this.ptr;
         let codec = this.codec;
 
-        let opaque = this.get_format.map(|f| Box::new(CtxOpaque { get_format: f, codec }));
+        let opaque = this.get_format.map(|f| {
+            Box::new(CtxOpaque {
+                get_format: f,
+                codec,
+            })
+        });
         if let Some(boxed) = opaque.as_ref() {
             // SAFETY: `ptr` is an unopened context we own; the Box lives in the
             // returned CodecContext (or is dropped right after the context is

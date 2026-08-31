@@ -24,16 +24,22 @@ pub struct InterruptWatch {
 
 impl InterruptWatch {
     pub fn new(active: Arc<AtomicBool>, timeout_us: u64) -> Arc<Self> {
-        Arc::new(Self { active, io_start_us: AtomicU64::new(0), timeout_us })
+        Arc::new(Self {
+            active,
+            io_start_us: AtomicU64::new(0),
+            timeout_us,
+        })
     }
 
     /// Record the start of a blocking call (`av_gettime()`).
     pub fn arm(&self) {
-        self.io_start_us.store(crate::gettime_us() as u64, Ordering::Relaxed);
+        self.io_start_us
+            .store(crate::gettime_us() as u64, Ordering::Relaxed);
     }
 
     pub fn disarm(&self) {
-        self.io_start_us.store(0, core::sync::atomic::Ordering::Relaxed);
+        self.io_start_us
+            .store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// The interrupt decision. Touches only atomics and `av_gettime`, so it is
@@ -84,7 +90,10 @@ impl StreamRef<'_> {
     /// `ptr` must be a live `AVStream` owned by a `FormatContext` that outlives
     /// `'a`.
     unsafe fn new(ptr: *const ffmpeg_sys_next::AVStream) -> Self {
-        Self { ptr, _fmt: core::marker::PhantomData }
+        Self {
+            ptr,
+            _fmt: core::marker::PhantomData,
+        }
     }
 
     pub fn index(&self) -> usize {
@@ -114,14 +123,22 @@ impl StreamRef<'_> {
     /// `codecpar->width/height` (video).
     pub fn dimensions(&self) -> (i32, i32) {
         // SAFETY: as above.
-        unsafe { ((*(*self.ptr).codecpar).width, (*(*self.ptr).codecpar).height) }
+        unsafe {
+            (
+                (*(*self.ptr).codecpar).width,
+                (*(*self.ptr).codecpar).height,
+            )
+        }
     }
 
     /// `codecpar->sample_rate`, `codecpar->ch_layout.nb_channels` (audio).
     pub fn audio_params(&self) -> (i32, i32) {
         // SAFETY: as above.
         unsafe {
-            ((*(*self.ptr).codecpar).sample_rate, (*(*self.ptr).codecpar).ch_layout.nb_channels)
+            (
+                (*(*self.ptr).codecpar).sample_rate,
+                (*(*self.ptr).codecpar).ch_layout.nb_channels,
+            )
         }
     }
 

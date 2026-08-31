@@ -39,7 +39,11 @@ pub fn redacted_input_url(url: &std::ffi::CStr) -> String {
     if p.protocol.is_empty() {
         return "<redacted>".to_owned();
     }
-    let (ob, cb) = if p.hostname.contains(':') { ("[", "]") } else { ("", "") };
+    let (ob, cb) = if p.hostname.contains(':') {
+        ("[", "]")
+    } else {
+        ("", "")
+    };
     match (!p.hostname.is_empty(), p.port >= 0) {
         (true, true) => format!("{}://{}{}{}:{}", p.protocol, ob, p.hostname, cb, p.port),
         (true, false) => format!("{}://{}{}{}", p.protocol, ob, p.hostname, cb),

@@ -57,10 +57,7 @@ impl VideoIntake {
 
         // The frame-level backstop only gates when Wait For Keyframe is on
         // (master 64dcd0f); the first-keyframe bookkeeping runs either way.
-        if !flags.first_keyframe_received
-            && !is_key
-            && shared.hot.wait_for_keyframe.load(Relaxed)
-        {
+        if !flags.first_keyframe_received && !is_key && shared.hot.wait_for_keyframe.load(Relaxed) {
             if shared.conn.total_video_frames.load(Relaxed) == 0 {
                 irl_debug!("Waiting for keyframe (dropped non-keyframe)");
             }

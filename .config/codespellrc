@@ -1,0 +1,9 @@
+[codespell]
+# Vendored trees, build output and lockfiles are not ours to spell-check.
+skip = ./.git,./target,./deps/.build,./build,./dist,Cargo.lock,*.log,*.svg,*.png,*.ico
+
+# Real words here that codespell's dictionary reads as typos:
+#   trough    - the low half of "peak and trough", in the controller simulation
+#   retuned   - the Target Buffer can be re-tuned live
+#   versionms - VersionMS, the Inno Setup / Win32 fixed-file-info field
+ignore-words-list = trough,retuned,versionms
