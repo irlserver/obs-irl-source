@@ -1,4 +1,5 @@
 target/
+build/
 dist/
 deps/.build/
 .cache/
