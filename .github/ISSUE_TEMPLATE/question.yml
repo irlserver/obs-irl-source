@@ -1,0 +1,47 @@
+name: Question / help
+description: "\"How do I…\" or \"is this normal?\""
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the [README](https://github.com/irlserver/obs-irl-source#readme) first —
+        every setting, every stat field, hardware decoding and the plugin's log lines are
+        documented there.
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you ask
+      options:
+        - label: I searched [existing issues](https://github.com/irlserver/obs-irl-source/issues?q=is%3Aissue) (including closed ones) — the same question may already be answered.
+          required: true
+        - label: I read the relevant part of the README (settings table, [Stats reference](https://github.com/irlserver/obs-irl-source#stats-reference), Hardware decoding).
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What you are trying to do, and what is unclear or not behaving the way you expected.
+    validations:
+      required: true
+
+  - type: input
+    id: log-link
+    attributes:
+      label: OBS log (if the question is about your stream's behaviour)
+      description: >
+        In OBS: **Help → Log Files → Upload Current Log File**, then paste the link. The
+        plugin logs a `[irl-source] Stats:` line every 30 seconds, which usually answers
+        "is this normal?" on its own. Your stream URL and key appear in the log — redact
+        them if you would rather not share them.
+      placeholder: https://obsproject.com/logs/...
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      placeholder: |
+        IRL Source 1.5.0, OBS 32.1.1, Windows 11
+        srt://... (key removed), IRL Pro, HEVC 1080p60
