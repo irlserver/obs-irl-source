@@ -10,7 +10,7 @@
 # process. Both properties are invisible in a successful compile and easy to
 # lose to a stray link flag, so they get asserted here instead.
 #
-# Usage: scripts/verify-plugin.sh path/to/obs-irl-source.so
+# Usage: scripts/verify-plugin.sh target/release/libobs_irl_source.so
 
 set -euo pipefail
 
@@ -32,21 +32,17 @@ check() {
 
 echo "verifying ${module}"
 
-# Source-level, and checked on every platform because the failure it prevents
-# only shows up on Windows: librist's contrib/pthread-shim.c defines external
-# pthread_* symbols for MSVC builds, and librist.lib precedes w32-pthreads on
-# the link line. A direct pthread_mutex_init() call therefore runs librist's
-# CRITICAL_SECTION version against a w32-pthreads-sized field and corrupts the
-# struct around it. See include/irl-threading.h.
+# Source-level, checked on every platform: the plugin crates must stay free of
+# unsafe code. Every raw pointer belongs in crates/obs-sys, crates/obs and
+# crates/ffmpeg; the compiler enforces #![forbid(unsafe_code)] where present,
+# this only catches the attribute being deleted.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [[ -d ${repo_root}/src ]]; then
-	stray="$(grep -rn --include='*.c' --include='*.h' -E '\bpthread_[a-z_]+\(' \
-		"${repo_root}/src" "${repo_root}/include" "${repo_root}/third_party" |
-		grep -v '/irl-threading\.h:' || true)"
-	[[ -n ${stray} ]] && r=1 || r=0
-	check ${r} "no direct pthread_* calls outside irl-threading.h"
-	[[ -n ${stray} ]] && echo "${stray}" | sed 's/^/        /'
-fi
+for f in crates/irl-core/src/lib.rs crates/irl-source/src/lib.rs; do
+	if [[ -f ${repo_root}/${f} ]]; then
+		grep -q '^#!\[forbid(unsafe_code)\]' "${repo_root}/${f}" && r=0 || r=1
+		check ${r} "forbid(unsafe_code) present in ${f}"
+	fi
+done
 
 case "$(uname -s)" in
 Linux*)
@@ -64,6 +60,45 @@ Linux*)
 
 	echo "${exports}" | grep -q '^obs_module_load$' && r=0 || r=1
 	check ${r} "obs_module_load exported"
+
+	# libobs is never linked: its symbols stay undefined and resolve
+	# against the host process at dlopen time. Anything else undefined
+	# means a static dependency was dropped from the link line.
+	undef="$(nm -D --undefined-only "${module}" | awk '{print $NF}' | sed 's/@.*//')"
+	echo "${undef}" | grep -vqE '^(obs_[a-z_0-9]+|os_gettime_ns|os_sleep_ms|blog|bfree|calldata_[a-z_]+|proc_handler_[a-z_]+|text_lookup_[a-z_]+|video_format_get_parameters_for_format|__[a-z_A-Z0-9]+|_[A-Z][a-zA-Z_0-9]*|[a-z_][a-zA-Z_0-9]*)$' && r=1 || r=0
+	# libva's own entry points are camelCase (vaInitialize, vaGetImage,
+	# ...) so they need their own alternative; the last one accepts
+	# libc/libm/libstdc++ symbols by shape. The real guard is DT_NEEDED
+	# above plus the loader.
+	check ${r} "undefined symbols are libobs or system libraries"
+
+	# glibc compatibility: the plugin is loaded inside the Flatpak sandbox
+	# (Freedesktop SDK), whose glibc lags the host's. A binary linked against
+	# 26.04's glibc 2.43 stamps GLIBC_2.43 on itself and fails there with
+	# "version `GLIBC_2.43' not found" (see #29). Built on 22.04 it asks for
+	# at most 2.35, which every newer glibc satisfies.
+	#
+	# Only the release build has to honour that ceiling, so it is enforced
+	# where the artifact is produced (CI, or IRL_GLIBC_CEILING=1) and reported
+	# as a warning anywhere else: a local build on a newer distro is fine for
+	# that developer's own OBS, it just must not ship.
+	if command -v readelf >/dev/null 2>&1; then
+		ceiling="GLIBC_2.35"
+		max_glibc="$(readelf -V "${module}" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V | tail -n1 || true)"
+		if [[ -n ${max_glibc} ]]; then
+			highest="$(printf '%s\n%s\n' "${max_glibc}" "${ceiling}" | sort -V | tail -n1)"
+			if [[ ${highest} == "${ceiling}" ]]; then
+				printf '  ok    needs at most %s (flatpak compatible)\n' "${max_glibc}"
+			elif [[ -n ${CI:-} || -n ${IRL_GLIBC_CEILING:-} ]]; then
+				printf '  FAIL  needs %s, above the %s ceiling (built on too new a glibc; flatpak will not load it)\n' \
+					"${max_glibc}" "${ceiling}" >&2
+				fail=1
+			else
+				printf '  warn  needs %s, above the %s ceiling — fine locally, not shippable\n' \
+					"${max_glibc}" "${ceiling}"
+			fi
+		fi
+	fi
 	;;
 
 Darwin*)

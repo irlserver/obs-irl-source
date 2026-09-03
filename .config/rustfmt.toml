@@ -1,0 +1,9 @@
+# Passed explicitly with `--config-path` from the Makefile, so formatting does
+# not depend on a rustfmt.toml further up the tree or on which rustfmt a
+# machine happens to have first on PATH.
+#
+# max_width is rustfmt's own default, restated so it is a decision rather than
+# an accident: the audio and video code carries long explanatory comments, and
+# a wider column encourages statements that need one.
+max_width = 100
+newline_style = "Unix"

@@ -1,0 +1,16 @@
+[package]
+name = "irl-ffmpeg"
+description = "RAII layer over ffmpeg-sys-next for the decode/resample/scale surface obs-irl-source uses"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+links = "irl-deps"
+
+[lib]
+name = "ffmpeg"
+
+[dependencies]
+ffmpeg-sys-next = { workspace = true }

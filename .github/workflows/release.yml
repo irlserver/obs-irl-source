@@ -11,15 +11,15 @@ jobs:
   check-version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Verify tag matches CMake project version
+      - name: Verify tag matches the workspace version
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
-          cmake_version="$(sed -nE 's/^project\(obs-irl-source VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
-          echo "tag: ${tag_version}  CMakeLists.txt: ${cmake_version}"
-          if [ "${tag_version}" != "${cmake_version}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match project(VERSION ${cmake_version}) in CMakeLists.txt. Bump the version, commit, then re-tag."
+          cargo_version="$(sed -nE '/^\[workspace\.package\]/,/^\[[^w]/ s/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)"
+          echo "tag: ${tag_version}  Cargo.toml: ${cargo_version}"
+          if [ "${tag_version}" != "${cargo_version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match version = \"${cargo_version}\" in Cargo.toml. Bump the version, commit, then re-tag."
             exit 1
           fi
 
@@ -46,62 +46,25 @@ jobs:
       # Package layouts mirror where each platform expects plugins, so a
       # release archive is extracted straight into place with no renaming.
       # One archive per platform: the plugin bundles its own FFmpeg, so there
-      # is no longer a per-OBS-line artifact to disambiguate.
+      # is no longer a per-OBS-line artifact to disambiguate. The layouts and
+      # the cargo-name-to-OBS-name rename live in scripts/package.sh, which is
+      # also what a maintainer runs to reproduce an archive locally.
       - name: Package
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          mkdir -p dist
 
-          # The locale file is not optional packaging: obs_module_text() falls
-          # back to the lookup key, so a build shipped without it renders the
-          # properties dialog as bare identifiers. THIRD_PARTY_NOTICES.md
-          # travels with the binary because the bundled stack includes LGPL
-          # FFmpeg, which wants its notices conveyed alongside the object code.
-          docs() {
-            cp data/locale/en-US.ini "$1/locale/"
-            cp LICENSE THIRD_PARTY_NOTICES.md "$1/"
-          }
+          scripts/package.sh linux  artifacts/obs-irl-source-linux-x64   dist "${version}"
+          scripts/package.sh windows artifacts/obs-irl-source-windows-x64 dist "${version}"
+          scripts/package.sh macos  artifacts/obs-irl-source-macos-arm64 dist "${version}"
+          scripts/package.sh deb    artifacts/obs-irl-source-linux-x64   dist "${version}"
 
-          # Linux: extract into ~/.config/obs-studio/plugins/
-          staging="$(mktemp -d)"
-          mkdir -p "${staging}/obs-irl-source/bin/64bit" \
-                   "${staging}/obs-irl-source/data/locale"
-          cp artifacts/obs-irl-source-linux-x64/obs-irl-source.so \
-            "${staging}/obs-irl-source/bin/64bit/"
-          docs "${staging}/obs-irl-source/data"
-          tar -C "${staging}" -czf "dist/obs-irl-source-${version}-linux-x64.tar.gz" obs-irl-source
-          rm -rf "${staging}"
-
-          # Windows: extract into the OBS Studio install folder
-          # (the DLLs land in obs-plugins\64bit)
-          staging="$(mktemp -d)"
-          mkdir -p "${staging}/obs-plugins/64bit" \
-                   "${staging}/data/obs-plugins/obs-irl-source/locale"
-          cp artifacts/obs-irl-source-windows-x64/*.dll "${staging}/obs-plugins/64bit/"
-          docs "${staging}/data/obs-plugins/obs-irl-source"
-          (cd "${staging}" && zip -r \
-            "${GITHUB_WORKSPACE}/dist/obs-irl-source-${version}-windows-x64.zip" \
-            obs-plugins data)
-          rm -rf "${staging}"
-
-          # macOS: extract into ~/Library/Application Support/obs-studio/plugins/.
-          # OBS on macOS only scans .plugin bundles — its module path is
-          # %module%.plugin/Contents/MacOS with an extensionless binary — so
-          # this must be a bundle, not the Linux-style bin/ directory.
-          staging="$(mktemp -d)"
-          mkdir -p "${staging}/obs-irl-source.plugin/Contents/MacOS" \
-                   "${staging}/obs-irl-source.plugin/Contents/Resources/locale"
-          cp artifacts/obs-irl-source-macos-arm64/obs-irl-source.so \
-            "${staging}/obs-irl-source.plugin/Contents/MacOS/obs-irl-source"
-          sed "s/@PLUGIN_VERSION@/${version}/g" cmake/macos/Info.plist.in \
-            > "${staging}/obs-irl-source.plugin/Contents/Info.plist"
-          # obs_module_file() resolves to Contents/Resources inside a bundle.
-          docs "${staging}/obs-irl-source.plugin/Contents/Resources"
-          (cd "${staging}" && zip -r \
-            "${GITHUB_WORKSPACE}/dist/obs-irl-source-${version}-macos-arm64.zip" \
-            obs-irl-source.plugin)
-          rm -rf "${staging}"
+          # Full source of the tagged tree. The bundled stack statically
+          # links LGPL FFmpeg; shipping the corresponding source alongside
+          # the binaries keeps the obligation self-contained in the release.
+          git archive --format=tar.gz \
+            --prefix="obs-irl-source-${version}/" \
+            -o "dist/obs-irl-source-${version}-source.tar.gz" HEAD
 
           # Windows installer, built by the Windows job in build.yml. Same
           # payload as the zip above, for people who would rather not hand-copy

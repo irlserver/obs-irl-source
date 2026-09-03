@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned stable. Bump deliberately; the plugin must never depend on nightly.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

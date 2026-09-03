@@ -582,6 +582,111 @@ build_ffmpeg() {
 		fi
 	fi
 
+	# VAAPI vaMapBuffer2: FFmpeg 9.0 calls vaMapBuffer2 when the libva headers
+	# report VA 1.21+ (libva 2.21+) and plain vaMapBuffer below that. The Linux
+	# artifact is built on ubuntu-22.04 for glibc 2.35 (Flatpak, #29) and 22.04
+	# ships libva 2.14, so a stock build there loses the read/write mapping hint
+	# everywhere it runs — including inside the Flatpak runtime, whose libva does
+	# have vaMapBuffer2. libva is linked dynamically while this FFmpeg is static,
+	# so the call can be recovered at runtime: probe vaMapBuffer2 with dlsym and
+	# fall back to vaMapBuffer when it is absent. One binary, fast path wherever
+	# the loaded libva offers it.
+	#
+	# extract() leaves an existing source tree alone, so the file is restored
+	# from the tarball first: patching is then always a pristine-in, patched-out
+	# transform and needs no idempotence of its own.
+	if [[ ${host} == linux ]]; then
+		local vaapi_rel="libavutil/hwcontext_vaapi.c"
+		if [[ -f ${ff}/${vaapi_rel} ]]; then
+			tar -xf "${downloads}/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+				-C "${ff}" --strip-components=1 \
+				"ffmpeg-${FFMPEG_VERSION}/${vaapi_rel}"
+			python3 - "${ff}/${vaapi_rel}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+
+# `uint32_t vaflags` is declared under the same version guard as the call.
+# Make it unconditional so the runtime probe can always use it.
+decl_old = """#if VA_CHECK_VERSION(1, 21, 0)
+    uint32_t vaflags = 0;
+#endif
+"""
+decl_new = """    uint32_t vaflags = 0;
+"""
+
+call_old = """#if VA_CHECK_VERSION(1, 21, 0)
+    if (flags & AV_HWFRAME_MAP_READ)
+        vaflags |= VA_MAPBUFFER_FLAG_READ;
+    if (flags & AV_HWFRAME_MAP_WRITE)
+        vaflags |= VA_MAPBUFFER_FLAG_WRITE;
+    // On drivers not implementing vaMapBuffer2 libva calls vaMapBuffer instead.
+    vas = vaMapBuffer2(hwctx->display, map->image.buf, &address, vaflags);
+#else
+    vas = vaMapBuffer(hwctx->display, map->image.buf, &address);
+#endif
+"""
+# Values match libva's va.h; redefined only so the build headers need not
+# declare them. The signature is libva's: the flags argument is uint32_t.
+call_new = """    /* IRL_VAAPI_RUNTIME_WEAK: libva is dynamic while this FFmpeg is static,
+     * so vaMapBuffer2 is recoverable at runtime even when the build headers
+     * (libva 2.14 on ubuntu-22.04) do not declare it. */
+#ifndef VA_MAPBUFFER_FLAG_READ
+#define VA_MAPBUFFER_FLAG_READ  1
+#endif
+#ifndef VA_MAPBUFFER_FLAG_WRITE
+#define VA_MAPBUFFER_FLAG_WRITE 2
+#endif
+    {
+        typedef VAStatus (*irl_map_buffer2)(VADisplay, VABufferID, void **, uint32_t);
+        static irl_map_buffer2 map2;
+        static int map2_probed;
+
+        if (!map2_probed) {
+            map2_probed = 1;
+            map2 = (irl_map_buffer2)dlsym(RTLD_DEFAULT, "vaMapBuffer2");
+        }
+
+        if (map2) {
+            if (flags & AV_HWFRAME_MAP_READ)
+                vaflags |= VA_MAPBUFFER_FLAG_READ;
+            if (flags & AV_HWFRAME_MAP_WRITE)
+                vaflags |= VA_MAPBUFFER_FLAG_WRITE;
+            vas = map2(hwctx->display, map->image.buf, &address, vaflags);
+        } else {
+            vas = vaMapBuffer(hwctx->display, map->image.buf, &address);
+        }
+    }
+"""
+
+for name, old in (("vaflags declaration", decl_old), ("vaMapBuffer2 call", call_old)):
+    if text.count(old) != 1:
+        print(f"VAAPI patch: {name} anchor not found exactly once; check whether "
+              f"it still looks this way upstream", file=sys.stderr)
+        sys.exit(1)
+
+text = text.replace(decl_old, decl_new).replace(call_old, call_new)
+
+# RTLD_DEFAULT is a GNU extension, so _GNU_SOURCE must be defined before any
+# system header — hence the top of the file, ahead of dlfcn.h.
+text = ("""#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <dlfcn.h>
+""" + text)
+
+path.write_text(text)
+print("patched VAAPI to runtime-weak vaMapBuffer2")
+PY
+			if ! grep -q 'IRL_VAAPI_RUNTIME_WEAK' "${ff}/${vaapi_rel}"; then
+				echo "failed to patch runtime-weak vaMapBuffer2 into ${ff}/${vaapi_rel}" >&2
+				exit 1
+			fi
+		fi
+	fi
+
 	local args=(
 		--prefix="${prefix}"
 		--disable-shared
@@ -634,6 +739,8 @@ build_ffmpeg() {
 			echo "Set IRL_DEPS_DISABLE_VAAPI=1 to build without hardware decode on Intel/AMD." >&2
 			exit 1
 		fi
+		# Runtime-weak vaMapBuffer2 (see patch above) needs dlsym -> -ldl.
+		args+=(--extra-libs=-ldl)
 		;;
 	macos)
 		args+=(
@@ -853,6 +960,16 @@ emit_cmake() {
 	if [[ ${#deduped[@]} -gt 0 ]]; then
 		system=("${deduped[@]}")
 	fi
+	# Runtime-weak vaMapBuffer2 uses dlsym -> -ldl on Linux. FFmpeg's
+	# --extra-libs=-ldl should surface via pkg-config, but if it doesn't
+	# (static libs built before the patch, or pc files without Libs.private)
+	# ensure -ldl is still on the link line so the final cdylib resolves
+	# dlsym. Harmless if already present.
+	if [[ ${host} == linux ]]; then
+		if [[ ! " ${system[*]:-} " == *" -ldl "* ]]; then
+			system+=("-ldl")
+		fi
+	fi
 
 	{
 		echo "# Generated by deps/build-deps.sh — do not edit."
@@ -871,6 +988,69 @@ emit_cmake() {
 			printf '    "%s"\n' "${system[@]}"
 		fi
 		printf ')\n'
+	} >"${out}"
+
+	echo "wrote ${out}"
+	cat "${out}"
+	emit_env
+}
+
+# ── Generated environment file for the Rust build ───────────────────────────
+#
+# crates/ffmpeg/build.rs replays this. ffmpeg-sys-next links the five libav*
+# archives itself (FFMPEG_DIR), so this lists only what they depend on: our
+# own transitive static libraries as bare names in single-pass link order,
+# system libraries as bare names, and macOS frameworks. Plain KEY=value,
+# ';'-separated lists, absolute native paths, no quoting.
+emit_env() {
+	local out="${prefix}/irl-deps.env"
+	local libdir="${native_prefix}/lib"
+
+	local transitive_libs=() transitive_paths=() system_libs=() frameworks=()
+	local p base name
+	for p in "${own[@]}"; do
+		base="$(basename "${p}")"
+		name="${base%.*}"
+		name="${name#lib}"
+		name="${name%_static}"
+		case "${name}" in
+		avformat | avcodec | swscale | swresample | avutil) continue ;;
+		esac
+		transitive_libs+=("${name}")
+		transitive_paths+=("${p}")
+	done
+
+	local tok
+	for tok in "${system[@]:-}"; do
+		[[ -z ${tok} ]] && continue
+		case "${tok}" in
+		-Wl,-framework,*) frameworks+=("${tok#-Wl,-framework,}") ;;
+		-pthread | -lpthread) ;; # Rust's std links pthread already
+		-l*) system_libs+=("${tok#-l}") ;;
+		*.lib) system_libs+=("${tok%.lib}") ;;
+		*) ;; # other linker flags are CMake-only
+		esac
+	done
+
+	join() {
+		local IFS=';'
+		echo "$*"
+	}
+
+	{
+		echo "# Generated by deps/build-deps.sh — do not edit."
+		echo "IRL_DEPS_HOST=${host}"
+		echo "IRL_DEPS_PREFIX=${native_prefix}"
+		echo "IRL_DEPS_INCLUDE_DIR=${native_prefix}/include"
+		echo "IRL_DEPS_LIBDIR=${libdir}"
+		echo "IRL_DEPS_FFMPEG_VERSION=${FFMPEG_VERSION}"
+		echo "IRL_DEPS_SRT_VERSION=${SRT_VERSION}"
+		echo "IRL_DEPS_LIBRIST_VERSION=${LIBRIST_VERSION}"
+		echo "IRL_DEPS_MBEDTLS_VERSION=${MBEDTLS_VERSION}"
+		echo "IRL_DEPS_TRANSITIVE_LIBS=$(join "${transitive_libs[@]:-}")"
+		echo "IRL_DEPS_TRANSITIVE_PATHS=$(join "${transitive_paths[@]:-}")"
+		echo "IRL_DEPS_SYSTEM_LIBS=$(join "${system_libs[@]:-}")"
+		echo "IRL_DEPS_FRAMEWORKS=$(join "${frameworks[@]:-}")"
 	} >"${out}"
 
 	echo "wrote ${out}"

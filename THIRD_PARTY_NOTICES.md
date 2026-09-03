@@ -98,7 +98,49 @@ the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 ```
 
+## Rust crates
+
+The plugin is written in Rust; the crates below are compiled into the binary.
+Exact versions are pinned in `Cargo.lock`, and each crate's full license text
+ships in its own source package on <https://crates.io/>.
+
+### ffmpeg-sys-next — WTFPL
+
+<https://github.com/zmwangx/rust-ffmpeg-sys>
+
+Generates the raw FFmpeg bindings from the headers of the bundled stack. It
+contains no FFmpeg code of its own; the FFmpeg notice above covers the linked
+libraries.
+
+License text: <http://www.wtfpl.net/txt/copying/>
+
+### parking_lot (and parking_lot_core, lock_api) — MIT OR Apache-2.0
+
+<https://github.com/Amanieu/parking_lot>
+
+The mutexes and condition variables the plugin's three worker threads
+synchronise on. Used under either license at the recipient's option.
+
+License texts: <https://opensource.org/licenses/MIT> ·
+<https://www.apache.org/licenses/LICENSE-2.0>
+
+### The Rust standard library — MIT OR Apache-2.0
+
+<https://github.com/rust-lang/rust>
+
+Statically linked, as it is into every Rust binary.
+
 ## Build-time only
+
+### bindgen — BSD-3-Clause
+
+<https://github.com/rust-lang/rust-bindgen>
+
+Run by `ffmpeg-sys-next` (and by the `obs-sys` layout test) to translate C
+headers into Rust declarations. It runs during the build; no bindgen code is
+linked into the plugin.
+
+License text: <https://opensource.org/licenses/BSD-3-Clause>
 
 ### nv-codec-headers — MIT
 
@@ -108,21 +150,17 @@ Headers only. FFmpeg loads `nvcuda`/`nvcuvid` at runtime, so these add no
 build-time or load-time dependency on a CUDA installation and no code from them
 is linked into the plugin.
 
-### w32-pthreads — Apache-2.0 (Windows builds only)
+## Reimplemented interfaces
 
-Ships with OBS Studio (<https://github.com/obsproject/obs-studio>). libobs
-headers declare against it, so the Windows build carries the import. The
-plugin's own threading uses the Win32 primitives in `include/irl-threading.h`.
-
-## Vendored source
-
-### obs-websocket-api.h — GPL-2.0-or-later
+### obs-websocket vendor API
 
 <https://github.com/obsproject/obs-websocket>
 
-A verbatim copy lives in `third_party/`; see `third_party/README.md` for
-provenance. It is a header-only client API. Nothing links against obs-websocket,
-and the vendor extension degrades to a log line when it is absent.
+obs-websocket publishes its vendor API as a header of `static inline` helpers
+over libobs's global proc handler. No copy of that header is distributed here:
+`crates/obs/src/websocket.rs` performs the same proc-handler calls directly.
+Nothing links against obs-websocket, and the vendor extension degrades to a log
+line when it is absent.
 
 ## Interfaces
 
@@ -130,5 +168,7 @@ and the vendor extension degrades to a log line when it is absent.
 
 <https://github.com/obsproject/obs-studio>
 
-Dynamically linked against the host OBS Studio installation, which supplies it.
-It is not redistributed here.
+Not linked and not redistributed. The plugin declares the libobs functions it
+uses (`crates/obs-sys`) and the symbols are resolved against the host OBS
+Studio process when the module is loaded — `raw-dylib` imports from `obs.dll`
+on Windows, undefined symbols elsewhere.

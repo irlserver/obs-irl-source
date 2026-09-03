@@ -1,0 +1,3 @@
+# Keep the FFI crates honest about where unsafe lives; irl-core and irl-source
+# carry #![forbid(unsafe_code)] and this file only tunes the remaining lints.
+avoid-breaking-exported-api = false

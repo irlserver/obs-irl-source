@@ -1,0 +1,12 @@
+[package]
+name = "obs"
+description = "Safe, plugin-agnostic libobs API for writing OBS sources in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+obs-sys = { workspace = true }

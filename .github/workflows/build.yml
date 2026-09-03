@@ -7,56 +7,148 @@ on:
   workflow_dispatch:
   workflow_call:
 
-# The plugin bundles its own static FFmpeg/libsrt, so the only remaining tie to
-# a specific OBS release is libobs itself. libobs gates a module on
-# (major, minor) <= host version and looks up nothing but obs_module_*, so
-# building against the OLDEST supported line produces one artifact that loads
-# on that line and every newer one. That is why there is no per-OBS-line matrix
-# here any more.
+# The plugin bundles its own static FFmpeg/libsrt and binds to libobs only
+# through hand-written FFI (raw-dylib on Windows, undefined symbols elsewhere),
+# so nothing here builds libobs any more. libobs gates a module on
+# (major, minor) <= host version and looks up nothing but obs_module_*, so one
+# artifact per platform loads on the floor below and every newer release.
 env:
+  # Documentation of that floor; it is mirrored by the api_version in
+  # declare_module! (crates/irl-source/src/lib.rs). Raise both only to drop
+  # support for older OBS releases, never to chase a newer one.
   OBS_VERSION: "32.1.2"
-  OBS_DEPS_VERSION: "2025-08-23"
+  CARGO_TERM_COLOR: always
 
 jobs:
   linux-x64:
-    runs-on: ubuntu-26.04
+    # Built on 22.04 for glibc compatibility: the plugin is a cdylib loaded
+    # into OBS, including the Flatpak sandbox (Freedesktop SDK 25.08). A
+    # binary linked against 26.04's glibc 2.43 fails there with
+    # "version `GLIBC_2.43' not found" (see #29). 22.04's glibc 2.35 runs on
+    # every newer glibc, so one artifact covers system OBS and Flatpak.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
+      # clang/libclang is a build dependency now: ffmpeg-sys-next runs bindgen
+      # over the bundled FFmpeg headers, and obs-sys does the same for its
+      # layout test.
       - name: Install dependencies
         run: |
+          # 22.04's distro libobs-dev is 27.x, which predates
+          # video_format_get_parameters_for_format (30.x), so the
+          # video_pipeline test would fail against it at runtime. The OBS
+          # PPA carries 30.2.3 for jammy and its obs-studio package ships
+          # libobs.so plus the headers, which is all `-lobs` needs; every
+          # libobs symbol obs-sys declares is present in 30.2.3. Building
+          # libobs from source is not an option here: 32.x wants cmake 3.28
+          # and FFmpeg 6, and jammy has 3.22 and 4.4.
+          sudo add-apt-repository -y ppa:obsproject/obs-studio
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config nasm meson ninja-build \
-            libobs-dev libva-dev
+            clang libclang-dev libva-dev curl obs-studio libsimde-dev
+
+          # layout-test pins the hand-written structs to the OBS floor the
+          # plugin declares, not to whichever libobs this runner happens to
+          # link against, so it reads the OBS_VERSION source headers. Two
+          # things a source tree lacks that bindgen still needs: obsconfig.h,
+          # which OBS's cmake generates and obs-config.h includes
+          # unconditionally (the five defines below are all a header-only
+          # parse wants from it), and SIMDe, which libobs/util/sse-intrin.h
+          # includes as <simde/x86/sse2.h> and OBS does not vendor — hence
+          # libsimde-dev above.
+          curl -fsSL "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VERSION}.tar.gz" -o /tmp/obs.tar.gz
+          tar -xf /tmp/obs.tar.gz -C /tmp
+          OBS_HEADERS="/tmp/obs-studio-${OBS_VERSION}/libobs"
+          printf '%s\n' \
+            '#pragma once' \
+            '#define OBS_DATA_PATH "share/obs"' \
+            '#define OBS_PLUGIN_PATH "lib/x86_64-linux-gnu/obs-plugins"' \
+            '#define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"' \
+            '#define OBS_RELEASE_CANDIDATE 0' \
+            '#define OBS_BETA 0' > "${OBS_HEADERS}/obsconfig.h"
+          echo "OBS_INCLUDE_DIR=${OBS_HEADERS}" >> "$GITHUB_ENV"
+
+          echo "--- glibc ---"
+          ldd --version | head -n1
+          echo "--- libobs ---"
+          dpkg-query -W -f='obs-studio ${Version}\n' obs-studio
+          nm -D /usr/lib/x86_64-linux-gnu/libobs.so \
+            | grep -q video_format_get_parameters_for_format \
+            || { echo "libobs is too old: no video_format_get_parameters_for_format" >&2; exit 1; }
+          echo "--- OBS ${OBS_VERSION} headers for layout-test ---"
+          test -f "${OBS_HEADERS}/obs.h" || { echo "obs.h missing" >&2; exit 1; }
+
+      # rust-toolchain.toml pins the channel; this materialises it before the
+      # cache action inspects it.
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Bust the cargo target cache when the bundled FFmpeg changes.
+          # Swatinem's key is Cargo.lock + rust version, so a rebuilt
+          # libavutil.a (e.g. after the vaMapBuffer2 dlsym patch) would
+          # otherwise be shadowed by a restored libffmpeg_sys_next.rlib
+          # built from the old libavutil.a (see PR #20).
+          shared-key: linux-deps-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
 
       # Only the install prefix is cached. The source and object trees are an
       # order of magnitude larger and the build-marker files live inside the
       # prefix, so a restored prefix alone is enough to skip every dep build.
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
-          key: irl-deps-linux-x64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
+          # Key includes the runner glibc (22.04's 2.35). The previous 26.04
+          # prefix cached static libs that reference glibc 2.38+ fortified
+          # symbols (__isoc23_*) and libva 2.20 vaMapBuffer2, which fail to
+          # link on 22.04 (see PR #20 linux-x64 Test failure).
+          key: irl-deps-linux-x64-22.04-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
 
       - name: Build bundled deps
         run: ./deps/build-deps.sh
 
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Bust cargo cache for rebuilt FFmpeg
+        run: cargo clean -p ffmpeg-sys-next -p irl-ffmpeg || true
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cargo build --release --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Formatting and spelling are checked once, on Linux: they are
+      # platform-independent, so running them per platform only buys three
+      # copies of the same failure. `make style` fixes both locally.
+      - name: Format check
+        run: make style-check
+
+      - name: Spell check
+        run: |
+          pipx install codespell
+          make spell-check
+
+      # libobs is installed here (OBS PPA, see above), so the test binaries
+      # that touch libobs symbols (obs, irl-source) link and run on this
+      # runner only.
+      - name: Test
+        run: cargo test --workspace
+
+      # Asserts the hand-written obs-sys structs against the real headers.
+      - name: Test obs-sys layout against libobs headers
+        run: cargo test -p obs-sys --features layout-test
 
       - name: Verify isolation
-        run: ./scripts/verify-plugin.sh build/obs-irl-source.so
+        run: ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: obs-irl-source-linux-x64
-          path: build/obs-irl-source.so
+          path: target/release/libobs_irl_source.so
 
   windows-x64:
     runs-on: windows-2025-vs2026
@@ -64,9 +156,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        # msvc-dev-cmd has no Node 24 release yet (upstream ilammy/msvc-dev-cmd#105);
+        # run its node20 bundle on the node24 runtime. This restates the
+        # deprecation annotation ("forced to run on Node.js 24") rather than
+        # silencing it — the point is to exercise the runtime that survives the
+        # retirement, so a break surfaces now instead of when Node 20 is removed.
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       # librist builds with meson. It has to be the Windows-native meson (so it
       # detects cl.exe rather than looking for a POSIX toolchain), which
@@ -85,9 +182,26 @@ jobs:
           update: false
           install: make nasm diffutils pkgconf
 
+      # bindgen needs libclang. The runner image ships LLVM, but pin it
+      # explicitly so a change of image cannot silently break the build.
+      - name: Install LLVM
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:ProgramFiles\LLVM\bin\libclang.dll")) {
+            choco install llvm -y --no-progress
+          }
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: rustup show active-toolchain; if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
           key: irl-deps-windows-x64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
@@ -96,96 +210,25 @@ jobs:
         shell: msys2 {0}
         run: ./deps/build-deps.sh
 
-      - name: Cache OBS build
-        id: cache-obs
-        uses: actions/cache@v4
-        with:
-          path: |
-            obs-src
-            obs-deps
-          key: obs-build-${{ env.OBS_VERSION }}-${{ env.OBS_DEPS_VERSION }}-v3
-
-      # obs-deps is still needed here, but only to build libobs itself. The
-      # plugin no longer links its FFmpeg.
-      - name: Download OBS dependencies
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/obsproject/obs-deps/releases/download/${{ env.OBS_DEPS_VERSION }}/windows-deps-${{ env.OBS_DEPS_VERSION }}-x64.zip" `
-            -OutFile obs-deps.zip
-          Expand-Archive obs-deps.zip -DestinationPath obs-deps
-
-      - name: Clone OBS source
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: git clone --depth 1 --branch ${{ env.OBS_VERSION }} https://github.com/obsproject/obs-studio.git obs-src
-
-      - name: Patch OBS to build only libobs
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          # Keep only libobs + w32-pthreads, remove all other subdirectories
-          # (plugins, frontend, renderers, tests)
-          $lines = Get-Content obs-src/CMakeLists.txt
-          $output = @()
-          $done = $false
-          foreach ($line in $lines) {
-            if ($done) { continue }
-            if ($line -match '^\s*add_subdirectory\(libobs\)\s*$') {
-              $output += 'add_subdirectory(deps/w32-pthreads)'
-              $output += $line
-              $done = $true
-            } else {
-              $output += $line
-            }
-          }
-          $output | Set-Content obs-src/CMakeLists.txt
-
-          # Disable automatic dependency download (we provide deps via CMAKE_PREFIX_PATH)
-          (Get-Content obs-src/cmake/windows/defaults.cmake) `
-            -replace '^include\(buildspec\)', '# include(buildspec)' |
-            Set-Content obs-src/cmake/windows/defaults.cmake
-
-          # Skip multi-architecture subprocess builds (OBS normally launches
-          # a child cmake for x86 which would fail in our stripped-down tree)
-          @"
-          include_guard(GLOBAL)
-          include(compilerconfig)
-          if(NOT DEFINED OBS_PARENT_ARCHITECTURE)
-            set(OBS_PARENT_ARCHITECTURE `${CMAKE_VS_PLATFORM_NAME})
-          endif()
-          "@ | Set-Content obs-src/cmake/windows/architecture.cmake
-
-      - name: Configure OBS
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        shell: cmd
-        run: >
-          cmake -S obs-src -B obs-src/build
-          -G "Visual Studio 18 2026" -A x64
-          -DCMAKE_PREFIX_PATH=%CD%\obs-deps
-          -DENABLE_UI=OFF
-          -DENABLE_PLUGINS=OFF
-
-      - name: Build OBS (libobs only)
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        shell: cmd
-        run: cmake --build obs-src/build --config Release --target libobs --target w32-pthreads
-
-      - name: Configure
-        shell: cmd
-        run: >
-          cmake -B build
-          -G "Visual Studio 18 2026" -A x64
-          -DOBS_SOURCE_DIR=%CD%\obs-src
-
       - name: Build
         shell: cmd
-        run: cmake --build build --config RelWithDebInfo --parallel
+        run: cargo build --release --workspace
+
+      - name: Clippy
+        shell: cmd
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Only the FFI-free crates: a test binary that references a libobs
+      # symbol imports obs.dll, and there is no OBS installed on this runner
+      # for it to load against. The libobs-touching tests run on Linux.
+      - name: Test
+        shell: cmd
+        run: cargo test -p irl-core -p irl-ffmpeg
 
       - name: Verify isolation
         shell: pwsh
         run: |
-          $dll = "build/RelWithDebInfo/obs-irl-source.dll"
+          $dll = "target/release/obs_irl_source.dll"
           $deps = (dumpbin /dependents $dll) -join "`n"
           $exports = (dumpbin /exports $dll) -join "`n"
 
@@ -194,6 +237,13 @@ jobs:
             Write-Host "  FAIL  plugin still imports a host FFmpeg DLL"; $fail = $true
           } else {
             Write-Host "  ok    no FFmpeg DLL imports (host FFmpeg not required)"
+          }
+          # raw-dylib generates the obs.dll import table entry at link time;
+          # if it is missing, the plugin resolved libobs some other way.
+          if ($deps -match '(?i)\bobs\.dll\b') {
+            Write-Host "  ok    imports obs.dll (raw-dylib binding to libobs)"
+          } else {
+            Write-Host "  FAIL  obs.dll not imported"; $fail = $true
           }
           if ($exports -match '\bav_|\bavcodec_|\bsrt_|\bmbedtls_') {
             Write-Host "  FAIL  bundled stack symbols are exported"; $fail = $true
@@ -207,49 +257,37 @@ jobs:
           }
           if ($fail) { Write-Host $deps; Write-Host $exports; exit 1 }
 
-      - name: Collect runtime dependencies
-        shell: pwsh
-        run: |
-          # Copy w32-pthreads.dll next to the plugin
-          $w32dll = Get-ChildItem -Path obs-src/build/deps/w32-pthreads -Filter "w32-pthreads.dll" -Recurse | Select-Object -First 1
-          if ($w32dll) {
-            Copy-Item $w32dll.FullName build/RelWithDebInfo/
-          }
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-irl-source-windows-x64
           path: |
-            build/RelWithDebInfo/obs-irl-source.dll
-            build/RelWithDebInfo/w32-pthreads.dll
+            target/release/obs_irl_source.dll
             # PDB ships in the CI artifact (not the release zip) so a crash
-            # log resolves obs-irl-source.dll frames to function names.
-            # OBS's crash handler reads it if it sits next to the DLL.
-            build/RelWithDebInfo/obs-irl-source.pdb
+            # log resolves plugin frames to function names. OBS's crash
+            # handler reads it if it sits next to the DLL. It keeps its cargo
+            # name; only the DLL is renamed when packaging.
+            target/release/obs_irl_source.pdb
 
       # Built on every push rather than only in the release workflow, so a
       # syntax error in the .iss fails a normal build instead of a tag. The
-      # version comes from CMakeLists.txt, which the release workflow already
+      # version comes from Cargo.toml, which the release workflow already
       # verifies against the tag before it gets here.
       - name: Build installer
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $match = Select-String -Path CMakeLists.txt `
-            -Pattern 'project\(obs-irl-source VERSION ([0-9]+\.[0-9]+\.[0-9]+)' |
+          $match = Select-String -Path Cargo.toml `
+            -Pattern '^version = "([0-9]+\.[0-9]+\.[0-9]+)"' |
             Select-Object -First 1
-          if (-not $match) { throw 'Could not read the version from CMakeLists.txt' }
+          if (-not $match) { throw 'Could not read the version from Cargo.toml' }
           $version = $match.Matches[0].Groups[1].Value
 
           # Staged in the release zip's layout so the .iss has one file list
           # describing both.
           New-Item -ItemType Directory -Force -Path dist\windows\obs-plugins\64bit | Out-Null
-          Copy-Item build\RelWithDebInfo\obs-irl-source.dll dist\windows\obs-plugins\64bit\
-          if (Test-Path build\RelWithDebInfo\w32-pthreads.dll) {
-            Copy-Item build\RelWithDebInfo\w32-pthreads.dll dist\windows\obs-plugins\64bit\
-          }
+          Copy-Item target\release\obs_irl_source.dll dist\windows\obs-plugins\64bit\obs-irl-source.dll
 
           $candidates = @(
             "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
@@ -267,7 +305,7 @@ jobs:
           Get-ChildItem dist\*.exe
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-windows-installer
           path: dist/*.exe
@@ -276,18 +314,28 @@ jobs:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
+      # bindgen's libclang: the Xcode toolchain's, so it matches the SDK the
+      # rest of the build uses.
+      LIBCLANG_PATH: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # ffmpeg is intentionally NOT installed from Homebrew. The plugin links
       # the bundled static stack instead, which is what removes its dependency
-      # on whatever FFmpeg the host OBS ships.
+      # on whatever FFmpeg the host OBS ships. libobs itself is no longer
+      # built here, so its build-time headers (simde, uthash, jansson) are
+      # gone too.
       - name: Install build tools
-        run: brew install cmake pkg-config nasm meson ninja simde uthash jansson
+        run: brew install cmake pkg-config nasm meson ninja
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Cache bundled deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps/.build/prefix
           key: irl-deps-macos-arm64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
@@ -295,76 +343,22 @@ jobs:
       - name: Build bundled deps
         run: ./deps/build-deps.sh
 
-      - name: Cache OBS build
-        id: cache-obs
-        uses: actions/cache@v4
-        with:
-          path: |
-            obs-src
-            obs-deps
-          key: obs-macos-arm64-${{ env.OBS_VERSION }}-${{ env.OBS_DEPS_VERSION }}-v3
-
-      - name: Download OBS dependencies
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: |
-          curl -L -o macos-deps.tar.xz \
-            "https://github.com/obsproject/obs-deps/releases/download/${{ env.OBS_DEPS_VERSION }}/macos-deps-${{ env.OBS_DEPS_VERSION }}-arm64.tar.xz"
-          mkdir -p obs-deps
-          tar -xf macos-deps.tar.xz -C obs-deps
-
-      - name: Clone OBS source
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: git clone --depth 1 --branch ${{ env.OBS_VERSION }} https://github.com/obsproject/obs-studio.git obs-src
-
-      - name: Patch OBS to build only libobs
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: |
-          # Truncate CMakeLists.txt after add_subdirectory(libobs)
-          sed -i '' '/^add_subdirectory(libobs)/q' obs-src/CMakeLists.txt
-
-          # Disable automatic dependency download
-          sed -i '' 's/^include(buildspec)/# include(buildspec)/' obs-src/cmake/macos/defaults.cmake
-
-          # Allow Homebrew paths (OBS blocks them by default)
-          sed -i '' '/CMAKE_IGNORE_PREFIX_PATH/d' obs-src/cmake/macos/defaults.cmake
-
-          # Relax OBS's SDK/Xcode floor. OBS gates the whole app on a very
-          # recent SDK, but we only build libobs with the UI off, which
-          # compiles on the runner's SDK.
-          sed -i '' -E 's/set\(obs_macos_minimum_sdk [0-9.]+\)/set(obs_macos_minimum_sdk 1.0)/' obs-src/cmake/macos/compilerconfig.cmake
-          sed -i '' -E 's/set\(obs_macos_minimum_xcode [0-9.]+\)/set(obs_macos_minimum_xcode 1.0)/' obs-src/cmake/macos/compilerconfig.cmake
-
-      - name: Configure OBS
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: >
-          cmake -S obs-src -B obs-src/build
-          -G Xcode
-          -DENABLE_UI=OFF
-          -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
-          -DCMAKE_PREFIX_PATH="$PWD/obs-deps;$(brew --prefix)"
-
-      - name: Build OBS (libobs only)
-        if: steps.cache-obs.outputs.cache-hit != 'true'
-        run: cmake --build obs-src/build --config Release --target libobs --parallel
-
-      # PkgConfig is disabled so a stray Homebrew or obs-deps FFmpeg .pc cannot
-      # shadow the bundled headers.
-      - name: Configure
-        run: >
-          cmake -B build
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DOBS_SOURCE_DIR=$PWD/obs-src
-          -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON
-          -DCMAKE_C_FLAGS="-I$(brew --prefix)/include"
-
       - name: Build
-        run: cmake --build build --parallel
+        run: cargo build --release --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # As on Windows: the libobs-touching test binaries need a libobs to
+      # resolve against at load time, and there is none on this runner.
+      - name: Test
+        run: cargo test -p irl-core -p irl-ffmpeg
 
       - name: Verify isolation
-        run: ./scripts/verify-plugin.sh build/obs-irl-source.so
+        run: ./scripts/verify-plugin.sh target/release/libobs_irl_source.dylib
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-macos-arm64
-          path: build/obs-irl-source.so
+          path: target/release/libobs_irl_source.dylib

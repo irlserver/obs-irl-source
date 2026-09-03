@@ -63,11 +63,13 @@ Or, from the zip:
 
 ### Linux
 
-The release binary bundles its own media stack but still links your distribution's libobs, so it is built against Ubuntu's. On other distributions, build from source instead (see [Building from source](#building-from-source)).
+The release binary bundles its own media stack and resolves libobs symbols from the OBS process at load time rather than linking a libobs, so the OBS version it was built against does not matter. It is compiled against Ubuntu 22.04's glibc 2.35 for compatibility with older distributions and the OBS Flatpak sandbox (Freedesktop SDK); on a still-older distribution, build from source instead (see [Building from source](#building-from-source)).
 
 1. Close OBS
-2. Extract the tarball into `~/.config/obs-studio/plugins/`
+2. Extract the tarball into `~/.config/obs-studio/plugins/` — for the Flatpak, `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/` (the same layout, under the sandbox's config)
 3. Start OBS
+
+> **Flatpak:** The tarball works when extracted to the Flatpak config path above. A native Flatpak extension (`com.obsproject.Studio.Plugin.obs-irl-source`) is not yet shipped; if you package one, build against `org.freedesktop.Sdk//25.08` (or newer) and the `com.obsproject.Studio` runtime.
 
 ## Usage
 
@@ -83,7 +85,7 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 | --- | --- | --- |
 | URL | | Your pull URL. SRT, RTMP, or anything else FFmpeg can open |
 | Reconnect Delay | 2s | How long to wait between reconnect attempts |
-| Target Buffer | 120ms | How much audio cushion to hold, 20ms to 8s. This is your main latency knob: higher rides out a worse connection, lower is snappier and less forgiving. If the stats show `underruns` climbing, this is the setting to raise — an underrun means the cushion ran dry, and the concealment that covers it delays video by the same amount to keep lip sync. The whole target is paid as delay before the source starts, and as decoded video held in memory, so raise it to what your connection actually needs rather than to the maximum |
+| Target Buffer | 120ms | How much audio cushion to hold, 20ms to 8s. This is your main latency knob: higher rides out a worse connection, lower is snappier and less forgiving. If the stats show `underruns` climbing, this is the setting to raise — an underrun means the cushion ran dry, and the concealment that covers it delays video by the same amount to keep lip sync. The whole target is paid as delay before the source starts, so raise it to what your connection actually needs rather than to the maximum. Memory cost is small and does not depend on resolution much: video is held compressed and only decoded just before it is shown |
 | Adaptive Latency Control | On | Holds latency near your target by nudging playback speed (up to 2% slow, and up to Catch-Up Speed fast) instead of dropping audio |
 | Catch-Up Speed | 5% | How fast playback may run while clearing a backlog, 2% to 15%. 5% recovers a second of backlog in about 20 seconds and is audible on music (roughly a semitone) but not on speech. Lower it if you play music and would rather the recovery take longer than be heard; raise it to get latency back sooner. Only applies with Adaptive Latency Control on |
 | FFmpeg Options | | Extra options for the stream reader, `key1=val1 key2=val2` style. Use this to set the SRT `latency`, for example |
@@ -108,7 +110,7 @@ Earlier versions exposed Min/Max Buffer, PTS gap thresholds, Network Buffer and 
 
 The plugin exposes live stats that a Lua or Python script can read, so you can put a status overlay on your own stream or on a monitor.
 
-Create a Text (GDI+) source called `IRL Stats`, then add [`irl-stats.lua`](irl-stats.lua) as a Lua script in OBS (Tools → Scripts). It polls the source's `get_stats` proc handler once a second and writes the formatted stats into the text source. Edit the two source names in `update_stats` if yours differ.
+Create a Text (GDI+) source called `IRL Stats`, then add [`irl-stats.lua`](irl-stats.lua) as a Lua script in OBS (Tools → Scripts). It polls the source's `get_stats` proc handler once a second and writes the formatted stats into the text source. It finds the IRL source by its plugin id, so renaming the source does not break it; the script properties let you name a specific one (for a scene with more than one) and change the text source.
 
 The full list of readable fields is in [Stats reference](#stats-reference).
 
@@ -206,7 +208,7 @@ The audio core is built around three properties of libobs:
 2. Changing `samples_per_sec` between submissions makes OBS destroy and recreate its per-source resampler with no crossfade, which is a click every time. Playback speed is instead applied inside the plugin with a persistent swresample compensation, and the rate submitted to OBS never changes.
 3. The OBS mixer consumes 21.3ms ticks against the wall clock. A source that runs dry gets a tick of silence plus a time shifted splice (crackle), and a source that falls behind the mix window makes OBS permanently add global audio buffering. After priming, the pump always emits (real audio or shaped concealment silence) and keeps a fixed lead ahead of the wall clock.
 
-Buffer regulation happens through playback speed alone, asymmetric like IRLToolkit's player: it builds at an inaudible -2% and drains post-stall backlog at up to the Catch-Up Speed (+5% by default, mild chipmunk). Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP and RTMP apply backpressure, SRT bounds itself through its latency window), and startup backlog is trimmed only before priming.
+Buffer regulation happens through playback speed alone, asymmetric like IRLToolkit's player: it builds at an inaudible -2% and drains post-stall backlog at up to the Catch-Up Speed (+5% by default, mild chipmunk). A slow integral trim underneath the proportional ramp removes the standing error a sender whose media clock is not wall clock would otherwise leave (see `docs/audio-timing-pitfalls.md`). Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP and RTMP apply backpressure, SRT bounds itself through its latency window), and startup backlog is trimmed only before priming.
 
 The jitter buffer is a ring sized in milliseconds with a parallel PTS chunk queue, so it adapts to any sample rate or channel count. The speed controller's watermarks derive from `Target Buffer`: low at half the target, full drain speed at target plus 200ms. Retuning the target live grows the ring if needed (it never shrinks) and moves the watermarks while keeping every queued sample.
 
@@ -310,7 +312,6 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 | `audio_output_restarts` | int | Output clock restarts after the audio thread stalled (should stay 0) |
 | `obs_lead_ms` | int | How far ahead of real time audio is queued inside OBS (healthy is roughly 60 to 100ms) |
 | `audio_decoder_flushes` | int | Number of audio decoder flushes after repeated decode errors |
-| `video_decoder_flushes` | int | Always 0. The video decoder is no longer flushed (see Decoder recovery); kept so existing scripts keep working |
 | `video_corrupt_frames` | int | Decoded frames the decoder flagged as damaged (concealed slice errors on H.264, missing-reference prediction on HEVC) |
 | `video_corrupt_held` | int | HEVC frames held back instead of shown because they were predicted from a missing reference and would have rendered gray; the last good frame stays on screen until the next keyframe |
 | `video_lead_ms` | int | How far ahead of real time the last video frame was timestamped. Tracks the audio buffer; a value climbing well past Target Buffer and staying there means concealment has inflated the A/V mapping |
@@ -324,38 +325,53 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 The plugin also logs stats to the OBS log every 30 seconds:
 
 ```
-[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 video_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
+[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
 ```
 
 A healthy stream shows `speed=1.000`, `underruns=0`, `restarts=0`, and a constant `chunk` size. `buf` plus `obs_lead` is your plugin-side latency (fill wanders inside a deadband around the target by design).
 
 ## Building from source
 
-### Linux
+The plugin is a Rust workspace under `crates/`, built with cargo. It statically links its own FFmpeg, libsrt, librist and mbedTLS rather than using OBS's, so building that stack is the first step; it only has to happen again when a version in `deps/versions.env` changes. See `deps/README.md` for the details.
 
-The plugin statically links its own FFmpeg, libsrt, librist and mbedTLS rather than using OBS's. Building that stack is the first step, and it only has to happen again when a version in `deps/versions.env` changes. See `deps/README.md` for the details.
+libobs is neither built nor linked: the plugin binds to it through hand-written FFI (`crates/obs-sys`) and resolves the symbols from the OBS process at load time. libclang is a build dependency, because bindgen generates the FFmpeg bindings during the build.
+
+### Linux
 
 ```bash
 sudo apt install build-essential cmake pkg-config nasm meson ninja-build \
-    libobs-dev libva-dev
+    clang libclang-dev libobs-dev libva-dev
 ./deps/build-deps.sh
-cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build --parallel
+cargo build --release
+./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 ```
+
+`libobs-dev` is not needed for the plugin itself. It is what lets `cargo test` link the test binaries that call libobs, and what `cargo test -p obs-sys --features layout-test` checks the hand-written structs against.
 
 ### Windows (MSVC)
 
-Requires Visual Studio 2026, plus OBS source and obs-deps to build libobs (see `.github/workflows/build.yml` for the exact versions CI uses). `deps/build-deps.sh` runs under MSYS2 with the MSVC environment active, because FFmpeg's configure needs a POSIX shell even when it is driving `cl.exe`.
+Requires Visual Studio 2026 and LLVM (for libclang). `deps/build-deps.sh` runs under MSYS2 with the MSVC environment active, because FFmpeg's configure needs a POSIX shell even when it is driving `cl.exe`; the cargo build itself runs from a normal MSVC prompt. See the `windows-x64` job in `.github/workflows/build.yml` for the exact setup.
 
 ```powershell
-# Clone OBS and download pre-built dependencies (for libobs only)
-git clone --depth 1 --branch 32.1.2 https://github.com/obsproject/obs-studio.git obs-src
-# Download obs-deps from https://github.com/obsproject/obs-deps/releases
-# Install SIMDe headers or add them to CMAKE_PREFIX_PATH
-
-# Build
-cmake -B build -G "Visual Studio 18 2026" -A x64 -DOBS_SOURCE_DIR=obs-src
-cmake --build build --config RelWithDebInfo
+$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
+cargo build --release
 ```
 
-Earlier versions dynamically linked the FFmpeg that OBS bundles, and OBS lines differ in FFmpeg major version, which is why release archives used to be built per OBS line. Bundling removed that constraint. `-DIRL_BUNDLED_FFMPEG=OFF` restores the old behaviour for a quick compile check against a system FFmpeg.
+### macOS (Apple Silicon)
+
+```bash
+brew install cmake pkg-config nasm meson ninja
+./deps/build-deps.sh
+cargo build --release
+./scripts/verify-plugin.sh target/release/libobs_irl_source.dylib
+```
+
+### Packaging
+
+cargo names the artifact `libobs_irl_source.so`, `obs_irl_source.dll` or `libobs_irl_source.dylib`. `scripts/package.sh` renames it and stages the platform's install layout, which is what the release workflow runs:
+
+```bash
+scripts/package.sh linux target/release dist
+```
+
+Earlier versions dynamically linked the FFmpeg that OBS bundles, and OBS lines differ in FFmpeg major version, which is why release archives used to be built per OBS line. Bundling removed that constraint; version 2.0.0 removed the remaining CMake and libobs build steps with the move to Rust and cargo.

@@ -1,7 +1,0 @@
-# Mach-O exported symbols list for the plugin module.
-#
-# See cmake/module-symbols.map for the rationale. macOS two-level namespace
-# already prevents the bundled static FFmpeg from being rebound at load time,
-# but keeping the export table to just the module entry points avoids leaking
-# a second full set of av* symbols into the process.
-_obs_module_*
