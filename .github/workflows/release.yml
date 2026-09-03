@@ -54,6 +54,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
 
+          chmod +x scripts/package.sh
           scripts/package.sh linux  artifacts/obs-irl-source-linux-x64   dist "${version}"
           scripts/package.sh windows artifacts/obs-irl-source-windows-x64 dist "${version}"
           scripts/package.sh macos  artifacts/obs-irl-source-macos-arm64 dist "${version}"
