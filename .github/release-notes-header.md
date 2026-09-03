@@ -29,10 +29,10 @@ Upgrading from 1.x by hand: the payload no longer contains `w32-pthreads.dll`, s
 ### Linux
 
 1. Close OBS.
-2. Extract the tarball into `~/.config/obs-studio/plugins/`.
+2. Extract the tarball into `~/.config/obs-studio/plugins/` — for the Flatpak, `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`.
 3. Start OBS.
 
-The build bundles its own media stack and resolves libobs symbols from the OBS process at load time, so the OBS version does not matter. It is compiled against Ubuntu's glibc; on an older distribution, or if OBS does not load it, build from source instead (see the README).
+The build bundles its own media stack and resolves libobs symbols from the OBS process at load time, so the OBS version does not matter. It is compiled against Ubuntu 22.04's glibc 2.35 for Flatpak and older-distribution compatibility; on a still-older distribution, or if OBS does not load it, build from source instead (see the README).
 
 Verify downloads against `sha256sums.txt`.
 

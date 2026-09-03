@@ -63,11 +63,13 @@ Or, from the zip:
 
 ### Linux
 
-The release binary bundles its own media stack and resolves libobs symbols from the OBS process at load time rather than linking a libobs, so the OBS version it was built against does not matter. It is still compiled against Ubuntu's glibc; on an older distribution, build from source instead (see [Building from source](#building-from-source)).
+The release binary bundles its own media stack and resolves libobs symbols from the OBS process at load time rather than linking a libobs, so the OBS version it was built against does not matter. It is compiled against Ubuntu 22.04's glibc 2.35 for compatibility with older distributions and the OBS Flatpak sandbox (Freedesktop SDK); on a still-older distribution, build from source instead (see [Building from source](#building-from-source)).
 
 1. Close OBS
-2. Extract the tarball into `~/.config/obs-studio/plugins/`
+2. Extract the tarball into `~/.config/obs-studio/plugins/` — for the Flatpak, `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/` (the same layout, under the sandbox's config)
 3. Start OBS
+
+> **Flatpak:** The tarball works when extracted to the Flatpak config path above. A native Flatpak extension (`com.obsproject.Studio.Plugin.obs-irl-source`) is not yet shipped; if you package one, build against `org.freedesktop.Sdk//25.08` (or newer) and the `com.obsproject.Studio` runtime.
 
 ## Usage
 

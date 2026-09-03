@@ -21,7 +21,12 @@ env:
 
 jobs:
   linux-x64:
-    runs-on: ubuntu-26.04
+    # Built on 22.04 for glibc compatibility: the plugin is a cdylib loaded
+    # into OBS, including the Flatpak sandbox (Freedesktop SDK 25.08). A
+    # binary linked against 26.04's glibc 2.43 fails there with
+    # "version `GLIBC_2.43' not found" (see #29). 22.04's glibc 2.35 runs on
+    # every newer glibc, so one artifact covers system OBS and Flatpak.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -30,10 +35,50 @@ jobs:
       # layout test.
       - name: Install dependencies
         run: |
+          # 22.04's distro libobs-dev is 27.x, which predates
+          # video_format_get_parameters_for_format (30.x), so the
+          # video_pipeline test would fail against it at runtime. The OBS
+          # PPA carries 30.2.3 for jammy and its obs-studio package ships
+          # libobs.so plus the headers, which is all `-lobs` needs; every
+          # libobs symbol obs-sys declares is present in 30.2.3. Building
+          # libobs from source is not an option here: 32.x wants cmake 3.28
+          # and FFmpeg 6, and jammy has 3.22 and 4.4.
+          sudo add-apt-repository -y ppa:obsproject/obs-studio
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config nasm meson ninja-build \
-            clang libclang-dev libobs-dev libva-dev
+            clang libclang-dev libva-dev curl obs-studio libsimde-dev
+
+          # layout-test pins the hand-written structs to the OBS floor the
+          # plugin declares, not to whichever libobs this runner happens to
+          # link against, so it reads the OBS_VERSION source headers. Two
+          # things a source tree lacks that bindgen still needs: obsconfig.h,
+          # which OBS's cmake generates and obs-config.h includes
+          # unconditionally (the five defines below are all a header-only
+          # parse wants from it), and SIMDe, which libobs/util/sse-intrin.h
+          # includes as <simde/x86/sse2.h> and OBS does not vendor — hence
+          # libsimde-dev above.
+          curl -fsSL "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VERSION}.tar.gz" -o /tmp/obs.tar.gz
+          tar -xf /tmp/obs.tar.gz -C /tmp
+          OBS_HEADERS="/tmp/obs-studio-${OBS_VERSION}/libobs"
+          printf '%s\n' \
+            '#pragma once' \
+            '#define OBS_DATA_PATH "share/obs"' \
+            '#define OBS_PLUGIN_PATH "lib/x86_64-linux-gnu/obs-plugins"' \
+            '#define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"' \
+            '#define OBS_RELEASE_CANDIDATE 0' \
+            '#define OBS_BETA 0' > "${OBS_HEADERS}/obsconfig.h"
+          echo "OBS_INCLUDE_DIR=${OBS_HEADERS}" >> "$GITHUB_ENV"
+
+          echo "--- glibc ---"
+          ldd --version | head -n1
+          echo "--- libobs ---"
+          dpkg-query -W -f='obs-studio ${Version}\n' obs-studio
+          nm -D /usr/lib/x86_64-linux-gnu/libobs.so \
+            | grep -q video_format_get_parameters_for_format \
+            || { echo "libobs is too old: no video_format_get_parameters_for_format" >&2; exit 1; }
+          echo "--- OBS ${OBS_VERSION} headers for layout-test ---"
+          test -f "${OBS_HEADERS}/obs.h" || { echo "obs.h missing" >&2; exit 1; }
 
       # rust-toolchain.toml pins the channel; this materialises it before the
       # cache action inspects it.
@@ -41,6 +86,13 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Bust the cargo target cache when the bundled FFmpeg changes.
+          # Swatinem's key is Cargo.lock + rust version, so a rebuilt
+          # libavutil.a (e.g. after the vaMapBuffer2 dlsym patch) would
+          # otherwise be shadowed by a restored libffmpeg_sys_next.rlib
+          # built from the old libavutil.a (see PR #20).
+          shared-key: linux-deps-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
 
       # Only the install prefix is cached. The source and object trees are an
       # order of magnitude larger and the build-marker files live inside the
@@ -50,10 +102,17 @@ jobs:
         uses: actions/cache@v6
         with:
           path: deps/.build/prefix
-          key: irl-deps-linux-x64-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
+          # Key includes the runner glibc (22.04's 2.35). The previous 26.04
+          # prefix cached static libs that reference glibc 2.38+ fortified
+          # symbols (__isoc23_*) and libva 2.20 vaMapBuffer2, which fail to
+          # link on 22.04 (see PR #20 linux-x64 Test failure).
+          key: irl-deps-linux-x64-22.04-${{ hashFiles('deps/versions.env', 'deps/build-deps.sh') }}
 
       - name: Build bundled deps
         run: ./deps/build-deps.sh
+
+      - name: Bust cargo cache for rebuilt FFmpeg
+        run: cargo clean -p ffmpeg-sys-next -p irl-ffmpeg || true
 
       - name: Build
         run: cargo build --release --workspace
@@ -72,8 +131,9 @@ jobs:
           pipx install codespell
           make spell-check
 
-      # libobs-dev is installed here, so the test binaries that touch libobs
-      # symbols (obs, irl-source) link and run on this runner only.
+      # libobs is installed here (OBS PPA, see above), so the test binaries
+      # that touch libobs symbols (obs, irl-source) link and run on this
+      # runner only.
       - name: Test
         run: cargo test --workspace
 

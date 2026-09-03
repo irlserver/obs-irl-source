@@ -6,4 +6,5 @@ skip = ./.git,./target,./deps/.build,./build,./dist,Cargo.lock,*.log,*.svg,*.png
 #   trough    - the low half of "peak and trough", in the controller simulation
 #   retuned   - the Target Buffer can be re-tuned live
 #   versionms - VersionMS, the Inno Setup / Win32 fixed-file-info field
-ignore-words-list = trough,retuned,versionms
+#   vas       - VAStatus vas, FFmpeg's VAAPI status variable (hwcontext_vaapi.c)
+ignore-words-list = trough,retuned,vas,versionms

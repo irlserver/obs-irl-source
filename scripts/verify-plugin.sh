@@ -71,6 +71,34 @@ Linux*)
 	# libc/libm/libstdc++ symbols by shape. The real guard is DT_NEEDED
 	# above plus the loader.
 	check ${r} "undefined symbols are libobs or system libraries"
+
+	# glibc compatibility: the plugin is loaded inside the Flatpak sandbox
+	# (Freedesktop SDK), whose glibc lags the host's. A binary linked against
+	# 26.04's glibc 2.43 stamps GLIBC_2.43 on itself and fails there with
+	# "version `GLIBC_2.43' not found" (see #29). Built on 22.04 it asks for
+	# at most 2.35, which every newer glibc satisfies.
+	#
+	# Only the release build has to honour that ceiling, so it is enforced
+	# where the artifact is produced (CI, or IRL_GLIBC_CEILING=1) and reported
+	# as a warning anywhere else: a local build on a newer distro is fine for
+	# that developer's own OBS, it just must not ship.
+	if command -v readelf >/dev/null 2>&1; then
+		ceiling="GLIBC_2.35"
+		max_glibc="$(readelf -V "${module}" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sort -V | tail -n1 || true)"
+		if [[ -n ${max_glibc} ]]; then
+			highest="$(printf '%s\n%s\n' "${max_glibc}" "${ceiling}" | sort -V | tail -n1)"
+			if [[ ${highest} == "${ceiling}" ]]; then
+				printf '  ok    needs at most %s (flatpak compatible)\n' "${max_glibc}"
+			elif [[ -n ${CI:-} || -n ${IRL_GLIBC_CEILING:-} ]]; then
+				printf '  FAIL  needs %s, above the %s ceiling (built on too new a glibc; flatpak will not load it)\n' \
+					"${max_glibc}" "${ceiling}" >&2
+				fail=1
+			else
+				printf '  warn  needs %s, above the %s ceiling — fine locally, not shippable\n' \
+					"${max_glibc}" "${ceiling}"
+			fi
+		fi
+	fi
 	;;
 
 Darwin*)
