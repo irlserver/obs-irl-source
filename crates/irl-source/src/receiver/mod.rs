@@ -74,7 +74,9 @@ pub struct Receiver {
     flags: ReceiverFlags,
     audio_in: AudioIntake,
     last_stats_time: u64,
-    pkt: ffmpeg::Packet,
+    /// The packet the read loop reuses. `None` only while a packet is out on
+    /// loan to the dispatch path, which borrows the rest of `self` mutably.
+    pkt: Option<ffmpeg::Packet>,
     frame: ffmpeg::Frame,
 }
 
@@ -101,7 +103,7 @@ impl Receiver {
             flags: ReceiverFlags::default(),
             audio_in,
             last_stats_time: 0,
-            pkt,
+            pkt: Some(pkt),
             frame,
         })
     }
@@ -162,16 +164,24 @@ impl Receiver {
                 break;
             }
 
-            let read = {
-                let Self { fmt, pkt, .. } = self;
-                let Some(fmt) = fmt.as_mut() else { continue };
+            // The packet is taken out of `self` for the read and the dispatch
+            // so both can borrow the rest of the receiver mutably.
+            let Some(mut pkt) = self.pkt.take() else {
+                break;
+            };
+            let read = match self.fmt.as_mut() {
                 // `read_frame` arms the interrupt watch.
-                fmt.read_frame(pkt)
+                Some(fmt) => fmt.read_frame(&mut pkt),
+                None => {
+                    self.pkt = Some(pkt);
+                    continue;
+                }
             };
             match &read {
                 Err(err) if err.is_eagain() => {
                     if self.retry_eagain(ffmpeg::gettime_us() as u64) {
-                        self.pkt.unref();
+                        pkt.unref();
+                        self.pkt = Some(pkt);
                         ffmpeg::usleep(1000);
                         continue;
                     }
@@ -179,18 +189,15 @@ impl Receiver {
                 _ => self.eagain_since_us = 0,
             }
             if let Err(err) = read {
+                self.pkt = Some(pkt);
                 self.handle_stream_read_error(err);
                 continue;
             }
 
-            let index = self.pkt.stream_index();
-            if index == self.audio_stream_idx && self.audio_dec.is_some() {
-                self.handle_audio_packet();
-            } else if index == self.video_stream_idx {
-                self.push_video_packet();
-            }
+            self.dispatch_packet(&pkt);
 
-            self.pkt.unref();
+            pkt.unref();
+            self.pkt = Some(pkt);
             self.log_receiver_stats();
         }
 
@@ -198,6 +205,17 @@ impl Receiver {
         // The run is over: free the queued packets rather than leave them
         // behind on the shared state.
         self.shared.video.drain();
+    }
+
+    /// Hand one packet to its decoder path: audio is
+    /// decoded here, video goes to the video thread.
+    fn dispatch_packet(&mut self, pkt: &ffmpeg::Packet) {
+        let index = pkt.stream_index();
+        if index == self.audio_stream_idx && self.audio_dec.is_some() {
+            self.handle_audio_packet(pkt);
+        } else if index == self.video_stream_idx {
+            self.push_video_packet(pkt);
+        }
     }
 
     /// Backlog backpressure: above the fill ceiling, stop reading so the
