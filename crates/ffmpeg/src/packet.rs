@@ -78,6 +78,22 @@ impl Packet {
         unsafe { (*self.0).size }
     }
 
+    /// The payload, as the demuxer delivered it. Empty for a blank packet or
+    /// one whose data pointer is unset.
+    pub fn data(&self) -> &[u8] {
+        // SAFETY: `self.0` is a live packet; `data` is either null or points
+        // at `size` readable bytes owned by the packet's buffer, which lives as
+        // long as the packet is not unreffed — and the returned borrow ends
+        // before any `&mut self` method can run.
+        let (data, size) = unsafe { ((*self.0).data, (*self.0).size) };
+        if data.is_null() || size <= 0 {
+            return &[];
+        }
+        // SAFETY: checked non-null and positive above; FFmpeg guarantees `size`
+        // bytes are readable at `data` (plus padding, which is not exposed).
+        unsafe { core::slice::from_raw_parts(data, size as usize) }
+    }
+
     /// `av_packet_unref`.
     pub fn unref(&mut self) {
         // SAFETY: as above; av_packet_unref resets the packet to the blank
