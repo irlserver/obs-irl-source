@@ -103,7 +103,7 @@ fn drain_audio_frames(
 /// intact packet decodes fine without a reset, and the reference chain heals
 /// at the next keyframe either way.
 impl Receiver {
-    pub(super) fn handle_audio_packet(&mut self) {
+    pub(super) fn handle_audio_packet(&mut self, pkt: &ffmpeg::Packet) {
         let audio_tb = self.audio_tb;
         let Self {
             shared,
@@ -111,7 +111,6 @@ impl Receiver {
             frame,
             flags,
             audio_in,
-            pkt,
             ..
         } = self;
         let Some(dec) = audio_dec.as_mut() else {
@@ -144,21 +143,20 @@ impl Receiver {
     /// The video half of the read loop: hand the packet to the video thread.
     ///
     /// Nothing is decoded here; see [`crate::shared::VideoChannel`] for why.
-    pub(super) fn push_video_packet(&mut self) {
+    pub(super) fn push_video_packet(&mut self, pkt: &ffmpeg::Packet) {
         // Only used to bound the queue by media duration; output timing comes
         // from the decoded frame's own PTS, after repair.
-        let pts_ns = self.pkt.pts_or_dts().map_or(0, |pts| {
+        let pts_ns = pkt.pts_or_dts().map_or(0, |pts| {
             ffmpeg::rescale_q(pts, self.video_tb, ffmpeg::NS_TIME_BASE)
         });
-        let bytes = self.pkt.size().max(0) as usize;
+        let bytes = pkt.size().max(0) as usize;
         let received_ns = obs::time::gettime_ns();
-        let dts_ns = self
-            .pkt
+        let dts_ns = pkt
             .dts_or_pts()
             .map(|dts| ffmpeg::rescale_q(dts, self.video_tb, ffmpeg::NS_TIME_BASE));
         note_video_arrival(&self.shared, received_ns, pts_ns, dts_ns);
 
-        match self.pkt.new_ref() {
+        match pkt.new_ref() {
             Ok(packet) => self.shared.video.push_packet(
                 TimedPacket {
                     packet,
