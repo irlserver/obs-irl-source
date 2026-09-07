@@ -46,6 +46,14 @@ impl Data<'_> {
         unsafe { obs_sys::obs_data_get_bool(self.as_ptr(), key.as_ptr()) }
     }
 
+    /// `obs_data_has_user_value`: whether `key` was set explicitly, which is
+    /// how an optional request field is told apart from an absent one (the
+    /// getters read an absent field as zero / false / empty).
+    pub fn has(&self, key: &CStr) -> bool {
+        // SAFETY: live handle, NUL-terminated key.
+        unsafe { obs_sys::obs_data_has_user_value(self.as_ptr(), key.as_ptr()) }
+    }
+
     pub fn set_str(&self, key: &CStr, value: &CStr) {
         // SAFETY: live handle; libobs copies the string during the call.
         unsafe { obs_sys::obs_data_set_string(self.as_ptr(), key.as_ptr(), value.as_ptr()) };
@@ -70,6 +78,29 @@ impl Data<'_> {
         // SAFETY: both handles are live; `obs_data_set_array` takes its own
         // reference, so `array` keeps owning the one it holds.
         unsafe { obs_sys::obs_data_set_array(self.as_ptr(), key.as_ptr(), array.as_ptr()) };
+    }
+
+    /// `obs_data_set_obj`: nest another object under `key`.
+    pub fn set_obj(&self, key: &CStr, obj: &OwnedData) {
+        // SAFETY: both handles are live; `obs_data_set_obj` takes its own
+        // reference, so `obj` keeps owning the one it holds.
+        unsafe { obs_sys::obs_data_set_obj(self.as_ptr(), key.as_ptr(), obj.0.as_ptr()) };
+    }
+
+    /// `obs_data_save_json_safe`: write the object as JSON to `path` through a
+    /// temp file, keeping a backup of the previous file. Returns whether the
+    /// write succeeded.
+    pub fn save_json_safe(&self, path: &CStr, temp_ext: &CStr, backup_ext: &CStr) -> bool {
+        // SAFETY: live handle; libobs reads the three NUL-terminated strings
+        // only during the call.
+        unsafe {
+            obs_sys::obs_data_save_json_safe(
+                self.as_ptr(),
+                path.as_ptr(),
+                temp_ext.as_ptr(),
+                backup_ext.as_ptr(),
+            )
+        }
     }
 
     pub fn set_default_str(&self, key: &CStr, value: &CStr) {
@@ -99,6 +130,15 @@ impl OwnedData {
         // SAFETY: no arguments; libobs returns a fresh reference.
         let ptr = unsafe { obs_sys::obs_data_create() };
         Self(NonNull::new(ptr).expect("obs_data_create returned NULL"))
+    }
+
+    /// `obs_data_create_from_json_file`: `None` when the file is missing or
+    /// does not parse, which libobs reports as a NULL object.
+    pub fn from_json_file(path: &CStr) -> Option<Self> {
+        // SAFETY: NUL-terminated path; libobs returns a fresh reference or
+        // NULL, and reads the path only during the call.
+        let ptr = unsafe { obs_sys::obs_data_create_from_json_file(path.as_ptr()) };
+        NonNull::new(ptr).map(Self)
     }
 
     /// Borrow as [`Data`] for reading/writing.
