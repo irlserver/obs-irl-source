@@ -1,0 +1,24 @@
+.github/workflows/build.yml
+  s_f2cf2be95b4434::t_1631e939dcc50e 224-225,228-230
+crates/obs/tests/sleep.rs
+  s_f2cf2be95b4434::t_1631e939dcc50e 5-9
+  s_f2cf2be95b4434::t_36896c00644e38 1-4,10-30
+crates/obs/src/time.rs
+  s_f2cf2be95b4434::t_b6f121fe902d1a 17-18,24-36,38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "0afeebea0a6c696d92768b0af8370ae1bd02e69e",
+  "prompts": {},
+  "sessions": {
+    "s_f2cf2be95b4434": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9127a52d-88bd-4581-ad80-15201e7df2b3",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
