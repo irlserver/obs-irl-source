@@ -738,7 +738,6 @@ unsafe extern "C" {
 
     // ── util/platform.h ────────────────────────────────────────────────
     pub fn os_gettime_ns() -> u64;
-    pub fn os_sleep_ms(duration: u32);
 
     // ── util/bmem.h ────────────────────────────────────────────────────
     pub fn bfree(ptr: *mut c_void);

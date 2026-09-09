@@ -221,9 +221,13 @@ jobs:
       # Only the FFI-free crates: a test binary that references a libobs
       # symbol imports obs.dll, and there is no OBS installed on this runner
       # for it to load against. The libobs-touching tests run on Linux.
+      # The sleep test is the exception: it is Windows-only (libobs's
+      # os_sleep_ms(1) is Sleep(0) there) and references no libobs symbol.
       - name: Test
         shell: cmd
-        run: cargo test -p irl-core -p irl-ffmpeg
+        run: |
+          cargo test -p irl-core -p irl-ffmpeg
+          cargo test -p obs --test sleep
 
       - name: Verify isolation
         shell: pwsh
