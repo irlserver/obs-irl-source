@@ -1,0 +1,21 @@
+docs/provider-protocol.md
+  s_960c322c053ced::t_433f0cd8fca0cb 1-125
+CLAUDE.md
+  s_960c322c053ced::t_dbf427bdb6e405 255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "ffe64bd0620dc712a625a5491772b8d7eaf2efb4",
+  "prompts": {},
+  "sessions": {
+    "s_960c322c053ced": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c288de6b-bb88-4a94-a959-a7ad934b8a86",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
