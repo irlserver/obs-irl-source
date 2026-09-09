@@ -124,6 +124,73 @@ synchronise on. Used under either license at the recipient's option.
 License texts: <https://opensource.org/licenses/MIT> ·
 <https://www.apache.org/licenses/LICENSE-2.0>
 
+### ureq (and ureq-proto, http, httparse, percent-encoding, utf8-zero) — MIT OR Apache-2.0
+
+<https://github.com/algesten/ureq>
+
+The blocking HTTP client behind the Provider dropdown: discovery, the OAuth
+token exchange and the ingest list. Blocking rather than async deliberately;
+the plugin has no async runtime and none is wanted. Used under either license
+at the recipient's option.
+
+License texts: <https://opensource.org/licenses/MIT> ·
+<https://www.apache.org/licenses/LICENSE-2.0>
+
+### rustls (and rustls-pki-types) — Apache-2.0 OR ISC OR MIT
+
+<https://github.com/rustls/rustls>
+
+The TLS implementation behind that client. Used in place of the bundled
+Mbed TLS because the FFmpeg build runs with `tls_verify=0` (it ships no CA
+store), which is acceptable for a stream URL and not for a bearer token.
+
+### ring — Apache-2.0 AND ISC
+
+<https://github.com/briansmith/ring>
+
+rustls's cryptographic provider, and the SHA-256 and random source behind the
+PKCE code challenge. Pinned in preference to aws-lc-rs because it ships
+pregenerated assembly and so needs no cmake, nasm, perl or go on any build
+machine; `make tls-provider` asserts the pin holds.
+
+Code sourced from BoringSSL is Apache-2.0 (`LICENSE-BoringSSL`); ring's own
+code is ISC (`LICENSE-other-bits`). Despite BoringSSL's ancestry, the crate
+carries no code under the historic OpenSSL license, whose advertising clause
+would be incompatible with the AGPL.
+
+### rustls-webpki — ISC · untrusted — ISC
+
+<https://github.com/rustls/webpki> · <https://github.com/briansmith/untrusted>
+
+Certificate path validation and its input parser.
+
+### webpki-roots — CDLA-Permissive-2.0
+
+<https://github.com/rustls/webpki-roots>
+
+Mozilla's CA root store, compiled in. A compiled-in bundle updates with
+`cargo update` rather than with a packaging change on three platforms, and the
+plugin only ever talks to providers the user chose.
+
+License text: <https://cdla.dev/permissive-2-0/>
+
+### serde (and serde_core, serde_derive, serde_json, itoa, zmij) — MIT OR Apache-2.0
+
+<https://github.com/serde-rs/serde> · <https://github.com/serde-rs/json>
+
+Reads the provider documents and the ingest list, and reads and writes the
+plugin's own per-provider state file.
+
+### base64 — MIT OR Apache-2.0
+
+<https://github.com/marshallpierce/rust-base64>
+
+The base64url encoding of the PKCE verifier and challenge.
+
+The small helper crates these pull in (getrandom, once_cell, log, zeroize,
+cfg-if, smallvec, scopeguard, memchr) are MIT OR Apache-2.0; subtle is
+BSD-3-Clause.
+
 ### The Rust standard library — MIT OR Apache-2.0
 
 <https://github.com/rust-lang/rust>

@@ -68,7 +68,8 @@ make style-check
 make lint         # cargo xlint
 make test         # cargo xtest
 make spell-check  # codespell
-make check        # style-check + lint + test + spell-check, what CI runs
+make tls-provider # Cargo.lock still resolves rustls onto ring, not aws-lc-rs
+make check        # style-check + lint + test + spell-check + tls-provider, what CI runs
 make sim          # the speed-controller simulation; not a CI target
 ```
 
@@ -88,6 +89,7 @@ One cdylib, five workspace crates. The rule that shapes the split: **all unsafe 
 | `crates/obs` | Safe, plugin-agnostic libobs API: the `Source` trait and registration, `declare_module!`, `Data`/`Properties`/`CallData`/`ProcHandler`, `VideoFrame`/`AudioFrame` builders, scene transforms, the obs-websocket vendor helper, `panic::guard`. Knows nothing about IRL streaming. |
 | `crates/ffmpeg` | RAII over `ffmpeg-sys-next` (package `irl-ffmpeg`, lib name `ffmpeg`): `FormatContext`, `CodecContext`, `Frame`, `Packet`, `HwDeviceContext`, `FramePool`, `Resampler`, `Scaler`, `InterruptWatch`, and `log::route_to`, which hands the bundled FFmpeg's `av_log` to a caller-supplied sink. `build.rs` replays `irl-deps.env`. |
 | `crates/irl-core` | Everything that needs neither libobs nor FFmpeg: the jitter buffer, PTS repair, the speed controller, output-clock arithmetic, video pacing, demuxer options, config derivation, the stats table, every tuning constant. Plain data in, plain data out — and therefore the only crate with a real unit-test suite. |
+| `crates/irl-provider` | The plugin side of `docs/provider-protocol.md`: discovery, OAuth code + PKCE over a loopback redirect, the per-provider state file, the key-free ingest list and the resolve call. `#![forbid(unsafe_code)]`, no libobs; the plugin hands it a state directory, a logger and a wake-the-dialogs callback through `init`. Pure parts are tested under `tests/` without a network. |
 | `crates/irl-source` | The plugin itself: module entry points, the source lifecycle and the three worker threads. |
 
 ### Data flow
@@ -135,10 +137,11 @@ Buffer regulation happens through playback speed only, asymmetric like IRLToolki
 
 | file | ports |
 | --- | --- |
-| `lib.rs` | `plugin.c`: `declare_module!`, load → the FFmpeg log route and `register_source::<IrlSource>()`, post_load → `websocket::register()`, the deadlock poller under the feature. |
+| `lib.rs` | `plugin.c`: `declare_module!`, load → the FFmpeg log route, `register_source::<IrlSource>()` and `providers::init()`, post_load → `websocket::register()`, the deadlock poller under the feature. |
 | `log.rs` | `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, which bind the `[irl-source]` prefix, plus the redaction (`redacted_input_url`, `redacted_log_line`) and the `[ffmpeg]` sink. |
 | `source.rs` | `irl-source.c`: create/update/tick/activate/deactivate/show/hide/Drop, the media callbacks and the `media_stopped` latch, `start_receiver`/`stop_receiver`, fit-to-canvas, the `get_stats` proc. |
 | `settings.rs` | `settings.c`: defaults and the properties dialog. |
+| `providers.rs` | New in 2.x: the Provider dropdown, one ingest picker per provider and the sign-in buttons. Writes into `url` and nothing else; `tests/provider_seam.rs` pins that no file outside it, `settings.rs` and `lib.rs` mentions providers. Its module doc lists the four libobs dialog behaviours that dictate its shape. |
 | `config.rs` | `config_load` / `config_requires_restart` / `config_apply_hot`. |
 | `shared.rs` | The decomposition of the C `struct irl_source` into owners (see below). |
 | `receiver/{mod,stream,decode,audio_in}.rs` | `receiver.c`, `receiver-stream.c`, the audio half of `receiver-decode.c`, and the intake half of `receiver-audio.c`. |
@@ -196,7 +199,7 @@ Everywhere else, tests live in `tests/`, never inside the lib. The link argument
 
 Note the sampling point in it. The jitter buffer's level oscillates by one whole chunk within every cycle, so *where* you read the fill decides what number you get: before the pump's read (what the controller regulates) it averages the target, and after it, a chunk lower. The stats line's `buf=` is a random sample of that oscillation, which is why it reads low as often as not.
 
-`crates/irl-source/tests/locale_keys.rs` is the mechanical half of the "a new UI string belongs in two places" rule: it scans `settings.rs` and `source.rs` for `module_text` keys and fails if one has no `data/locale/en-US.ini` entry, or if the ini carries a string nothing uses. `module_text` falls back to returning the key, so without it a missing string is only noticed by opening the properties dialog.
+`crates/irl-source/tests/locale_keys.rs` is the mechanical half of the "a new UI string belongs in two places" rule: it scans `settings.rs`, `source.rs` and `providers.rs` for `module_text` keys and fails if one has no `data/locale/en-US.ini` entry, or if the ini carries a string nothing uses. `module_text` falls back to returning the key, so without it a missing string is only noticed by opening the properties dialog.
 
 The speed controller has one more check that is not a test, because a controller that limit-cycles still passes every assertion you would think to write about one sample of it:
 
@@ -252,6 +255,7 @@ This plugin was heavily built with LLM assistance, including the Rust port. The 
 - **`THIRD_PARTY_NOTICES.md`** — Licenses for the statically linked stack and the Rust crates, shipped inside every release archive rather than only living in the repo, because LGPLv3 FFmpeg wants its notices conveyed with the object code. `deps/README.md` has the reasoning behind the license choices; this file is the artifact-facing copy.
 - **`docs/audio-pipeline.md`** — Deep dive on the buffered vs low-latency audio paths, jitter buffer, adaptive latency control, PTS repair tiers, and timestamp handling.
 - **`docs/viewer-quality-plan.md`** — The viewer-quality policy and the recovery/diagnostics behavior that implements it (what stats to watch and what healthy looks like).
+- **`docs/provider-protocol.md`** — The contract a service implements to appear in the Provider dropdown: discovery document, OAuth sign-in, the key-free ingest list and the resolve call. The plugin side of it lives in `crates/irl-provider`.
 - **`docs/audio-timing-pitfalls.md`** — What was built wrong first in the audio timing path, and the media-clock estimator that was built, measured and deleted. Required reading before changing `crates/irl-core/src/speed.rs`; most of it is re-inventable.
 - **`Makefile`**, **`.config/`** — The quality gates and their explicit configs (`rustfmt.toml`, `codespellrc`), so `make check` gives the same answer everywhere.
 - **`AGENTS.md`**, **`GEMINI.md`** — Symlinks to this file (`CLAUDE.md`).

@@ -49,6 +49,12 @@ pub struct IrlSource {
     obs_state: Arc<Mutex<ObsState>>,
 }
 
+impl IrlSource {
+    pub(crate) fn handle(&self) -> SourceHandle {
+        self.source
+    }
+}
+
 impl Source for IrlSource {
     const ID: &'static CStr = c"irl_source";
     const OUTPUT_FLAGS: u32 = obs::sys::OBS_SOURCE_ASYNC_VIDEO

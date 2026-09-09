@@ -37,7 +37,7 @@ echo "verifying ${module}"
 # crates/ffmpeg; the compiler enforces #![forbid(unsafe_code)] where present,
 # this only catches the attribute being deleted.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for f in crates/irl-core/src/lib.rs crates/irl-source/src/lib.rs; do
+for f in crates/irl-core/src/lib.rs crates/irl-provider/src/lib.rs crates/irl-source/src/lib.rs; do
 	if [[ -f ${repo_root}/${f} ]]; then
 		grep -q '^#!\[forbid(unsafe_code)\]' "${repo_root}/${f}" && r=0 || r=1
 		check ${r} "forbid(unsafe_code) present in ${f}"

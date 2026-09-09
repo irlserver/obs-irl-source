@@ -8,6 +8,7 @@
 #[macro_use]
 pub mod log;
 
+mod providers;
 mod settings;
 
 // Public only so the integration tests under `tests/` (a separate crate) can
@@ -45,6 +46,7 @@ fn module_load() -> bool {
     #[cfg(feature = "deadlocks")]
     spawn_deadlock_poller();
     obs::register_source::<source::IrlSource>();
+    providers::init();
     irl_info!("IRL Source plugin loaded (version {})", PLUGIN_VERSION);
     true
 }

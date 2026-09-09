@@ -5,13 +5,14 @@ members = [
     "crates/obs",
     "crates/ffmpeg",
     "crates/irl-core",
+    "crates/irl-provider",
     "crates/irl-source",
 ]
 
 [workspace.package]
 # Single source of truth for the plugin version. release.yml verifies the
 # pushed tag against it and the Windows installer reads it from here.
-version = "2.0.2"
+version = "2.1.1"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-or-later"
@@ -23,6 +24,7 @@ obs-sys = { path = "crates/obs-sys" }
 obs = { path = "crates/obs" }
 irl-ffmpeg = { path = "crates/ffmpeg" }
 irl-core = { path = "crates/irl-core" }
+irl-provider = { path = "crates/irl-provider" }
 # The bundled FFmpeg is located through FFMPEG_DIR (see .cargo/config.toml);
 # `static` makes the sys crate emit static link lines for the five libav*
 # archives. The transitive libraries (srt, rist, mbedtls, ...) are linked by

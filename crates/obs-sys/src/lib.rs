@@ -606,6 +606,8 @@ unsafe extern "C" {
     pub fn obs_source_set_async_unbuffered(source: *mut obs_source_t, unbuffered: bool);
     pub fn obs_source_set_async_decoupled(source: *mut obs_source_t, decouple: bool);
     pub fn obs_source_media_started(source: *mut obs_source_t);
+    /// Returns a new reference; release it with [`obs_data_release`].
+    pub fn obs_source_get_settings(source: *const obs_source_t) -> *mut obs_data_t;
     /// Raises `update_properties` on the source; the frontend reloads any open
     /// properties dialog for it. Only signals, so safe from a worker thread —
     /// the Qt side hops to the UI thread through a queued connection.
@@ -716,6 +718,12 @@ unsafe extern "C" {
         p: *mut obs_property_t,
         modified: obs_property_modified_t,
     );
+    pub fn obs_properties_get(
+        props: *mut obs_properties_t,
+        property: *const c_char,
+    ) -> *mut obs_property_t;
+    pub fn obs_property_set_visible(p: *mut obs_property_t, visible: bool);
+    pub fn obs_property_name(p: *mut obs_property_t) -> *const c_char;
     pub fn obs_properties_add_button(
         props: *mut obs_properties_t,
         name: *const c_char,

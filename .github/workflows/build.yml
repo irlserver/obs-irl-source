@@ -28,7 +28,7 @@ jobs:
     # every newer glibc, so one artifact covers system OBS and Flatpak.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # clang/libclang is a build dependency now: ffmpeg-sys-next runs bindgen
       # over the bundled FFmpeg headers, and obs-sys does the same for its
@@ -120,9 +120,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Formatting and spelling are checked once, on Linux: they are
-      # platform-independent, so running them per platform only buys three
-      # copies of the same failure. `make style` fixes both locally.
+      # Formatting, spelling and the TLS provider are checked once, on Linux:
+      # they read the tree, not the platform, so running them per platform only
+      # buys three copies of the same failure. `make style` fixes the first two
+      # locally.
       - name: Format check
         run: make style-check
 
@@ -130,6 +131,11 @@ jobs:
         run: |
           pipx install codespell
           make spell-check
+
+      # Cargo.lock must keep resolving rustls onto ring: aws-lc-sys would put
+      # cmake, nasm, perl and go on every build machine.
+      - name: TLS provider
+        run: make tls-provider
 
       # libobs is installed here (OBS PPA, see above), so the test binaries
       # that touch libobs symbols (obs, irl-source) link and run on this
@@ -145,7 +151,7 @@ jobs:
         run: ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-linux-x64
           path: target/release/libobs_irl_source.so
@@ -153,17 +159,20 @@ jobs:
   windows-x64:
     runs-on: windows-2025-vs2026
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
+      # The x64 MSVC environment, exported to every later step. Done by hand
+      # rather than through ilammy/msvc-dev-cmd, which is unmaintained and
+      # still targets Node 20: vswhere finds the newest toolset on the image,
+      # vcvarsall.bat configures it, and the shell's environment becomes the
+      # job's.
       - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        # msvc-dev-cmd has no Node 24 release yet (upstream ilammy/msvc-dev-cmd#105);
-        # run its node20 bundle on the node24 runtime. This restates the
-        # deprecation annotation ("forced to run on Node.js 24") rather than
-        # silencing it — the point is to exercise the runtime that survives the
-        # retirement, so a break surfaces now instead of when Node 20 is removed.
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL ( echo No Visual Studio with the x64 C++ toolset found & exit /b 1 )
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64 || exit /b 1
+          set >> "%GITHUB_ENV%"
 
       # librist builds with meson. It has to be the Windows-native meson (so it
       # detects cl.exe rather than looking for a POSIX toolchain), which
@@ -262,7 +271,7 @@ jobs:
           if ($fail) { Write-Host $deps; Write-Host $exports; exit 1 }
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: obs-irl-source-windows-x64
           path: |
