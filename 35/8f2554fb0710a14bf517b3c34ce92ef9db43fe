@@ -1,0 +1,76 @@
+crates/irl-provider/src/store.rs
+  s_960c322c053ced::t_b39ec9bcecbde3 1-50,52-70,72-83,85-108
+  s_960c322c053ced::t_fd02da3023012d 51,71,84
+crates/irl-provider/src/loopback.rs
+  s_960c322c053ced::t_3cf3d2f081ac11 1-136,143-205
+  s_960c322c053ced::t_d9c138fcae731f 137-142
+Cargo.toml
+  s_960c322c053ced::t_c45387b90cc48f 8-9
+crates/irl-provider/src/registry.rs
+  s_960c322c053ced::t_fd02da3023012d 161-173
+  s_960c322c053ced::t_d9c138fcae731f 73-75,242,376-380,410-414,459-461,504-505
+  s_960c322c053ced::t_b3da4ad3a44a94 1-21,23-71,76-123,125-131,133-135,137-150,152-160,174-198,200-213,215-219,221-230,232-241,243-246,248-249,251-254,256-258,260-272,274-277,279-283,285-289,291-294,296-375,381-409,415-421,423-427,432-458,462-464,466-503,506
+  s_960c322c053ced::t_702cbb3845aa4f 22
+  s_960c322c053ced::t_57c14086c66642 72,124,132,136,151,199,214,220,231,247,250,255,259,273,278,284,290,295,422,428-431,465
+crates/irl-provider/tests/store.rs
+  s_960c322c053ced::t_2446f6f56a9f5b 1-73,79-95,101-113
+  s_960c322c053ced::t_eb85e0efabf1ce 74-78,96-100
+crates/irl-provider/tests/version.rs
+  s_960c322c053ced::t_18f7f8777707a1 1-34
+crates/irl-provider/tests/api.rs
+  s_960c322c053ced::t_7de636b54daa30 53
+  s_960c322c053ced::t_0af047c0dacbfb 1-52,54-66
+crates/irl-provider/src/discovery.rs
+  s_960c322c053ced::t_d9c138fcae731f 59-62,116-117,131-133
+  s_960c322c053ced::t_9d4298cc7ac42e 1-58,63-115,118-130,134-169
+crates/irl-provider/Cargo.toml
+  s_960c322c053ced::t_eb85e0efabf1ce 26-28
+  s_960c322c053ced::t_4f7fb556a62fa6 3,11-13,17-18,22-24
+  s_960c322c053ced::t_c45387b90cc48f 1-2,4-10,14-16,20-21,25
+  s_960c322c053ced::t_ef286c9e77a3c9 19
+crates/irl-provider/tests/oauth.rs
+  s_960c322c053ced::t_39a9407b1809b3 1-83,87
+  s_960c322c053ced::t_eb85e0efabf1ce 84-86
+crates/irl-provider/src/browser.rs
+  s_960c322c053ced::t_91479c3c8baf28 1-65
+crates/irl-provider/src/version.rs
+  s_960c322c053ced::t_d04635d286d0f1 1-10,12-35
+  s_960c322c053ced::t_d9c138fcae731f 11
+crates/irl-provider/src/oauth.rs
+  s_960c322c053ced::t_5cd8dbbdccf396 1-45,50-91,97-203,209-256
+  s_960c322c053ced::t_d9c138fcae731f 46-49,92-96,204-208
+crates/irl-provider/tests/loopback.rs
+  s_960c322c053ced::t_f66bd92108f2fa 1-42,47-56,61-101
+  s_960c322c053ced::t_eb85e0efabf1ce 43-46,57-60
+crates/irl-provider/tests/discovery.rs
+  s_960c322c053ced::t_21f8146897d02f 1-41,44-63,80-131
+  s_960c322c053ced::t_eb85e0efabf1ce 42-43,64-79
+crates/irl-provider/src/hooks.rs
+  s_960c322c053ced::t_57c14086c66642 54,60
+  s_960c322c053ced::t_c1cf296fc8f271 1-53,55-59,61-65
+  s_960c322c053ced::t_702cbb3845aa4f 66
+crates/irl-provider/src/lib.rs
+  s_960c322c053ced::t_697a15b1dd04ff 22
+  s_960c322c053ced::t_e518e219b88a4d 1-21,23-37
+crates/irl-provider/src/api.rs
+  s_960c322c053ced::t_d9c138fcae731f 85-88,101-103,113-116,178-182
+  s_960c322c053ced::t_10720af4fd66f9 1-84,89-100,104-112,117-177,183-188
+Cargo.lock
+  s_960c322c053ced::t_1477a2cca99b15 44-49,67,76-81,118-172,211-230,255-374,396-407,427-432,449-460,507-512,546-551,577-582,599-613,621,680-693,706-740,747-789,808-819,831-892,899-959,966-986,992-1159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "358f2554fb0710a14bf517b3c34ce92ef9db43fe",
+  "prompts": {},
+  "sessions": {
+    "s_960c322c053ced": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c288de6b-bb88-4a94-a959-a7ad934b8a86",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
