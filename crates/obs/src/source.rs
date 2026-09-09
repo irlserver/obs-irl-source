@@ -4,7 +4,7 @@ use core::ffi::{CStr, c_void};
 use core::ptr::NonNull;
 
 use crate::audio::AudioFrame;
-use crate::data::Data;
+use crate::data::{Data, OwnedData};
 use crate::panic::{guard, guard_unit};
 use crate::proc::ProcHandler;
 use crate::properties::Properties;
@@ -364,6 +364,17 @@ impl SourceHandle {
         // be renamed from the OBS thread, so it is copied out immediately.
         let raw = unsafe { obs_sys::obs_source_get_name(self.as_ptr()) };
         cstr_to_string(raw)
+    }
+
+    /// `obs_source_get_settings`: the source's saved settings, as a new
+    /// reference. What a properties dialog with `OBS_PROPERTIES_DEFER_UPDATE`
+    /// has been typed into is not in here until OK or Apply.
+    pub fn settings(&self) -> OwnedData {
+        // SAFETY: live handle; libobs returns a reference this value owns.
+        let ptr = unsafe { obs_sys::obs_source_get_settings(self.as_ptr()) };
+        let ptr = NonNull::new(ptr).expect("obs_source_get_settings returned NULL");
+        // SAFETY: a fresh reference, released by `OwnedData::drop`.
+        unsafe { OwnedData::from_raw(ptr) }
     }
 
     /// `obs_source_update_properties`: ask the frontend to reload any open

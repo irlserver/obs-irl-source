@@ -84,14 +84,16 @@ impl ComboType {
 /// *private data*, a plugin-defined type this crate cannot name; a caller that
 /// needs the source finds it with [`crate::source::enum_sources`].
 pub trait ClickAction {
-    /// Return `true` to re-create the dialog's widgets.
+    /// `property` is the id the button was added under, so one marker type
+    /// can serve several buttons. Return `true` to re-create the dialog's
+    /// widgets.
     ///
     /// Only the *widgets*, and only from the `obs_properties_t` that already
     /// exists; the `get_properties` builder is not re-run. So `true` is right
     /// when the click changed `settings`, and useless when it changed something
     /// only the builder reads. For the latter, return `false` and raise
     /// [`crate::source::SourceHandle::update_properties`] from another thread.
-    fn clicked() -> bool;
+    fn clicked(property: &CStr) -> bool;
 }
 
 /// What a property's value change does. Implement on a marker type.
@@ -101,25 +103,43 @@ pub trait ClickAction {
 /// that writes into another property must therefore be idempotent on the
 /// values it leaves behind.
 pub trait ModifiedAction {
-    /// `settings` is live and writable: a modified callback is the one place a
-    /// property may set another property's value. `props` is the dialog being
-    /// shown, for toggling other properties' visibility. Return `true` to make
-    /// the frontend rebuild the widgets from the (possibly mutated) settings
-    /// and visibility.
-    fn modified(props: &PropertiesRef<'_>, settings: &Data<'_>) -> bool;
+    /// `property` is the id of the property that changed. `settings` is live
+    /// and writable: a modified callback is the one place a property may set
+    /// another property's value. `props` is the dialog being shown, for
+    /// toggling other properties' visibility. Return `true` to make the
+    /// frontend rebuild the widgets from the (possibly mutated) settings and
+    /// visibility.
+    fn modified(property: &CStr, props: &PropertiesRef<'_>, settings: &Data<'_>) -> bool;
+}
+
+/// The id a property was added under, or `""` for a null property.
+fn property_name(property: *mut obs_sys::obs_property_t) -> &'static CStr {
+    if property.is_null() {
+        return c"";
+    }
+    // SAFETY: live property; libobs returns the NUL-terminated name it owns,
+    // which lives as long as the properties object the callback runs inside.
+    let raw = unsafe { obs_sys::obs_property_name(property) };
+    if raw.is_null() {
+        return c"";
+    }
+    // SAFETY: non-null and NUL-terminated, see above.
+    unsafe { CStr::from_ptr(raw) }
 }
 
 unsafe extern "C" fn click_trampoline<A: ClickAction>(
     _props: *mut obs_sys::obs_properties_t,
-    _property: *mut obs_sys::obs_property_t,
+    property: *mut obs_sys::obs_property_t,
     _data: *mut c_void,
 ) -> bool {
-    guard("property button", false, A::clicked)
+    guard("property button", false, || {
+        A::clicked(property_name(property))
+    })
 }
 
 unsafe extern "C" fn modified_trampoline<M: ModifiedAction>(
     props: *mut obs_sys::obs_properties_t,
-    _property: *mut obs_sys::obs_property_t,
+    property: *mut obs_sys::obs_property_t,
     settings: *mut obs_sys::obs_data_t,
 ) -> bool {
     guard("property modified", false, || {
@@ -130,7 +150,7 @@ unsafe extern "C" fn modified_trampoline<M: ModifiedAction>(
         // of the callback.
         let props = PropertiesRef(props, PhantomData);
         let settings = unsafe { Data::from_raw(settings) };
-        M::modified(&props, &settings)
+        M::modified(property_name(property), &props, &settings)
     })
 }
 
