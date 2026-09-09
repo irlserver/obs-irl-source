@@ -716,6 +716,11 @@ unsafe extern "C" {
         p: *mut obs_property_t,
         modified: obs_property_modified_t,
     );
+    pub fn obs_properties_get(
+        props: *mut obs_properties_t,
+        property: *const c_char,
+    ) -> *mut obs_property_t;
+    pub fn obs_property_set_visible(p: *mut obs_property_t, visible: bool);
     pub fn obs_properties_add_button(
         props: *mut obs_properties_t,
         name: *const c_char,
