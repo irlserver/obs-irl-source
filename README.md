@@ -73,7 +73,7 @@ The release binary bundles its own media stack and resolves libobs symbols from 
 
 ## Usage
 
-1. Add a new source: **IRL Source (irlserver.com)**
+1. Add a new source: **IRL Source**
 2. Pick a provider and sign in, then choose an ingest from the list. Or leave Provider on **Manual URL** and enter your stream URL (for example `srt://your-server:4000?streamid=play/stream/key`).
 3. Leave the rest alone unless you have a reason. The defaults are the tested path.
 
