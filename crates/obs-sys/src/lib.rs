@@ -286,6 +286,26 @@ pub type obs_source_enum_proc_t = Option<
 >;
 pub type proc_handler_proc_t = Option<unsafe extern "C" fn(data: *mut c_void, cd: *mut calldata_t)>;
 
+/// `obs_property_clicked_t`. `data` is the source's *private data*
+/// (`obs_property_button_clicked` passes `context->data`), not the
+/// `obs_source_t*` it looks like it should be.
+pub type obs_property_clicked_t = Option<
+    unsafe extern "C" fn(
+        props: *mut obs_properties_t,
+        property: *mut obs_property_t,
+        data: *mut c_void,
+    ) -> bool,
+>;
+/// `obs_property_modified_t`. Returning `true` makes the frontend rebuild the
+/// dialog's widgets from the (possibly just-mutated) settings.
+pub type obs_property_modified_t = Option<
+    unsafe extern "C" fn(
+        props: *mut obs_properties_t,
+        property: *mut obs_property_t,
+        settings: *mut obs_data_t,
+    ) -> bool,
+>;
+
 /// `struct obs_source_info`, OBS 32.1.2 field order (identical since 30.0).
 ///
 /// Invariant: never append a field beyond what the oldest supported OBS
@@ -586,6 +606,10 @@ unsafe extern "C" {
     pub fn obs_source_set_async_unbuffered(source: *mut obs_source_t, unbuffered: bool);
     pub fn obs_source_set_async_decoupled(source: *mut obs_source_t, decouple: bool);
     pub fn obs_source_media_started(source: *mut obs_source_t);
+    /// Raises `update_properties` on the source; the frontend reloads any open
+    /// properties dialog for it. Only signals, so safe from a worker thread —
+    /// the Qt side hops to the UI thread through a queued connection.
+    pub fn obs_source_update_properties(source: *mut obs_source_t);
 
     // ── obs.h: scenes and scene items ──────────────────────────────────
     pub fn obs_scene_from_source(source: *const obs_source_t) -> *mut obs_scene_t;
@@ -683,6 +707,21 @@ unsafe extern "C" {
         name: *const c_char,
         val: i64,
     ) -> usize;
+    pub fn obs_property_list_add_string(
+        p: *mut obs_property_t,
+        name: *const c_char,
+        val: *const c_char,
+    ) -> usize;
+    pub fn obs_property_set_modified_callback(
+        p: *mut obs_property_t,
+        modified: obs_property_modified_t,
+    );
+    pub fn obs_properties_add_button(
+        props: *mut obs_properties_t,
+        name: *const c_char,
+        text: *const c_char,
+        callback: obs_property_clicked_t,
+    ) -> *mut obs_property_t;
 
     // ── callback/calldata.h ────────────────────────────────────────────
     // The typed helpers around these three are `static inline` in the header
@@ -717,6 +756,13 @@ unsafe extern "C" {
         name: *const c_char,
         params: *mut calldata_t,
     ) -> bool;
+
+    // ── obs-module.h ───────────────────────────────────────────────────
+    /// Returns a `bmalloc`'d path; free it with [`bfree`].
+    pub fn obs_module_get_config_path(
+        module: *mut obs_module_t,
+        file: *const c_char,
+    ) -> *mut c_char;
 
     // ── obs.h / util/text-lookup.h: module locale ──────────────────────
     pub fn obs_module_load_locale(
