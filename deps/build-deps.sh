@@ -70,7 +70,7 @@ if [[ ${host} == windows ]]; then
 	# that directory first fixes it without modifying the MSYS2 install.
 	if ! command -v cl >/dev/null 2>&1; then
 		echo "cl.exe is not on PATH. Run this from an MSVC environment" >&2
-		echo "(the CI job uses ilammy/msvc-dev-cmd plus msys2 path-type: inherit)." >&2
+		echo "(the CI job runs vcvarsall.bat x64 first, then msys2 with path-type: inherit)." >&2
 		exit 1
 	fi
 	PATH="$(dirname "$(command -v cl)"):${PATH}"
