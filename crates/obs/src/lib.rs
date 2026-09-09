@@ -31,7 +31,10 @@ pub mod websocket;
 pub use audio::{AudioFormat, AudioFrame, SpeakerLayout};
 pub use data::{Data, DataArray, OwnedData};
 pub use proc::{CallData, ProcCallback, ProcHandler};
-pub use properties::{ComboFormat, IntList, IntProperty, Properties, TextType};
+pub use properties::{
+    ClickAction, ComboFormat, ComboType, IntList, IntProperty, ModifiedAction, Properties,
+    StringList, TextType,
+};
 pub use scene::{BoundsType, Scene, SceneItem, TransformInfo, VideoInfo};
 pub use source::{
     IconType, MediaState, OwnedSource, Source, SourceHandle, SourceType, register_source,

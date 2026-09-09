@@ -366,6 +366,19 @@ impl SourceHandle {
         cstr_to_string(raw)
     }
 
+    /// `obs_source_update_properties`: ask the frontend to reload any open
+    /// properties dialog for this source, re-running the `get_properties`
+    /// builder.
+    ///
+    /// Call it from a worker thread, never from inside a property callback.
+    /// The frontend's handler is a Qt AutoConnection: raised from another
+    /// thread it is queued, raised on the UI thread it runs inline, and the
+    /// reload frees the widget whose callback is still on the stack.
+    pub fn update_properties(&self) {
+        // SAFETY: live handle; the call only raises a signal.
+        unsafe { obs_sys::obs_source_update_properties(self.as_ptr()) };
+    }
+
     /// `obs_source_get_unversioned_id`.
     pub fn unversioned_id(&self) -> String {
         // SAFETY: live handle; the id is a static string in the source info.

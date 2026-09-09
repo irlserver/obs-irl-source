@@ -7,9 +7,10 @@
 //! the functions below, so a plugin gets the full C behavior without writing
 //! any `extern "C"` itself.
 
-use core::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use std::path::PathBuf;
 
 /// The C `obs_current_module()`. It is *not* a libobs export: OBS_DECLARE_MODULE
 /// defines it in the plugin, backed by whatever `obs_module_set_pointer`
@@ -31,6 +32,34 @@ pub fn set_pointer(module: *mut obs_sys::obs_module_t) {
 #[must_use]
 pub fn current_module() -> *mut obs_sys::obs_module_t {
     MODULE.load(Ordering::Acquire)
+}
+
+/// `obs_module_config_path`: `file` inside the directory OBS reserves for
+/// this module's own state (`…/obs-studio/plugin_config/<module>/`), which is
+/// where anything that must not travel with a scene collection belongs.
+///
+/// `None` before `obs_module_set_pointer` has run, or if libobs declines to
+/// build a path.
+#[must_use]
+pub fn config_path(file: &CStr) -> Option<PathBuf> {
+    let module = current_module();
+    if module.is_null() {
+        return None;
+    }
+    // SAFETY: live module pointer and a NUL-terminated name; libobs returns a
+    // bmalloc'd string the caller owns.
+    let raw = unsafe { obs_sys::obs_module_get_config_path(module, file.as_ptr()) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: non-null and NUL-terminated, and ours until the `bfree` below.
+    let path = unsafe { CStr::from_ptr(raw) }
+        .to_str()
+        .ok()
+        .map(PathBuf::from);
+    // SAFETY: allocated by libobs's allocator above and not used again.
+    unsafe { obs_sys::bfree(raw.cast::<c_void>()) };
+    path
 }
 
 /// `obs_module_set_locale`: destroy the previous lookup and load
