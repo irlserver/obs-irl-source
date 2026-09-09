@@ -1,0 +1,27 @@
+crates/obs/src/source.rs
+  s_960c322c053ced::t_a639321d13459f 369-381
+crates/obs/src/lib.rs
+  s_960c322c053ced::t_a639321d13459f 34-37
+crates/obs/src/module.rs
+  s_960c322c053ced::t_a639321d13459f 10,13,37-62
+  s_960c322c053ced::t_9c1732a6e1b700 63-64
+crates/obs/src/properties.rs
+  s_960c322c053ced::t_a639321d13459f 2-8,10,14-16,53-133,235-272,303-332
+  s_960c322c053ced::t_a6f1632b00e1b6 333
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "22350c5d09a52b0b56c6d2550fb5353c6be06dd3",
+  "prompts": {},
+  "sessions": {
+    "s_960c322c053ced": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c288de6b-bb88-4a94-a959-a7ad934b8a86",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
