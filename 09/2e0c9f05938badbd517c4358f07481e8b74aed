@@ -1,0 +1,19 @@
+crates/obs/src/properties.rs
+  s_960c322c053ced::t_925be030f55bfa 184-195,217,219-221,229-238
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "092e0c9f05938badbd517c4358f07481e8b74aed",
+  "prompts": {},
+  "sessions": {
+    "s_960c322c053ced": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c288de6b-bb88-4a94-a959-a7ad934b8a86",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
