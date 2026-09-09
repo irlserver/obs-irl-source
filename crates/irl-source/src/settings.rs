@@ -14,6 +14,7 @@ use crate::source::IrlSource;
 /// demuxer options use the constant), so it was removed rather than ported.
 pub fn defaults(settings: &Data<'_>) {
     settings.set_default_str(c"url", c"");
+    crate::providers::defaults(settings);
     settings.set_default_i64(c"reconnect_delay", consts::DEFAULT_RECONNECT_DELAY_S);
 
     settings.set_default_i64(c"buffer_target_ms", consts::DEFAULT_BUFFER_TARGET_MS);
@@ -29,7 +30,7 @@ pub fn defaults(settings: &Data<'_>) {
 }
 
 /// `irl_source_get_properties`.
-pub fn properties(_instance: Option<&IrlSource>) -> Properties {
+pub fn properties(instance: Option<&IrlSource>) -> Properties {
     let props = Properties::new();
 
     // Without this, the dialog calls update() on every keystroke, so typing a
@@ -37,6 +38,10 @@ pub fn properties(_instance: Option<&IrlSource>) -> Properties {
     props.set_flags(obs::sys::OBS_PROPERTIES_DEFER_UPDATE);
 
     // ── General ──
+    //
+    // The Provider dropdown and its pickers write into `url`; `url` itself is
+    // what everything downstream reads.
+    crate::providers::add_properties(&props, instance);
     props.add_text(c"url", module_text(c"URL"), TextType::Default);
     props.add_int(
         c"reconnect_delay",

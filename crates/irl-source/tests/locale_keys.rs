@@ -9,9 +9,10 @@
 //! calls into libobs.
 
 const LOCALE: &str = include_str!("../../../data/locale/en-US.ini");
-const SOURCES: [(&str, &str); 2] = [
+const SOURCES: [(&str, &str); 3] = [
     ("settings.rs", include_str!("../src/settings.rs")),
     ("source.rs", include_str!("../src/source.rs")),
+    ("providers.rs", include_str!("../src/providers.rs")),
 ];
 
 /// Every `module_text(c"…")` argument in a source file.
@@ -71,4 +72,5 @@ fn the_scan_finds_the_keys_it_should() {
     assert!(found.contains(&"CatchUpSpeed"));
     assert!(found.contains(&"TargetBuffer"));
     assert!(keys(SOURCES[1].1).contains(&"SourceName"));
+    assert!(keys(SOURCES[2].1).contains(&"Provider"));
 }

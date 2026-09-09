@@ -6,7 +6,7 @@ members = [
     "crates/ffmpeg",
     "crates/irl-core",
     "crates/irl-provider",
-    "crates/irl-source", "crates/irl-provider",
+    "crates/irl-source",
 ]
 
 [workspace.package]
@@ -24,6 +24,7 @@ obs-sys = { path = "crates/obs-sys" }
 obs = { path = "crates/obs" }
 irl-ffmpeg = { path = "crates/ffmpeg" }
 irl-core = { path = "crates/irl-core" }
+irl-provider = { path = "crates/irl-provider" }
 # The bundled FFmpeg is located through FFMPEG_DIR (see .cargo/config.toml);
 # `static` makes the sys crate emit static link lines for the five libav*
 # archives. The transitive libraries (srt, rist, mbedtls, ...) are linked by

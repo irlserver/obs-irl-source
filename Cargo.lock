@@ -411,6 +411,7 @@ version = "2.0.2"
 dependencies = [
  "irl-core",
  "irl-ffmpeg",
+ "irl-provider",
  "obs",
  "parking_lot",
 ]
