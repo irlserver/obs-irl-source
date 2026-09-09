@@ -74,7 +74,7 @@ The release binary bundles its own media stack and resolves libobs symbols from 
 ## Usage
 
 1. Add a new source: **IRL Source (irlserver.com)**
-2. Enter your stream URL (for example `srt://your-server:4000?streamid=play/stream/key`)
+2. Pick a provider and sign in, then choose an ingest from the list. Or leave Provider on **Manual URL** and enter your stream URL (for example `srt://your-server:4000?streamid=play/stream/key`).
 3. Leave the rest alone unless you have a reason. The defaults are the tested path.
 
 A source you just added sizes itself to the canvas when its first frame arrives, same result as Edit > Transform > Fit to screen (aspect preserved, nothing cropped). This happens once. A source loaded from a saved scene collection is never touched, and once you move or resize it the plugin leaves it alone.
@@ -83,6 +83,10 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| Provider | Manual URL | Where the pull URL comes from. Manual URL means you type it. A provider lets you sign in and pick an ingest by name. Custom provider takes the base URL of any service that implements the [provider protocol](docs/provider-protocol.md) |
+| Provider URL | | Only with Custom provider: the service's base URL, `https://…` |
+| Ingest | | Your ingests at the selected provider, by name, with region and live status when the provider reports them. Picking one writes its pull URL into URL below and then resets itself, so it is an action rather than a setting |
+| Sign in / Refresh ingests / Sign out | | Sign in opens your browser at the provider. Once signed in the same button re-reads the list, and Sign out ends the session. The sign-in survives an OBS restart |
 | URL | | Your pull URL. SRT, RTMP, or anything else FFmpeg can open |
 | Reconnect Delay | 2s | How long to wait between reconnect attempts |
 | Target Buffer | 120ms | How much audio cushion to hold, 20ms to 8s. This is your main latency knob: higher rides out a worse connection, lower is snappier and less forgiving. If the stats show `underruns` climbing, this is the setting to raise — an underrun means the cushion ran dry, and the concealment that covers it delays video by the same amount to keep lip sync. The whole target is paid as delay before the source starts, so raise it to what your connection actually needs rather than to the maximum. Memory cost is small and does not depend on resolution much: video is held compressed and only decoded just before it is shown |
@@ -98,6 +102,14 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 Target Buffer, Reconnect Delay, Adaptive Latency Control, Catch-Up Speed, Wait for Keyframe, Show Nothing When the Stream Ends and Close Stream When Inactive can be changed while the stream is running. The connection stays up and the stats counters keep counting. The one exception is turning Close Stream When Inactive on while the source is already hidden, which is a request to stop receiving: that drops the connection and resets the stats counters, as it would on any later hide. Changing Target Buffer mid-stream keeps every buffered sample and walks the latency to the new value at up to the Catch-Up Speed or -2%, so you should not hear a seam. Changing URL, FFmpeg Options, Hardware Decode or Low Latency Audio reconnects, because those are set when the stream is opened.
 
 Earlier versions exposed Min/Max Buffer, PTS gap thresholds, Network Buffer and Decoupled Audio. Those are now fixed or derived internally, so old scene collections keep working and ignore the stored values.
+
+### Providers
+
+Signing in opens your browser at the provider and hands the session back to OBS over a loopback address, the same OAuth flow a native app uses. Nothing is typed into OBS. The session lands in a file under OBS's plugin config directory, owner-only on macOS and Linux, never in your scene collection, so exporting or sharing a collection never carries it with you.
+
+Signing in changes nothing about how a source streams. The Ingest list writes a plain URL into the URL field, and that field is all the receiver ever reads. A scene collection you saved months ago keeps working with an expired session, a provider that is down, or no sign-in at all. Only the list stops filling. When a session expires the plugin notices on the next refresh and the button goes back to Sign in.
+
+The ingest list never contains stream keys. Picking an entry asks the provider for that one URL, which goes straight into the URL field. Any service can be a provider by implementing [docs/provider-protocol.md](docs/provider-protocol.md); paste its base URL under Custom provider.
 
 ### Buffered or low latency?
 
