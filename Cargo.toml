@@ -5,7 +5,8 @@ members = [
     "crates/obs",
     "crates/ffmpeg",
     "crates/irl-core",
-    "crates/irl-source",
+    "crates/irl-provider",
+    "crates/irl-source", "crates/irl-provider",
 ]
 
 [workspace.package]

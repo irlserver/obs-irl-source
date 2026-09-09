@@ -1,0 +1,28 @@
+[package]
+name = "irl-provider"
+description = "The plugin side of the provider protocol: discovery, OAuth sign-in and the key-free ingest list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+base64 = "0.23.1"
+parking_lot.workspace = true
+# ring is already in the tree as rustls's crypto provider; PKCE needs SHA-256
+# and a CSPRNG, and taking them from ring adds no crate.
+ring = "0.17.14"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+# Blocking HTTP, no async runtime. default-features = false drops gzip;
+# "rustls" resolves TLS onto ring, not aws-lc-rs, so no build machine needs
+# cmake, nasm, perl or go. `make tls-provider` asserts that stays true.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+[dev-dependencies]
+serde_json = "1.0.151"
