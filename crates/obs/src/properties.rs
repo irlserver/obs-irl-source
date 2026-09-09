@@ -181,6 +181,18 @@ impl Property<'_> {
         // SAFETY: live property owned by the borrowed properties object.
         unsafe { obs_sys::obs_property_set_visible(self.0.as_ptr(), visible) };
     }
+
+    /// `obs_property_set_modified_callback`, calling `M::modified` whenever
+    /// the value changes.
+    pub fn on_modified<M: ModifiedAction>(&self) {
+        // SAFETY: live property; the trampoline is a `'static` fn item.
+        unsafe {
+            obs_sys::obs_property_set_modified_callback(
+                self.0.as_ptr(),
+                Some(modified_trampoline::<M>),
+            );
+        }
+    }
 }
 
 /// `obs_properties_t` being built. Ownership passes to libobs when the
@@ -202,10 +214,11 @@ impl Properties {
         unsafe { obs_sys::obs_properties_set_flags(self.0.as_ptr(), flags) };
     }
 
-    pub fn add_text(&self, id: &CStr, description: &CStr, kind: TextType) {
+    pub fn add_text(&self, id: &CStr, description: &CStr, kind: TextType) -> Property<'_> {
         // SAFETY: live handle; libobs copies both strings and owns the
-        // returned obs_property_t, which stays inside the properties object.
-        unsafe {
+        // returned obs_property_t, which stays inside the properties object
+        // that the returned handle borrows.
+        let ptr = unsafe {
             obs_sys::obs_properties_add_text(
                 self.0.as_ptr(),
                 id.as_ptr(),
@@ -213,6 +226,16 @@ impl Properties {
                 kind.to_sys(),
             )
         };
+        Property(
+            NonNull::new(ptr).expect("obs_properties_add_text returned NULL"),
+            PhantomData,
+        )
+    }
+
+    /// The same object as a non-owning view, so code that runs both at build
+    /// time and inside a modified callback can take one type.
+    pub fn view(&self) -> PropertiesRef<'_> {
+        PropertiesRef(self.0, PhantomData)
     }
 
     pub fn add_int(&self, id: &CStr, description: &CStr, min: i32, max: i32, step: i32) {
