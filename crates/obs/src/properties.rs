@@ -102,9 +102,11 @@ pub trait ClickAction {
 /// values it leaves behind.
 pub trait ModifiedAction {
     /// `settings` is live and writable: a modified callback is the one place a
-    /// property may set another property's value. Return `true` to make the
-    /// frontend rebuild the widgets from the (possibly mutated) settings.
-    fn modified(settings: &Data<'_>) -> bool;
+    /// property may set another property's value. `props` is the dialog being
+    /// shown, for toggling other properties' visibility. Return `true` to make
+    /// the frontend rebuild the widgets from the (possibly mutated) settings
+    /// and visibility.
+    fn modified(props: &PropertiesRef<'_>, settings: &Data<'_>) -> bool;
 }
 
 unsafe extern "C" fn click_trampoline<A: ClickAction>(
@@ -116,19 +118,49 @@ unsafe extern "C" fn click_trampoline<A: ClickAction>(
 }
 
 unsafe extern "C" fn modified_trampoline<M: ModifiedAction>(
-    _props: *mut obs_sys::obs_properties_t,
+    props: *mut obs_sys::obs_properties_t,
     _property: *mut obs_sys::obs_property_t,
     settings: *mut obs_sys::obs_data_t,
 ) -> bool {
     guard("property modified", false, || {
-        let Some(settings) = NonNull::new(settings) else {
+        let (Some(props), Some(settings)) = (NonNull::new(props), NonNull::new(settings)) else {
             return false;
         };
-        // SAFETY: non-null, and libobs keeps it alive for the duration of the
-        // callback.
+        // SAFETY: both non-null, and libobs keeps both alive for the duration
+        // of the callback.
+        let props = PropertiesRef(props, PhantomData);
         let settings = unsafe { Data::from_raw(settings) };
-        M::modified(&settings)
+        M::modified(&props, &settings)
     })
+}
+
+/// A non-owning view of an `obs_properties_t` the frontend holds, as handed
+/// to a modified callback.
+#[derive(Debug)]
+pub struct PropertiesRef<'a>(NonNull<obs_sys::obs_properties_t>, PhantomData<&'a ()>);
+
+impl PropertiesRef<'_> {
+    /// `obs_properties_get`: the property named `id`, if the builder added
+    /// one.
+    pub fn get(&self, id: &CStr) -> Option<Property<'_>> {
+        // SAFETY: live properties object for `'a`; `id` is NUL-terminated.
+        let ptr = unsafe { obs_sys::obs_properties_get(self.0.as_ptr(), id.as_ptr()) };
+        NonNull::new(ptr).map(|p| Property(p, PhantomData))
+    }
+}
+
+/// One property inside a properties object, borrowed from it. libobs owns the
+/// property itself.
+#[derive(Debug)]
+pub struct Property<'p>(NonNull<obs_sys::obs_property_t>, PhantomData<&'p ()>);
+
+impl Property<'_> {
+    /// `obs_property_set_visible`. Takes effect when the widgets are next
+    /// built: at dialog open, or after a callback returns `true`.
+    pub fn set_visible(&self, visible: bool) {
+        // SAFETY: live property owned by the borrowed properties object.
+        unsafe { obs_sys::obs_property_set_visible(self.0.as_ptr(), visible) };
+    }
 }
 
 /// `obs_properties_t` being built. Ownership passes to libobs when the
@@ -254,6 +286,14 @@ impl Properties {
             NonNull::new(ptr).expect("obs_properties_add_list returned NULL"),
             PhantomData,
         )
+    }
+
+    /// `obs_properties_get`: a property added earlier in this build, for
+    /// setting its initial visibility.
+    pub fn get(&self, id: &CStr) -> Option<Property<'_>> {
+        // SAFETY: live handle owned by `self`; `id` is NUL-terminated.
+        let ptr = unsafe { obs_sys::obs_properties_get(self.0.as_ptr(), id.as_ptr()) };
+        NonNull::new(ptr).map(|p| Property(p, PhantomData))
     }
 
     /// `obs_properties_add_button`, calling `A::clicked` on press.

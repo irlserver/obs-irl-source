@@ -33,7 +33,7 @@ pub use data::{Data, DataArray, OwnedData};
 pub use proc::{CallData, ProcCallback, ProcHandler};
 pub use properties::{
     ClickAction, ComboFormat, ComboType, IntList, IntProperty, ModifiedAction, Properties,
-    StringList, TextType,
+    PropertiesRef, Property, StringList, TextType,
 };
 pub use scene::{BoundsType, Scene, SceneItem, TransformInfo, VideoInfo};
 pub use source::{
