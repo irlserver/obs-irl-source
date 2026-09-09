@@ -1,0 +1,40 @@
+crates/irl-source/tests/provider_seam.rs
+  s_960c322c053ced::t_12fb8a903ca029 1-49,56-65,71-116
+  s_960c322c053ced::t_c363d5c1ac4f5f 50-55,66-70
+crates/irl-source/src/source.rs
+  s_960c322c053ced::t_925be030f55bfa 52-57
+crates/irl-source/src/settings.rs
+  s_960c322c053ced::t_925be030f55bfa 17,33,41-44
+Cargo.toml
+  s_960c322c053ced::t_c363d5c1ac4f5f 9,27
+crates/irl-source/tests/locale_keys.rs
+  s_960c322c053ced::t_925be030f55bfa 12,15,75
+data/locale/en-US.ini
+  s_960c322c053ced::t_925be030f55bfa 3-15
+crates/irl-source/Cargo.toml
+  s_960c322c053ced::t_925be030f55bfa 33
+crates/irl-source/src/lib.rs
+  s_960c322c053ced::t_925be030f55bfa 11,49
+crates/irl-source/src/providers.rs
+  s_960c322c053ced::t_d3d7699e0a454a 1-120,126-176,182-183,189-196,198-211,217-231,236-277,284-380
+  s_960c322c053ced::t_bf1185ff2f0efb 197
+  s_960c322c053ced::t_c363d5c1ac4f5f 121-125,177-181,184-188,212-216,232-235,278-283
+Cargo.lock
+  s_960c322c053ced::t_6a682d56c6fd44 414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "af39fddbbe9f6d388928cf5a17d32648e4cbc84b",
+  "prompts": {},
+  "sessions": {
+    "s_960c322c053ced": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c288de6b-bb88-4a94-a959-a7ad934b8a86",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
