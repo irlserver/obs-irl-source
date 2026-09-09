@@ -335,6 +335,28 @@ pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 /// Interval of the periodic receiver stats log line.
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
 
+// ── Providers ──
+
+/// A provider the Provider dropdown offers before any sign-in. See
+/// `docs/provider-protocol.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinProvider {
+    /// The dropdown label until the provider's own document has been read.
+    pub name: &'static str,
+    /// Where `/.well-known/irl-source-provider.json` is fetched from.
+    pub base_url: &'static str,
+}
+
+/// The stock list. A build for one provider replaces this with itself and
+/// turns [`ALLOW_CUSTOM_PROVIDER`] off; nothing else has to change.
+pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[BuiltinProvider {
+    name: "IRLServer",
+    base_url: "https://irlserver.com",
+}];
+
+/// Whether the dropdown offers a Custom entry with a base URL field.
+pub const ALLOW_CUSTOM_PROVIDER: bool = true;
+
 /// Ring capacity when the format is degenerate and `4 × max_ms` works out to
 /// nothing (`audio_buffer_init`'s `buf->capacity = 65536` fallback).
 pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
