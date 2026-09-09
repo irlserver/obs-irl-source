@@ -252,6 +252,7 @@ This plugin was heavily built with LLM assistance, including the Rust port. The 
 - **`THIRD_PARTY_NOTICES.md`** — Licenses for the statically linked stack and the Rust crates, shipped inside every release archive rather than only living in the repo, because LGPLv3 FFmpeg wants its notices conveyed with the object code. `deps/README.md` has the reasoning behind the license choices; this file is the artifact-facing copy.
 - **`docs/audio-pipeline.md`** — Deep dive on the buffered vs low-latency audio paths, jitter buffer, adaptive latency control, PTS repair tiers, and timestamp handling.
 - **`docs/viewer-quality-plan.md`** — The viewer-quality policy and the recovery/diagnostics behavior that implements it (what stats to watch and what healthy looks like).
+- **`docs/provider-protocol.md`** — The contract a service implements to appear in the Provider dropdown: discovery document, OAuth sign-in, the key-free ingest list and the resolve call. The plugin side of it lives in `crates/irl-provider`.
 - **`docs/audio-timing-pitfalls.md`** — What was built wrong first in the audio timing path, and the media-clock estimator that was built, measured and deleted. Required reading before changing `crates/irl-core/src/speed.rs`; most of it is re-inventable.
 - **`Makefile`**, **`.config/`** — The quality gates and their explicit configs (`rustfmt.toml`, `codespellrc`), so `make check` gives the same answer everywhere.
 - **`AGENTS.md`**, **`GEMINI.md`** — Symlinks to this file (`CLAUDE.md`).
