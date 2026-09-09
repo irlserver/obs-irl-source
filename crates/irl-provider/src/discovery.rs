@@ -1,6 +1,7 @@
 //! The provider document and the OIDC configuration it points at.
 
 use std::fmt;
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
@@ -86,9 +87,26 @@ fn is_loopback_http(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("http://") else {
         return false;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-    host == "127.0.0.1" || host == "localhost" || host == "[::1]"
+    // A userinfo section is rejected rather than parsed past: the host in
+    // `http://127.0.0.1:1@attacker.example/` is the attacker's, and nothing
+    // the plugin talks to needs credentials in the URL.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // An IPv6 host keeps its brackets here.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[must_use]

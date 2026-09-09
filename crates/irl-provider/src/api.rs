@@ -1,6 +1,7 @@
 //! The two provider endpoints, and the HTTP agent every request goes through.
 
 use std::fmt;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -60,15 +61,23 @@ impl fmt::Display for ApiError {
 /// Hard ceilings so a dead provider is a short pause, never a hang. The
 /// resolve call runs on the OBS UI thread inside a property callback, so this
 /// is what stands between a blackholed DNS lookup and a frozen dialog.
-pub(crate) fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(3)))
-        .timeout_global(Some(Duration::from_secs(5)))
-        // Inspect status codes ourselves rather than having them raise.
-        .http_status_as_error(false)
-        .user_agent(hooks::user_agent())
-        .build()
-        .into()
+///
+/// One agent for the process, so a sign-in and the ingest calls after it reuse
+/// the connection instead of paying a TLS handshake each. Built on first use,
+/// which is after [`crate::init`] has installed the hooks the user agent comes
+/// from.
+pub(crate) fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(3)))
+            .timeout_global(Some(Duration::from_secs(5)))
+            // Inspect status codes ourselves rather than having them raise.
+            .http_status_as_error(false)
+            .user_agent(hooks::user_agent())
+            .build()
+            .into()
+    })
 }
 
 /// An unauthenticated GET returning the body, for the discovery documents.

@@ -176,6 +176,13 @@ fn run_sign_in(base_url: &str) {
             .client_id
             .clone()
             .or_else(|| previous.as_ref().and_then(|e| e.stored.client_id.clone()));
+        // The session survives the refreshed documents. Every path below can
+        // return early (the version gate, a refused registration, a browser
+        // that does not open, a sign-in the user abandons), and clearing it
+        // here would sign the user out for pressing Sign in a second time.
+        // A provider reached at another base URL is another origin: its
+        // refresh token must not be replayed to this one.
+        let session = previous.filter(|e| e.stored.base_url == base_url);
         reg.by_id.insert(
             doc.id.clone(),
             Entry {
@@ -184,10 +191,15 @@ fn run_sign_in(base_url: &str) {
                     doc: doc.clone(),
                     oidc: oidc.clone(),
                     client_id: client_id.clone(),
-                    refresh_token: None,
-                    ingests: Vec::new(),
+                    refresh_token: session
+                        .as_ref()
+                        .and_then(|e| e.stored.refresh_token.clone()),
+                    ingests: session
+                        .as_ref()
+                        .map(|e| e.stored.ingests.clone())
+                        .unwrap_or_default(),
                 },
-                access_token: None,
+                access_token: session.and_then(|e| e.access_token),
             },
         );
         client_id

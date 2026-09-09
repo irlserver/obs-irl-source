@@ -120,9 +120,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Formatting and spelling are checked once, on Linux: they are
-      # platform-independent, so running them per platform only buys three
-      # copies of the same failure. `make style` fixes both locally.
+      # Formatting, spelling and the TLS provider are checked once, on Linux:
+      # they read the tree, not the platform, so running them per platform only
+      # buys three copies of the same failure. `make style` fixes the first two
+      # locally.
       - name: Format check
         run: make style-check
 
@@ -130,6 +131,11 @@ jobs:
         run: |
           pipx install codespell
           make spell-check
+
+      # Cargo.lock must keep resolving rustls onto ring: aws-lc-sys would put
+      # cmake, nasm, perl and go on every build machine.
+      - name: TLS provider
+        run: make tls-provider
 
       # libobs is installed here (OBS PPA, see above), so the test binaries
       # that touch libobs symbols (obs, irl-source) link and run on this

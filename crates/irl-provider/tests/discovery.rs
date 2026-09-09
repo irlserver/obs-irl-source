@@ -101,6 +101,22 @@ fn base_urls_are_normalized_and_gated() {
 }
 
 #[test]
+fn loopback_http_reads_the_real_host() {
+    // Userinfo that looks like a loopback authority; the host is the one
+    // after the `@`.
+    assert!(normalize_base_url("http://127.0.0.1:1@attacker.example/").is_none());
+    assert!(normalize_base_url("http://localhost@attacker.example/").is_none());
+    // IPv6 loopback, with and without a port.
+    assert_eq!(
+        normalize_base_url("http://[::1]/"),
+        Some("http://[::1]".to_owned())
+    );
+    assert!(normalize_base_url("http://[::1]:3000/api").is_some());
+    assert!(normalize_base_url("http://127.1.2.3:3000").is_some());
+    assert!(normalize_base_url("http://[2001:db8::1]:3000").is_none());
+}
+
+#[test]
 fn well_known_paths_tolerate_a_trailing_slash() {
     assert_eq!(
         well_known_url("https://provider.example/"),

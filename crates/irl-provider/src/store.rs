@@ -14,6 +14,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,24 @@ pub struct Stored {
 
 fn path_for(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.json"))
+}
+
+/// A temporary name no other [`save`] can be holding open: two threads can
+/// persist the same provider at once (a refresh landing while a sign-out
+/// runs), and one fixed name would let one truncate the other's file and
+/// rename half a token into place.
+fn tmp_path_for(dir: &Path, id: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{id}.json.{}-{n}{TMP_SUFFIX}", std::process::id()))
+}
+
+/// What marks a file as a half-written state file. [`load_all`] skips it and
+/// [`remove`] deletes every one of them.
+const TMP_SUFFIX: &str = ".tmp";
+
+fn is_tmp_for(name: &str, id: &str) -> bool {
+    name.starts_with(&format!("{id}.json.")) && name.ends_with(TMP_SUFFIX)
 }
 
 /// Any failure (truncated, half-written by a crash, hand-edited) yields
@@ -73,7 +92,7 @@ pub fn save(dir: &Path, stored: &Stored) -> std::io::Result<()> {
     let path = path_for(dir, &stored.doc.id);
     let json = serde_json::to_string_pretty(stored).map_err(std::io::Error::other)?;
 
-    let tmp = path.with_extension("json.tmp");
+    let tmp = tmp_path_for(dir, &stored.doc.id);
     let mut file = create_private(&tmp)?;
     file.write_all(json.as_bytes())?;
     file.sync_all()?;
@@ -82,11 +101,21 @@ pub fn save(dir: &Path, stored: &Stored) -> std::io::Result<()> {
 }
 
 pub fn remove(dir: &Path, id: &str) {
-    let path = path_for(dir, id);
-    // The temp file too. A `save` that failed at `rename` left a complete
-    // token there, and sign-out exists so the token is gone from the machine.
-    let _ = fs::remove_file(path.with_extension("json.tmp"));
-    let _ = fs::remove_file(path);
+    // The temp files too. A `save` that failed at `rename` left a complete
+    // token in one, and sign-out exists so the token is gone from the machine.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| is_tmp_for(n, id))
+            {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    let _ = fs::remove_file(path_for(dir, id));
 }
 
 #[cfg(unix)]

@@ -70,7 +70,7 @@ The authorization server must accept all ten loopback redirect URIs for the clie
 
 Refresh: on a 401 from either endpoint below, the plugin calls `token_endpoint` with `grant_type=refresh_token` once and retries. If the refresh fails, the plugin signs out and the dropdown empties.
 
-Sign out: the plugin posts the refresh token to `revocation_endpoint` (RFC 7009), ignores the result, and deletes its state file. Revocation is best effort, so the session disappears from the user's active sessions instead of lingering to expiry.
+Sign out: the plugin posts the refresh token to `revocation_endpoint` (RFC 7009), ignores the result, and deletes its state file. Deleting the state file always happens, so the token is gone from the machine either way. Revocation is best effort: if the call fails, or the provider publishes no revocation endpoint, the token stays valid on the provider until it expires.
 
 ## List ingests
 
