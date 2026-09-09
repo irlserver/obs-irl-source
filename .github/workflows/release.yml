@@ -34,12 +34,12 @@ jobs:
       # The changelog is built from the commit range since the previous tag,
       # so the job needs full history and every tag, not the default shallow
       # single-commit checkout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
