@@ -13,8 +13,10 @@
 //!    back into settings on dialog open. Every list here therefore has an
 //!    empty-valued item 0, so a stale value cannot clobber anything.
 //! 3. Modified callbacks fire on dialog open, not only on a user change. The
-//!    ingest picker resets itself to item 0 after writing `url`, so it is a
-//!    momentary action rather than a second source of truth.
+//!    ingest picker therefore remembers, next to the pick, the URL it
+//!    resolved to: a callback that finds the same pick and the same `url` is
+//!    a dialog opening or a widget rebuild, not a choice, and does nothing.
+//!    A pick whose `url` has been edited since is stale and resets to item 0.
 //! 4. Returning `true` from a callback re-creates the widgets from the
 //!    `obs_properties_t` the dialog already holds; only the `update_properties`
 //!    signal re-runs the builder, and it has to come from another thread.
@@ -42,6 +44,11 @@ const KEY_URL: &CStr = c"url";
 const VALUE_CUSTOM: &str = "custom";
 
 const PREFIX_INGEST: &str = "provider_ingest";
+/// Settings without a widget: the ingest id and the URL the last successful
+/// pick in a slot resolved to. [`IngestPicked`] compares against them to tell a
+/// user's choice from the callback firing on dialog open.
+const PREFIX_RESOLVED_ID: &str = "provider_resolved_id";
+const PREFIX_RESOLVED_URL: &str = "provider_resolved_url";
 const PREFIX_SIGN_IN: &str = "provider_sign_in";
 const PREFIX_SIGN_OUT: &str = "provider_sign_out";
 const PREFIX_STATUS: &str = "provider_status";
@@ -307,10 +314,14 @@ impl ModifiedAction for ProviderUrlEdited {
     }
 }
 
-/// Picking an ingest resolves its URL, writes it into `url`, and resets the
-/// picker. Synchronous, on the UI thread: the settings object is only ours
-/// for the duration of the callback, and the provider client's timeouts
-/// bound the wait.
+/// Picking an ingest resolves its URL and writes it into `url`. Synchronous,
+/// on the UI thread: the settings object is only ours for the duration of the
+/// callback, and the provider client's timeouts bound the wait.
+///
+/// The pick stays in the settings so the dialog reopens on it. What makes that
+/// safe is the resolved pair remembered next to it: this callback fires on
+/// every dialog open and widget rebuild, and those must neither hit the
+/// network nor overwrite a `url` the user has edited since.
 struct IngestPicked;
 
 impl ModifiedAction for IngestPicked {
@@ -318,25 +329,51 @@ impl ModifiedAction for IngestPicked {
         let Some(slot) = Slot::parse(name, PREFIX_INGEST) else {
             return false;
         };
-        // `get_str` is `None` for the empty string, so item 0 and the reset
-        // below both land here and do nothing. That is also what stops the
-        // rebuild this returns `true` for from looping.
+        // `get_str` is `None` for the empty string, so item 0 and the resets
+        // below land here and do nothing. That is also what stops the rebuild
+        // this returns `true` for from looping.
         let Some(pick) = settings.get_str(name) else {
             return false;
         };
-        if let Some(base_url) = slot.base_url(Some(settings)) {
-            match irl_provider::resolve(&base_url, &pick) {
-                Ok(url) => match CString::new(url) {
-                    Ok(url) => {
-                        crate::log::log_input_url("Provider ingest selected", &url);
-                        settings.set_str(KEY_URL, &url);
-                    }
-                    Err(_) => irl_warn!("The provider returned a URL with a NUL in it"),
-                },
-                Err(e) => irl_warn!("Could not resolve the selected ingest: {e}"),
+        let id_key = slot.key(PREFIX_RESOLVED_ID);
+        let url_key = slot.key(PREFIX_RESOLVED_URL);
+        if settings.get_str(&id_key).as_deref() == Some(pick.as_str()) {
+            if settings.get_str(&url_key) == settings.get_str(KEY_URL) {
+                return false;
             }
+            // `url` is no longer what this pick produced: edited by hand, or
+            // written by another provider's picker. Forgetting the pair is
+            // what lets the same ingest be picked again afterwards.
+            settings.set_str(name, c"");
+            settings.set_str(&id_key, c"");
+            settings.set_str(&url_key, c"");
+            return true;
         }
-        settings.set_str(name, c"");
+        let resolved =
+            slot.base_url(Some(settings)).and_then(|base_url| {
+                match irl_provider::resolve(&base_url, &pick) {
+                    Ok(url) => match CString::new(url) {
+                        Ok(url) => Some(url),
+                        Err(_) => {
+                            irl_warn!("The provider returned a URL with a NUL in it");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        irl_warn!("Could not resolve the selected ingest: {e}");
+                        None
+                    }
+                }
+            });
+        match resolved {
+            Some(url) => {
+                crate::log::log_input_url("Provider ingest selected", &url);
+                settings.set_str(KEY_URL, &url);
+                settings.set_str(&id_key, &cstring(&pick));
+                settings.set_str(&url_key, &url);
+            }
+            None => settings.set_str(name, c""),
+        }
         true
     }
 }

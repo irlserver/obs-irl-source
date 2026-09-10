@@ -85,7 +85,7 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 | --- | --- | --- |
 | Provider | Manual URL | Where the pull URL comes from. Manual URL means you type it. A provider lets you sign in and pick an ingest by name. Custom provider takes the base URL of any service that implements the [provider protocol](docs/provider-protocol.md) |
 | Provider URL | | Only with Custom provider: the service's base URL, `https://…` |
-| Ingest | | Your ingests at the selected provider, by name, with region and live status when the provider reports them. Picking one writes its pull URL into URL below and then resets itself, so it is an action rather than a setting |
+| Ingest | | Your ingests at the selected provider, by name, with region and live status when the provider reports them. Picking one writes its pull URL into URL below and stays selected. Editing URL by hand afterwards resets it to Pick an ingest, since URL is no longer what the ingest resolved to |
 | Sign in / Refresh ingests / Sign out | | Sign in opens your browser at the provider. Once signed in the same button re-reads the list, and Sign out ends the session. The sign-in survives an OBS restart |
 | URL | | Your pull URL. SRT, RTMP, or anything else FFmpeg can open |
 | Reconnect Delay | 2s | How long to wait between reconnect attempts |
