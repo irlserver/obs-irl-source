@@ -1,0 +1,24 @@
+crates/irl-source/src/providers.rs
+  s_559ff505a78bde::t_e372afa93dfb8e 47-51
+  s_559ff505a78bde::t_26717003277f94 317-324,332-334,338-351,364,366,368-373,375
+  s_559ff505a78bde::t_b0cc2a718b35fd 352-363,367
+  s_559ff505a78bde::t_3c9db2d1c96b05 16-19
+README.md
+  s_559ff505a78bde::t_b0cc2a718b35fd 88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "e269c3c7fedecb9addda506e453de48ef701aac7",
+  "prompts": {},
+  "sessions": {
+    "s_559ff505a78bde": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "74ddda4c-f104-48ee-a403-fc1aeb807238",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
