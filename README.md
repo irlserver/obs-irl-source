@@ -111,6 +111,8 @@ Signing in changes nothing about how a source streams. The Ingest list writes a 
 
 The ingest list never contains stream keys. Picking an entry asks the provider for that one URL, which goes straight into the URL field. Any service can be a provider by implementing [docs/provider-protocol.md](docs/provider-protocol.md); paste its base URL under Custom provider.
 
+If you host OBS for others and want the Provider dropdown to offer only your own service, drop a `providers.json` next to the plugin's `locale` folder. It replaces the built-in list and can hide Custom provider. The format is in [docs/provider-protocol.md](docs/provider-protocol.md#what-the-user-sees).
+
 ### Buffered or low latency?
 
 `Low Latency Audio` does more than flip an OBS flag. It changes how the plugin buffers.

@@ -49,15 +49,50 @@ pub fn config_path(file: &CStr) -> Option<PathBuf> {
     // SAFETY: live module pointer and a NUL-terminated name; libobs returns a
     // bmalloc'd string the caller owns.
     let raw = unsafe { obs_sys::obs_module_get_config_path(module, file.as_ptr()) };
+    // SAFETY: bmalloc'd by the call above and owned by us.
+    unsafe { take_bmalloc_path(raw) }
+}
+
+/// `obs_module_file`: `file` inside the module's data directory (where
+/// `locale/` ships), which is where a deployment puts anything meant to
+/// travel with the plugin install rather than with a user or a scene
+/// collection.
+///
+/// `None` before `obs_module_set_pointer` has run, or when no such file
+/// exists: libobs checks that itself, so a `Some` names a file that was there
+/// a moment ago.
+#[must_use]
+pub fn data_file(file: &CStr) -> Option<PathBuf> {
+    let module = current_module();
+    if module.is_null() {
+        return None;
+    }
+    // SAFETY: live module pointer and a NUL-terminated name; libobs returns a
+    // bmalloc'd string the caller owns, or NULL.
+    let raw = unsafe { obs_sys::obs_find_module_file(module, file.as_ptr()) };
+    // SAFETY: bmalloc'd by the call above and owned by us.
+    unsafe { take_bmalloc_path(raw) }
+}
+
+/// Turn a `bmalloc`'d, possibly NULL, C path into an owned `PathBuf` and free
+/// the original.
+///
+/// # Safety
+///
+/// `raw` is NULL or a NUL-terminated string allocated by libobs's allocator
+/// that nothing else will read or free.
+unsafe fn take_bmalloc_path(raw: *mut c_char) -> Option<PathBuf> {
     if raw.is_null() {
         return None;
     }
-    // SAFETY: non-null and NUL-terminated, and ours until the `bfree` below.
+    // SAFETY: non-null and NUL-terminated per the contract, and ours until
+    // the `bfree` below.
     let path = unsafe { CStr::from_ptr(raw) }
         .to_str()
         .ok()
         .map(PathBuf::from);
-    // SAFETY: allocated by libobs's allocator above and not used again.
+    // SAFETY: allocated by libobs's allocator per the contract and not used
+    // again.
     unsafe { obs_sys::bfree(raw.cast::<c_void>()) };
     path
 }

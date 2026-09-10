@@ -16,9 +16,20 @@ This document is the contract, version 1. A provider implements it against a hos
 
 ## What the user sees
 
-The dialog starts with a Provider dropdown. The stock build lists the built in providers plus a Custom entry, which reveals a text field for a provider base URL. Below it sit the ingest list and the sign in, refresh and sign out buttons for the selected provider, then the plain URL field. Picking an ingest writes its URL into that field and resets the ingest list to its blank entry, so the pick is an action, not a second source of truth.
+The dialog starts with a Provider dropdown. The stock build lists the built in providers, highest priority first, plus a Custom entry, which reveals a text field for a provider base URL. Below it sit the ingest list and the sign in, refresh and sign out buttons for the selected provider, then the plain URL field. Picking an ingest writes its URL into that field and stays selected. The URL field remains the single source of truth: editing it by hand resets the ingest list to its blank entry.
 
-The built in list and the Custom entry are constants in `irl-core`. A fork that ships a build for one provider pins the list to itself and drops Custom; nothing else changes.
+The built in list and the Custom entry are constants in `irl-core`, but a deployment does not have to fork the plugin to change them. A `providers.json` in the plugin's data directory (the folder that holds `locale/`) replaces the list for that install. This is how a hosted OBS shows its own provider and nothing else while running the official release binary:
+
+```json
+{
+  "providers": [
+    { "name": "Example", "base_url": "https://example.com", "priority": 100 }
+  ],
+  "allow_custom": false
+}
+```
+
+`priority` orders the dropdown, highest first, and defaults to 0. `allow_custom` defaults to false. Base URLs are normalized the way the Custom field's are and must be unique. A file that does not parse is logged and ignored, and the built in list is used instead. The data directory is `data/` next to the plugin binary on Linux, `data/obs-plugins/obs-irl-source/` under the OBS install on Windows, and `Contents/Resources/` inside the plugin bundle on macOS.
 
 The provider choice and the picked id are OBS settings, so they land in the scene collection. That is why the contract forbids secrets in ids.
 

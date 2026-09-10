@@ -771,6 +771,10 @@ unsafe extern "C" {
         module: *mut obs_module_t,
         file: *const c_char,
     ) -> *mut c_char;
+    /// The function behind the C `obs_module_file` macro: `file` under the
+    /// module's data directory, or NULL when no such file exists. Returns a
+    /// `bmalloc`'d path; free it with [`bfree`].
+    pub fn obs_find_module_file(module: *mut obs_module_t, file: *const c_char) -> *mut c_char;
 
     // ── obs.h / util/text-lookup.h: module locale ──────────────────────
     pub fn obs_module_load_locale(

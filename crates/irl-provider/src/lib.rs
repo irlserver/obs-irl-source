@@ -16,13 +16,14 @@
 //!   URL exists only between [`resolve`] returning and the caller writing it
 //!   into the OBS setting.
 //!
-//! The pure parts (`discovery`, `oauth`, `loopback`, `store`, `version`) are
-//! public so `tests/` can drive them without a network.
+//! The pure parts (`catalog`, `discovery`, `oauth`, `loopback`, `store`,
+//! `version`) are public so `tests/` can drive them without a network.
 
 #![forbid(unsafe_code)]
 
 pub mod api;
 mod browser;
+pub mod catalog;
 pub mod discovery;
 mod hooks;
 pub mod loopback;
@@ -32,6 +33,7 @@ pub mod store;
 pub mod version;
 
 pub use api::Ingest;
+pub use catalog::{Catalog, CatalogEntry, CatalogError};
 pub use discovery::normalize_base_url;
 pub use hooks::{Hooks, Level, init};
 pub use registry::{ProviderView, ResolveError, provider_for, refresh, resolve, sign_in, sign_out};

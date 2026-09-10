@@ -345,13 +345,23 @@ pub struct BuiltinProvider {
     pub name: &'static str,
     /// Where `/.well-known/irl-source-provider.json` is fetched from.
     pub base_url: &'static str,
+    /// Position in the dropdown: the highest priority is listed first, and
+    /// ties keep the table's order. Display only; a scene collection stores
+    /// the base URL, so reordering breaks nothing.
+    pub priority: u32,
 }
 
-/// The stock list. A build for one provider replaces this with itself and
-/// turns [`ALLOW_CUSTOM_PROVIDER`] off; nothing else has to change.
+/// The stock list. A deployment that wants the dropdown to show only its own
+/// provider does not fork this: it ships a `providers.json` in the plugin's
+/// data directory, which replaces the list and [`ALLOW_CUSTOM_PROVIDER`]
+/// together (`irl_provider::catalog`).
+///
+/// IRLServer keeps the top priority: the plugin's author runs it, and the
+/// dropdown leading with it is the credit for that.
 pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[BuiltinProvider {
     name: "IRLServer",
     base_url: "https://irlserver.com",
+    priority: 100,
 }];
 
 /// Whether the dropdown offers a Custom entry with a base URL field.

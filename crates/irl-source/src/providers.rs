@@ -25,11 +25,16 @@
 //!
 //! `url` stays the single source of truth. Nothing on the streaming path knows
 //! these settings exist; `tests/provider_seam.rs` pins that.
+//!
+//! Which providers the dropdown lists comes from the [`Catalog`]: the built-in
+//! table unless a `providers.json` in the plugin's data directory replaces it
+//! ([`load_catalog`]).
 
 use std::ffi::{CStr, CString};
+use std::sync::OnceLock;
 
 use irl_core::consts::{ALLOW_CUSTOM_PROVIDER, BUILTIN_PROVIDERS, SOURCE_ID};
-use irl_provider::{Hooks, Ingest, Level};
+use irl_provider::{Catalog, CatalogEntry, Hooks, Ingest, Level};
 use obs::{ClickAction, ComboType, Data, ModifiedAction, Properties, PropertiesRef, TextType};
 use parking_lot::Mutex;
 
@@ -59,7 +64,63 @@ const PREFIX_STATUS: &str = "provider_status";
 /// because that is when modified callbacks first fire.
 static CUSTOM_URL: Mutex<String> = Mutex::new(String::new());
 
+/// The file a deployment drops into the plugin's data directory to replace
+/// the built-in provider list. Format and rationale: `irl_provider::catalog`.
+const CATALOG_FILE: &CStr = c"providers.json";
+
+static CATALOG: OnceLock<Catalog> = OnceLock::new();
+
+/// Loaded on first use, which [`init`] makes module load so the file is read
+/// once, off the dialog's path, and its log line lands with the rest of the
+/// module's.
+fn catalog() -> &'static Catalog {
+    CATALOG.get_or_init(load_catalog)
+}
+
+fn builtin_catalog() -> Catalog {
+    let providers = BUILTIN_PROVIDERS
+        .iter()
+        .map(|p| CatalogEntry {
+            name: p.name.to_owned(),
+            base_url: p.base_url.to_owned(),
+            priority: p.priority,
+        })
+        .collect();
+    Catalog::new(providers, ALLOW_CUSTOM_PROVIDER)
+}
+
+/// `providers.json` if the install ships one, the built-in table otherwise.
+/// A file that does not parse is reported and ignored rather than emptying
+/// the dropdown: the built-in list is the state the deployment started from.
+fn load_catalog() -> Catalog {
+    let Some(path) = obs::module::data_file(CATALOG_FILE) else {
+        return builtin_catalog();
+    };
+    let loaded = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|json| Catalog::parse(&json).map_err(|e| e.to_string()));
+    match loaded {
+        Ok(catalog) => {
+            irl_info!(
+                "Provider list loaded from {}: {} provider(s), custom provider {}",
+                path.display(),
+                catalog.providers().len(),
+                if catalog.allow_custom() { "on" } else { "off" }
+            );
+            catalog
+        }
+        Err(e) => {
+            irl_warn!(
+                "Ignoring {}: {e}. Using the built-in provider list",
+                path.display()
+            );
+            builtin_catalog()
+        }
+    }
+}
+
 pub fn init() {
+    catalog();
     irl_provider::init(Hooks {
         state_dir: obs::module::config_path(c"providers"),
         plugin_version: crate::PLUGIN_VERSION,
@@ -99,8 +160,9 @@ pub fn defaults(settings: &Data<'_>) {
     settings.set_default_str(KEY_PROVIDER_URL, c"");
 }
 
-/// One entry of the Provider dropdown that has ingests: a built-in provider
-/// or the Custom field. Manual URL is the absence of a slot.
+/// One entry of the Provider dropdown that has ingests: a catalog provider
+/// (by its index in the catalog, which is dropdown order) or the Custom
+/// field. Manual URL is the absence of a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
     Builtin(usize),
@@ -109,9 +171,9 @@ enum Slot {
 
 impl Slot {
     fn all() -> impl Iterator<Item = Slot> {
-        (0..BUILTIN_PROVIDERS.len())
+        (0..catalog().providers().len())
             .map(Slot::Builtin)
-            .chain(ALLOW_CUSTOM_PROVIDER.then_some(Slot::Custom))
+            .chain(catalog().allow_custom().then_some(Slot::Custom))
     }
 
     /// The property id for this slot under `prefix`.
@@ -131,16 +193,16 @@ impl Slot {
             .strip_prefix(prefix)?
             .strip_prefix('_')?;
         if rest == VALUE_CUSTOM {
-            return ALLOW_CUSTOM_PROVIDER.then_some(Slot::Custom);
+            return catalog().allow_custom().then_some(Slot::Custom);
         }
         let i: usize = rest.parse().ok()?;
-        (i < BUILTIN_PROVIDERS.len()).then_some(Slot::Builtin(i))
+        (i < catalog().providers().len()).then_some(Slot::Builtin(i))
     }
 
     /// What `provider` holds when this slot is selected.
     fn value(self) -> &'static str {
         match self {
-            Slot::Builtin(i) => BUILTIN_PROVIDERS[i].base_url,
+            Slot::Builtin(i) => &catalog().providers()[i].base_url,
             Slot::Custom => VALUE_CUSTOM,
         }
     }
@@ -149,7 +211,7 @@ impl Slot {
     /// from the mirrored Custom field otherwise.
     fn base_url(self, settings: Option<&Data<'_>>) -> Option<String> {
         match self {
-            Slot::Builtin(i) => Some(BUILTIN_PROVIDERS[i].base_url.to_owned()),
+            Slot::Builtin(i) => Some(catalog().providers()[i].base_url.clone()),
             Slot::Custom => {
                 let typed = match settings {
                     Some(s) => s.get_str(KEY_PROVIDER_URL).unwrap_or_default(),
@@ -174,10 +236,10 @@ pub fn add_properties(props: &Properties, instance: Option<&IrlSource>) {
 
     let list = props.add_string_list(KEY_PROVIDER, module_text(c"Provider"), ComboType::List);
     list.add(module_text(c"Provider.Manual"), c"");
-    for (i, provider) in BUILTIN_PROVIDERS.iter().enumerate() {
-        list.add(&cstring(provider.name), &cstring(Slot::Builtin(i).value()));
+    for (i, provider) in catalog().providers().iter().enumerate() {
+        list.add(&cstring(&provider.name), &cstring(Slot::Builtin(i).value()));
     }
-    if ALLOW_CUSTOM_PROVIDER {
+    if catalog().allow_custom() {
         list.add(module_text(c"Provider.Custom"), &cstring(VALUE_CUSTOM));
     }
     list.on_modified::<ProviderChanged>();
@@ -186,7 +248,7 @@ pub fn add_properties(props: &Properties, instance: Option<&IrlSource>) {
         module_text(c"ProviderHelp"),
         TextType::Info,
     );
-    if ALLOW_CUSTOM_PROVIDER {
+    if catalog().allow_custom() {
         props
             .add_text(
                 KEY_PROVIDER_URL,
