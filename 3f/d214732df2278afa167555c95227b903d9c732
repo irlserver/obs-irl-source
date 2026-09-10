@@ -1,0 +1,61 @@
+CLAUDE.md
+  s_0e16332cd18ddd::t_8d7e692fa21d28 132,174-175,232,245-246
+README.md
+  s_0e16332cd18ddd::t_13970714ff0e68 333
+crates/irl-source/src/shared.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 208-209,297-300
+crates/irl-source/tests/video_pipeline.rs
+  s_0e16332cd18ddd::t_d8cb2a70cf8c6a 1000-1004,1007
+  s_0e16332cd18ddd::t_8d7e692fa21d28 1033-1035,1041-1042
+  s_0e16332cd18ddd::t_13970714ff0e68 31-35,401,425,447,527-530,532-535,539-541,543-544,554-555,581,594,625,637,653-654,656-659,683-684,690-691,708,711-713,718-719,723,755,771-773,779-782,894,915-917,923-924,929,944,960,981,1013-1017,1019,1023,1025-1027,1032,1040,1043-1126,1131-1154,1156-1174,1180-1208,1213
+  s_0e16332cd18ddd::t_4871c822115435 1028-1031,1036-1039,1127-1130,1175-1179,1209-1212
+crates/irl-source/tests/shell_stats.rs
+  s_0e16332cd18ddd::t_4871c822115435 41
+crates/irl-source/src/receiver/decode.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 203
+crates/irl-source/src/receiver/stream.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 558,597
+crates/irl-source/src/video/output.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 215-218,220-221,242-243,286-287,304
+crates/irl-core/src/consts.rs
+  s_0e16332cd18ddd::t_4669e43a6ce4e5 310-326,463-465
+crates/irl-source/tests/network_sim.rs
+  s_0e16332cd18ddd::t_13970714ff0e68 560,595
+crates/irl-core/src/pacing.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 308-309,324-330
+  s_0e16332cd18ddd::t_4669e43a6ce4e5 156-170
+  s_0e16332cd18ddd::t_4871c822115435 310-323
+  s_0e16332cd18ddd::t_dfa4ce34b40e38 307
+docs/viewer-quality-plan.md
+  s_0e16332cd18ddd::t_13970714ff0e68 44-48
+crates/irl-core/src/video_delay.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 139-141,346-347
+  s_0e16332cd18ddd::t_4871c822115435 203-206,243-245,253-254,306-312,354-355
+  s_0e16332cd18ddd::t_4669e43a6ce4e5 1-138,142-202,207-242,246-252,255-305,313-345,348-353,356-382
+crates/irl-core/src/stats.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 27,53,110-112,160,198-199,215,219-220,272,310
+crates/irl-source/src/video/thread.rs
+  s_0e16332cd18ddd::t_3582cae0644ba2 19,28-30,35,39,47,55-59,122,127-130,172-176,224-225,284,297,300,313,322,327,336,368,370-372,390-398,458-470,472-483,489-493,495,500-516,522-524,532-540,542-548,552-587,609
+  s_0e16332cd18ddd::t_5fcf942e7083e8 496-499
+  s_0e16332cd18ddd::t_4871c822115435 541,549-551
+crates/irl-core/src/lib.rs
+  s_0e16332cd18ddd::t_4669e43a6ce4e5 26,39
+crates/irl-source/src/source.rs
+  s_0e16332cd18ddd::t_c9bafadc2357b0 498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3fd214732df2278afa167555c95227b903d9c732",
+  "prompts": {},
+  "sessions": {
+    "s_0e16332cd18ddd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79fb9bc1-05df-4d96-bcaf-3e6aee154cf7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
