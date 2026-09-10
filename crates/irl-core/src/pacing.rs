@@ -153,6 +153,21 @@ impl<F: PacedFrame> PacingQueue<F> {
         self.entries.front().map(|e| e.due_ns)
     }
 
+    /// The head frame itself, for the caller's per-frame bookkeeping before
+    /// it decides whether to pop it.
+    pub fn head(&self) -> Option<&F> {
+        self.entries.front().map(|e| &e.frame)
+    }
+
+    /// Move every due time later by `delta_ns`: the video delay was raised.
+    /// Unlike [`Self::reschedule`] this needs no mapping, so it also serves a
+    /// queue scheduled on the video-only fallback.
+    pub fn shift(&mut self, delta_ns: u64) {
+        for entry in &mut self.entries {
+            entry.due_ns = entry.due_ns.saturating_add(delta_ns);
+        }
+    }
+
     /// Pop the head.
     pub fn pop(&mut self) -> Option<F> {
         let entry = self.entries.pop_front()?;
@@ -287,6 +302,30 @@ mod tests {
         // And back the other way: every due time is re-derived, not adjusted.
         q.reschedule(|pts| (pts + 100_000_000) as u64);
         assert_eq!(q.next_due(), Some(100_000_000));
+    }
+
+    #[test]
+    fn shift_moves_every_due_time_and_keeps_the_head() {
+        let mut q = queue();
+        q.push(
+            TestFrame {
+                pts_ns: 0,
+                bytes: 1,
+            },
+            1_000,
+        );
+        q.push(
+            TestFrame {
+                pts_ns: 40,
+                bytes: 1,
+            },
+            1_040,
+        );
+        q.shift(500);
+        assert_eq!(q.next_due(), Some(1_500));
+        assert_eq!(q.head().map(|f| f.pts_ns), Some(0));
+        q.pop();
+        assert_eq!(q.next_due(), Some(1_540));
     }
 
     #[test]

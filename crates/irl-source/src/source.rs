@@ -495,6 +495,7 @@ fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     snap.video_corrupt_frames = conn.video_corrupt_frames.load(Relaxed) as i64;
     snap.video_corrupt_held = conn.video_corrupt_held.load(Relaxed) as i64;
     snap.video_lead_ms = conn.video_lead_ns.load(Relaxed) / 1_000_000;
+    snap.video_delay_ms = (conn.video_delay_ns.load(Relaxed) / 1_000_000) as i64;
 
     // Stream delay: how far behind real time the video output is, computed as
     // wall clock minus the anchored video PTS. Includes SRT latency, decode

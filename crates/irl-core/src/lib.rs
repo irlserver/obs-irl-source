@@ -23,6 +23,7 @@ pub mod speed;
 pub mod stats;
 pub mod timing;
 pub mod url_opts;
+pub mod video_delay;
 pub mod video_time;
 
 pub use audio_buffer::{AudioBuffer, BufferState};
@@ -35,3 +36,4 @@ pub use speed::{
 };
 pub use stats::{StatKind, StatValue, StatsSnapshot};
 pub use url_opts::url_awaits_caller;
+pub use video_delay::{DelayRaise, VideoDelay};

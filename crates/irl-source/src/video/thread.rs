@@ -16,6 +16,7 @@ use std::time::Duration;
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
 use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacedFrame, PacingQueue};
+use irl_core::video_delay::{DelayRaise, VideoDelay};
 
 use crate::shared::{Shared, VideoDecoder, VideoMsg};
 use crate::video::VideoSink;
@@ -24,15 +25,18 @@ use crate::video::intake::DecodeState;
 
 /// A frame waiting for its due time. `pts_ns` and `bytes` are cached at
 /// intake: the pacing queue re-derives due times from the PTS every cycle, and
-/// the byte total bounds the queue.
+/// the byte total bounds the queue. `received_ns` is when the packet it was
+/// decoded from reached this thread, which is what its arrival margin is
+/// measured from.
 pub struct Paced {
     frame: Frame,
     pts_ns: i64,
     bytes: usize,
+    received_ns: u64,
 }
 
 impl Paced {
-    fn new(frame: Frame) -> Self {
+    fn new(frame: Frame, received_ns: u64) -> Self {
         let pts_ns = frame.pts();
         // `av_image_get_buffer_size(fmt, w, h, 1)`, as `pacing_frame_bytes`.
         let bytes = frame.image_buffer_size().unwrap_or(0);
@@ -40,12 +44,18 @@ impl Paced {
             frame,
             pts_ns,
             bytes,
+            received_ns,
         }
     }
 
     /// The system-memory frame itself.
     pub fn frame(&self) -> &Frame {
         &self.frame
+    }
+
+    /// OBS clock at which the packet behind this frame arrived.
+    pub fn received_ns(&self) -> u64 {
+        self.received_ns
     }
 }
 
@@ -109,11 +119,15 @@ pub struct VideoThread {
     pub(crate) lead_warn_time_ns: u64,
     /// Set while libobs's async play head is unanchored, so the next frame out
     /// goes at its due time rather than a lead early. See
-    /// [`Self::emit_slack_ns`].
+    /// [`Self::emit_slack_ns`] and [`Self::settle_anchor_candidate`].
     anchor_pending: bool,
     /// Where the wait for the audio playout mapping stands. See
     /// [`Self::awaiting_audio_mapping`].
     anchor_wait: AnchorWait,
+    /// The standing delay on the video schedule, so that video which reaches
+    /// this thread too late to be paced against the audio playout still can
+    /// be. See [`Self::settle_anchor_candidate`].
+    pub(crate) delay: VideoDelay,
     /// The OBS canvas tick. Injectable so tests can drive pacing without a
     /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
     /// video state and faults when `obs_startup` never ran.
@@ -155,6 +169,11 @@ impl VideoThread {
             // A fresh source has libobs's `last_frame_ts` at 0 too.
             anchor_pending: true,
             anchor_wait: AnchorWait::Idle,
+            delay: VideoDelay::new(
+                consts::VIDEO_DELAY_MAX_MS * 1_000_000,
+                consts::VIDEO_DELAY_WINDOW_MS * 1_000_000,
+                consts::VIDEO_DELAY_MIN_FRAMES,
+            ),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
         }
@@ -202,6 +221,8 @@ impl VideoThread {
             // to 0, so the next frame re-anchors the play head.
             self.anchor_pending = true;
             self.anchor_wait = AnchorWait::Idle;
+            // The delay was sized for the connection that just ended.
+            self.reset_delay();
             self.sink.output_video_none();
             return Duration::ZERO;
         }
@@ -260,6 +281,7 @@ impl VideoThread {
             if let Some(VideoMsg::Decoder(decoder)) = shared.video.pop() {
                 self.decoder = Some(*decoder);
                 self.state.reset();
+                self.reset_delay();
             }
         }
         while self.pacing.has_room() {
@@ -272,8 +294,10 @@ impl VideoThread {
                     // already paced or was cleared with the disconnect.
                     self.decoder = Some(*decoder);
                     self.state.reset();
+                    self.reset_delay();
                 }
                 VideoMsg::Packet(packet) => {
+                    let received_ns = packet.received_ns;
                     let mut produced = std::mem::take(&mut self.decoded);
                     if let Some(decoder) = self.decoder.as_mut() {
                         decode::decode_packet(
@@ -286,7 +310,7 @@ impl VideoThread {
                         );
                     }
                     for frame in produced.drain(..) {
-                        self.pace_decoded(frame);
+                        self.pace_decoded(frame, received_ns);
                     }
                     self.decoded = produced;
                 }
@@ -295,11 +319,12 @@ impl VideoThread {
     }
 
     /// Copy one decoded frame out of the hardware pool and schedule it.
+    /// `received_ns` is when the packet it came from reached this thread.
     ///
     /// Public as the seam the pacing tests use to put a frame in front of the
     /// loop without a decoder; production reaches it only through
     /// [`Self::decode_intake`].
-    pub fn pace_decoded(&mut self, frame: Frame) {
+    pub fn pace_decoded(&mut self, frame: Frame, received_ns: u64) {
         let sysmem = self.to_sysmem(&frame);
         let due_ns = match &sysmem {
             Some(f) => self.due_time(f),
@@ -308,7 +333,7 @@ impl VideoThread {
         // Releases the decoder's surface before the next packet is sent.
         drop(frame);
         if let Some(f) = sysmem {
-            self.pacing.push(Paced::new(f), due_ns);
+            self.pacing.push(Paced::new(f, received_ns), due_ns);
         }
     }
 
@@ -340,8 +365,11 @@ impl VideoThread {
     /// video is what the un-paced path did all the time, and it beats a hole
     /// in the picture.
     fn pacing_emit_due(&mut self, now_ns: u64, slack_ns: i64) {
+        let tick_ns = self.canvas_tick_ns();
         if self.anchor_pending {
-            self.drop_stale_before_anchor(now_ns);
+            self.settle_anchor_candidate(now_ns, tick_ns);
+        } else if let Some(raise) = self.delay.expire(now_ns) {
+            self.apply_delay_raise(raise, false);
         }
         loop {
             // While the play head needs anchoring, a hard ceiling must not
@@ -359,6 +387,15 @@ impl VideoThread {
             let Some(paced) = self.pacing.pop() else {
                 return;
             };
+            if !self.anchor_pending {
+                let lead_ns = self.delivery_lead_ns(tick_ns);
+                if let Some(raise) =
+                    self.delay
+                        .note(now_ns, due_ns, paced.received_ns(), lead_ns, tick_ns)
+                {
+                    self.apply_delay_raise(raise, false);
+                }
+            }
             let submitted = self.output_frame(paced.frame(), due_ns);
             // The play head is only anchored by a frame libobs actually
             // received, at its real due time. A conversion that failed
@@ -418,39 +455,134 @@ impl VideoThread {
         false
     }
 
-    /// The frame that anchors libobs's play head must go out at its due time,
-    /// so a head that is already past due cannot be it: drop such frames until
-    /// one that is on time is at the head.
+    /// Settle the frame that will anchor libobs's play head.
     ///
-    /// The mapping arriving is what makes frames overdue here — everything
-    /// decoded during the wait maps to the moments its audio was discarded by
-    /// the warm-up or already played — and handing them over would anchor the
-    /// connection late by however stale the first one was. They amount to a
-    /// fraction of a second at connection start and nothing has been shown yet.
+    /// Two things are decided for each head frame, in this order. First its
+    /// arrival margin: nothing has been shown yet, so a frame that reached this
+    /// thread less than a delivery lead before it is due raises the standing
+    /// video delay on the spot ([`VideoDelay::before_anchor`]) and the queue is
+    /// moved onto it. That is what keeps a sender whose video trails its audio
+    /// by more than Target Buffer covers from playing unpaced — every frame
+    /// late, handed over on arrival, and dropped by libobs whenever two arrive
+    /// inside one canvas tick — or, before this existed, from being dropped
+    /// here indefinitely. The delay is a fixed lip-sync error in return for a
+    /// smooth picture, and the log line says how much more Target Buffer would
+    /// remove it.
+    ///
+    /// Second, with audio present, whether the head is stale. The anchoring
+    /// frame must go out at its due time, so a head already past due cannot be
+    /// it, and such frames are dropped until one that is on time is at the
+    /// head. The mapping arriving is what makes frames overdue here —
+    /// everything decoded during the wait maps to the moments its audio was
+    /// discarded by the warm-up or already played — and handing them over would
+    /// anchor the connection late by however stale the first one was. They
+    /// amount to a fraction of a second at connection start and nothing has
+    /// been shown yet. Their margins are still valid samples: a margin is set
+    /// by when a packet arrived against when its audio plays, not by how long
+    /// the frame has been queued, so the backlog measures the same sender skew
+    /// the live frames will.
     ///
     /// "Past due" is measured against a canvas tick, not the emit slack: libobs
     /// quantises display to its ticks anyway, and a box with a coarse timer can
     /// oversleep by most of one, which must not make it drop every candidate in
     /// turn. Without audio there is nothing to be in sync with, and the
-    /// fallback frames go out as they always did.
-    fn drop_stale_before_anchor(&mut self, now_ns: u64) {
-        if !self.shared.flags.audio_present.load(Relaxed) {
-            return;
-        }
-        let tick = (self.canvas_tick_ns)().unwrap_or(consts::VIDEO_CANVAS_TICK_DEFAULT_NS) as i64;
+    /// fallback frames go out as they always did, now a lead after they arrive
+    /// instead of on arrival.
+    fn settle_anchor_candidate(&mut self, now_ns: u64, tick_ns: u64) {
+        let audio_present = self.shared.flags.audio_present.load(Relaxed);
+        let lead_ns = self.delivery_lead_ns(tick_ns);
         let mut dropped = 0u32;
-        while let Some(due_ns) = self.pacing.next_due() {
-            if now_ns as i64 - due_ns as i64 <= tick {
+        let mut raised: Option<DelayRaise> = None;
+        while let (Some(due_ns), Some(received_ns)) = (
+            self.pacing.next_due(),
+            self.pacing.head().map(Paced::received_ns),
+        ) {
+            if let Some(raise) = self
+                .delay
+                .before_anchor(due_ns, received_ns, lead_ns, tick_ns)
+            {
+                self.pacing.shift(raise.to_ns - raise.from_ns);
+                // One line for the whole settlement, from the first delay to
+                // the last.
+                raised = Some(match raised {
+                    Some(first) => DelayRaise {
+                        from_ns: first.from_ns,
+                        ..raise
+                    },
+                    None => raise,
+                });
+                continue;
+            }
+            if !audio_present || now_ns as i64 - due_ns as i64 <= tick_ns as i64 {
                 break;
             }
             self.pacing.pop();
             dropped += 1;
+        }
+        if let Some(raise) = raised {
+            self.apply_delay_raise(raise, true);
         }
         if dropped > 0 {
             irl_info!(
                 "Dropped {dropped} stale video frame(s) before anchoring to the audio playout"
             );
         }
+    }
+
+    /// Publish a raised delay: mirror it for the stats and say why, with what
+    /// the user can do about it. The queue itself is moved by the caller
+    /// (before the anchor, inside the settling loop) or is already scheduled
+    /// on the new delay (after it, the next reschedule carries it; the frames
+    /// queued now are shifted here).
+    fn apply_delay_raise(&mut self, raise: DelayRaise, at_anchor: bool) {
+        if !at_anchor {
+            self.pacing.shift(raise.to_ns - raise.from_ns);
+        }
+        self.shared.conn.video_delay_ns.store(raise.to_ns, Relaxed);
+        let to_ms = raise.to_ns / 1_000_000;
+        let by_ms = (raise.to_ns - raise.from_ns) / 1_000_000;
+        let audio_present = self.shared.flags.audio_present.load(Relaxed);
+        match (at_anchor, audio_present) {
+            (true, true) => irl_warn!(
+                "Video arrives too late for its audio to be paced; delaying video by {to_ms}ms so it can be. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead"
+            ),
+            (true, false) => {
+                irl_info!("Video arrives without its pacing lead; delaying video by {to_ms}ms")
+            }
+            (false, true) => irl_warn!(
+                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead",
+                raise.frames,
+                consts::VIDEO_DELAY_WINDOW_MS
+            ),
+            (false, false) => irl_info!(
+                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all",
+                raise.frames,
+                consts::VIDEO_DELAY_WINDOW_MS
+            ),
+        }
+        if raise.capped {
+            irl_warn!(
+                "Video is late by more than the {}ms delay ceiling; the decoder or the host is not keeping up, and frames past it go out on arrival",
+                consts::VIDEO_DELAY_MAX_MS
+            );
+        }
+    }
+
+    /// Forget the delay: a new connection or a cleared source sizes its own.
+    fn reset_delay(&mut self) {
+        self.delay.reset();
+        self.shared.conn.video_delay_ns.store(0, Relaxed);
+    }
+
+    /// The canvas tick, or the default when libobs has not reported one.
+    fn canvas_tick_ns(&self) -> u64 {
+        (self.canvas_tick_ns)().unwrap_or(consts::VIDEO_CANVAS_TICK_DEFAULT_NS)
+    }
+
+    /// How early a frame is handed to libobs once the play head is anchored;
+    /// see [`consts::VIDEO_PACING_LEAD_TICKS`].
+    fn delivery_lead_ns(&self, tick_ns: u64) -> u64 {
+        (tick_ns * consts::VIDEO_PACING_LEAD_TICKS).min(consts::VIDEO_PACING_MAX_LEAD_NS)
     }
 
     /// How early a frame is handed to libobs: the emit slack plus the delivery
@@ -474,9 +606,7 @@ impl VideoThread {
         if self.anchor_pending {
             return consts::VIDEO_PACING_SLACK_NS;
         }
-        let tick = (self.canvas_tick_ns)().unwrap_or(consts::VIDEO_CANVAS_TICK_DEFAULT_NS);
-        let lead = (tick * consts::VIDEO_PACING_LEAD_TICKS).min(consts::VIDEO_PACING_MAX_LEAD_NS);
-        lead as i64 + consts::VIDEO_PACING_SLACK_NS
+        self.delivery_lead_ns(self.canvas_tick_ns()) as i64 + consts::VIDEO_PACING_SLACK_NS
     }
 
     /// Mirror the pacing counters for the stats line.

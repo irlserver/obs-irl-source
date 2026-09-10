@@ -200,6 +200,7 @@ impl Receiver {
                     packet,
                     pts_ns,
                     bytes,
+                    received_ns: obs::time::gettime_ns(),
                 },
                 &self.shared.lifetime,
             ),

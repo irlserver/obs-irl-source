@@ -555,7 +555,7 @@ impl Receiver {
              obs_lead={}ms chunk={}@{} \
              stream_chunk={}ms obs_chunk={}ms \
              restarts={} av_drift={}ms reanchors={} \
-             vlead={}ms peak={}ms excess={} vfps={:.1} \
+             vlead={}ms peak={}ms excess={} vdelay={}ms vfps={:.1} \
              pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
             conn.total_audio_frames.load(Relaxed),
@@ -594,6 +594,7 @@ impl Receiver {
             conn.video_lead_ns.load(Relaxed) / 1_000_000,
             lifetime.video_lead_peak_ns.load(Relaxed) / 1_000_000,
             lifetime.video_lead_excess.load(Relaxed),
+            conn.video_delay_ns.load(Relaxed) / 1_000_000,
             if video_frame_interval_ns > 0 {
                 1_000_000_000.0 / video_frame_interval_ns as f64
             } else {

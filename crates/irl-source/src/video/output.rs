@@ -212,8 +212,13 @@ impl VideoThread {
 
         // No audio-stream test: a published mapping already implies the pump
         // handed OBS a real chunk, so it implies the audio stream.
+        // Both schedules carry the standing video delay; see
+        // `VideoThread::settle_anchor_candidate`.
+        let delay_ns = self.delay.delay_ns();
+
         if obs_end != 0 && buffered_end > 0 {
-            let mapped = video_time::map_through_playout(pts_ns, obs_end, buffered_end);
+            let mapped = video_time::map_through_playout(pts_ns, obs_end, buffered_end)
+                .saturating_add(delay_ns);
             self.record_lead(mapped as i64, now, frame_interval_ns);
             return mapped;
         }
@@ -234,7 +239,8 @@ impl VideoThread {
             self.shared.conn.video_ts_init.store(true, Relaxed);
         }
 
-        let mut computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now);
+        let mut computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now)
+            .saturating_add(delay_ns);
 
         // Startup fallback before the audio playout mapping exists. Here the
         // mapping cannot stand in for "there is audio" — the whole point is
@@ -277,7 +283,8 @@ impl VideoThread {
     /// every pacing cycle would report the queue rather than the stream.
     /// `None` when there is no audio to slave to, or when the mapping has been
     /// gone long enough that holding it would be a guess; the caller then
-    /// keeps the due times the frames arrived with.
+    /// keeps the due times the frames arrived with. The standing video delay
+    /// rides on the offset, so a reschedule keeps it.
     pub fn playout_offset(&mut self) -> Option<i64> {
         let (obs_end, buffered_end) = {
             let state = self.shared.audio_state();
@@ -294,7 +301,7 @@ impl VideoThread {
             return None;
         }
 
-        Some(self.playout_offset_ns)
+        Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
     }
 
     /// `video_record_lead` (`video-handler.c:285-327`): how far ahead of wall
