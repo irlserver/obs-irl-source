@@ -60,11 +60,12 @@ artifact() {
 	printf '%s' "${path}"
 }
 
-# locale/ + the two files every archive carries, into the data directory the
-# platform's obs_module_file() resolves to.
+# locale/, the provider list and the two files every archive carries, into the
+# data directory the platform's obs_module_file() resolves to.
 stage_data() {
 	mkdir -p "$1/locale"
 	cp "${repo_root}/data/locale/en-US.ini" "$1/locale/"
+	cp "${repo_root}/data/providers.json" "$1/"
 	cp "${repo_root}/LICENSE" "${repo_root}/THIRD_PARTY_NOTICES.md" "$1/"
 }
 

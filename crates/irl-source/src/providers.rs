@@ -26,15 +26,15 @@
 //! `url` stays the single source of truth. Nothing on the streaming path knows
 //! these settings exist; `tests/provider_seam.rs` pins that.
 //!
-//! Which providers the dropdown lists comes from the [`Catalog`]: the built-in
-//! table unless a `providers.json` in the plugin's data directory replaces it
-//! ([`load_catalog`]).
+//! Which providers the dropdown lists comes from the [`Catalog`], read once
+//! from the `providers.json` shipped in the plugin's data directory
+//! ([`load_catalog`]). The repo's `data/providers.json` is the stock list.
 
 use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
 
-use irl_core::consts::{ALLOW_CUSTOM_PROVIDER, BUILTIN_PROVIDERS, SOURCE_ID};
-use irl_provider::{Catalog, CatalogEntry, Hooks, Ingest, Level};
+use irl_core::consts::SOURCE_ID;
+use irl_provider::{Catalog, Hooks, Ingest, Level};
 use obs::{ClickAction, ComboType, Data, ModifiedAction, Properties, PropertiesRef, TextType};
 use parking_lot::Mutex;
 
@@ -44,8 +44,8 @@ use crate::source::IrlSource;
 const KEY_PROVIDER: &CStr = c"provider";
 const KEY_PROVIDER_URL: &CStr = c"provider_url";
 const KEY_URL: &CStr = c"url";
-/// `provider`'s value for the Custom entry. Built-in entries store their base
-/// URL instead, so a fork that reorders the list breaks no scene collection.
+/// `provider`'s value for the Custom entry. Listed entries store their base
+/// URL instead, so reordering the list breaks no scene collection.
 const VALUE_CUSTOM: &str = "custom";
 
 const PREFIX_INGEST: &str = "provider_ingest";
@@ -64,8 +64,9 @@ const PREFIX_STATUS: &str = "provider_status";
 /// because that is when modified callbacks first fire.
 static CUSTOM_URL: Mutex<String> = Mutex::new(String::new());
 
-/// The file a deployment drops into the plugin's data directory to replace
-/// the built-in provider list. Format and rationale: `irl_provider::catalog`.
+/// The provider list, in the plugin's data directory next to `locale/`. Every
+/// archive ships the stock one; a deployment edits it. Format and rationale:
+/// `irl_provider::catalog`.
 const CATALOG_FILE: &CStr = c"providers.json";
 
 static CATALOG: OnceLock<Catalog> = OnceLock::new();
@@ -77,24 +78,17 @@ fn catalog() -> &'static Catalog {
     CATALOG.get_or_init(load_catalog)
 }
 
-fn builtin_catalog() -> Catalog {
-    let providers = BUILTIN_PROVIDERS
-        .iter()
-        .map(|p| CatalogEntry {
-            name: p.name.to_owned(),
-            base_url: p.base_url.to_owned(),
-            priority: p.priority,
-        })
-        .collect();
-    Catalog::new(providers, ALLOW_CUSTOM_PROVIDER)
-}
-
-/// `providers.json` if the install ships one, the built-in table otherwise.
-/// A file that does not parse is reported and ignored rather than emptying
-/// the dropdown: the built-in list is the state the deployment started from.
+/// A missing or broken `providers.json` leaves the dropdown at Manual URL
+/// only, with a warning that names the problem. Like the locale file, it is
+/// part of the install, not an optional extra, and streaming does not depend
+/// on it either way.
 fn load_catalog() -> Catalog {
     let Some(path) = obs::module::data_file(CATALOG_FILE) else {
-        return builtin_catalog();
+        irl_warn!(
+            "{} is missing from the plugin data directory; the Provider dropdown offers Manual URL only",
+            CATALOG_FILE.to_string_lossy()
+        );
+        return Catalog::new(Vec::new(), false);
     };
     let loaded = std::fs::read_to_string(&path)
         .map_err(|e| e.to_string())
@@ -111,10 +105,10 @@ fn load_catalog() -> Catalog {
         }
         Err(e) => {
             irl_warn!(
-                "Ignoring {}: {e}. Using the built-in provider list",
+                "Ignoring {}: {e}. The Provider dropdown offers Manual URL only",
                 path.display()
             );
-            builtin_catalog()
+            Catalog::new(Vec::new(), false)
         }
     }
 }
@@ -165,21 +159,21 @@ pub fn defaults(settings: &Data<'_>) {
 /// field. Manual URL is the absence of a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
-    Builtin(usize),
+    Listed(usize),
     Custom,
 }
 
 impl Slot {
     fn all() -> impl Iterator<Item = Slot> {
         (0..catalog().providers().len())
-            .map(Slot::Builtin)
+            .map(Slot::Listed)
             .chain(catalog().allow_custom().then_some(Slot::Custom))
     }
 
     /// The property id for this slot under `prefix`.
     fn key(self, prefix: &str) -> CString {
         let key = match self {
-            Slot::Builtin(i) => format!("{prefix}_{i}"),
+            Slot::Listed(i) => format!("{prefix}_{i}"),
             Slot::Custom => format!("{prefix}_{VALUE_CUSTOM}"),
         };
         CString::new(key).expect("no NUL in a property id")
@@ -196,13 +190,13 @@ impl Slot {
             return catalog().allow_custom().then_some(Slot::Custom);
         }
         let i: usize = rest.parse().ok()?;
-        (i < catalog().providers().len()).then_some(Slot::Builtin(i))
+        (i < catalog().providers().len()).then_some(Slot::Listed(i))
     }
 
     /// What `provider` holds when this slot is selected.
     fn value(self) -> &'static str {
         match self {
-            Slot::Builtin(i) => &catalog().providers()[i].base_url,
+            Slot::Listed(i) => &catalog().providers()[i].base_url,
             Slot::Custom => VALUE_CUSTOM,
         }
     }
@@ -211,7 +205,7 @@ impl Slot {
     /// from the mirrored Custom field otherwise.
     fn base_url(self, settings: Option<&Data<'_>>) -> Option<String> {
         match self {
-            Slot::Builtin(i) => Some(catalog().providers()[i].base_url.clone()),
+            Slot::Listed(i) => Some(catalog().providers()[i].base_url.clone()),
             Slot::Custom => {
                 let typed = match settings {
                     Some(s) => s.get_str(KEY_PROVIDER_URL).unwrap_or_default(),
@@ -237,7 +231,7 @@ pub fn add_properties(props: &Properties, instance: Option<&IrlSource>) {
     let list = props.add_string_list(KEY_PROVIDER, module_text(c"Provider"), ComboType::List);
     list.add(module_text(c"Provider.Manual"), c"");
     for (i, provider) in catalog().providers().iter().enumerate() {
-        list.add(&cstring(&provider.name), &cstring(Slot::Builtin(i).value()));
+        list.add(&cstring(&provider.name), &cstring(Slot::Listed(i).value()));
     }
     if catalog().allow_custom() {
         list.add(module_text(c"Provider.Custom"), &cstring(VALUE_CUSTOM));

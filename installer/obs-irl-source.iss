@@ -78,6 +78,9 @@ Source: "{#PayloadDir}\obs-plugins\64bit\obs-irl-source.dll"; DestDir: "{app}\ob
 ; Not optional: obs_module_text() falls back to the lookup key, so without the
 ; locale file the properties dialog renders as bare identifiers.
 Source: "..\data\locale\*"; DestDir: "{app}\data\obs-plugins\{#PluginId}\locale"; Flags: ignoreversion
+; The Provider dropdown's list. A host that edited it re-applies its copy after
+; an upgrade; see docs/provider-protocol.md.
+Source: "..\data\providers.json"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion

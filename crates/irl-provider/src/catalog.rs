@@ -1,10 +1,11 @@
 //! The provider catalog: which providers the dropdown offers, in what order,
 //! and whether a Custom entry is available.
 //!
-//! The stock build uses the plugin's built-in table. A deployment that wants
-//! the dropdown to show its own provider and nothing else (a cloud OBS host,
-//! say) does not fork the build: it drops a `providers.json` into the plugin's
-//! data directory, next to `locale/`, and the plugin uses that instead.
+//! It is a file, `providers.json`, in the plugin's data directory next to
+//! `locale/`. Every archive ships the stock one (`data/providers.json` in the
+//! repo), and a deployment that wants the dropdown to show its own provider
+//! and nothing else (a cloud OBS host, say) edits that file rather than
+//! forking the build.
 //!
 //! ```json
 //! {
@@ -15,10 +16,9 @@
 //! }
 //! ```
 //!
-//! The file replaces the built-in list entirely. `priority` defaults to 0 and
-//! `allow_custom` to false, which is the restricting deployment the file
-//! exists for. Unknown fields are an error rather than ignored: a misspelt
-//! `allow_custom` silently defaulting would be worse than a refused file.
+//! `priority` defaults to 0 and `allow_custom` to false. Unknown fields are an
+//! error rather than ignored: a misspelt `allow_custom` silently defaulting
+//! would be worse than a refused file.
 //!
 //! Reading the file is the plugin's job. This module only parses and
 //! validates, so `tests/catalog.rs` can pin the format without a file system.
@@ -50,8 +50,7 @@ pub struct Catalog {
 
 impl Catalog {
     /// Highest priority first; ties keep the given order. The entries are
-    /// taken as they are: this is the constructor for the built-in table,
-    /// which needs no validation. [`Catalog::parse`] validates.
+    /// taken as they are; [`Catalog::parse`] is what validates.
     #[must_use]
     pub fn new(mut providers: Vec<CatalogEntry>, allow_custom: bool) -> Catalog {
         providers.sort_by_key(|p| std::cmp::Reverse(p.priority));

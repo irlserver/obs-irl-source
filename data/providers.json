@@ -1,0 +1,6 @@
+{
+  "providers": [
+    { "name": "IRLServer", "base_url": "https://irlserver.com", "priority": 100 }
+  ],
+  "allow_custom": true
+}

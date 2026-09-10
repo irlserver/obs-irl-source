@@ -1,5 +1,5 @@
 //! The `providers.json` format: what a deployment may write, what is refused,
-//! and the order the dropdown gets.
+//! the order the dropdown gets, and that the file every archive ships parses.
 
 use irl_provider::{Catalog, CatalogEntry, CatalogError};
 
@@ -125,5 +125,15 @@ fn the_built_in_constructor_sorts_too() {
         true,
     );
     assert_eq!(catalog.providers()[0].name, "High");
+    assert!(catalog.allow_custom());
+}
+
+/// The file `scripts/package.sh` and the installer put next to `locale/`. A
+/// release with a broken one would show Manual URL only, so it fails here
+/// first.
+#[test]
+fn the_shipped_file_is_the_stock_list() {
+    let catalog = Catalog::parse(include_str!("../../../data/providers.json")).unwrap();
+    assert_eq!(catalog.providers()[0].base_url, "https://irlserver.com");
     assert!(catalog.allow_custom());
 }
