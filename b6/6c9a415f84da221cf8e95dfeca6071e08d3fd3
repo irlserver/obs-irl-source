@@ -1,0 +1,48 @@
+CLAUDE.md
+  s_559ff505a78bde::t_4050d5977d9a0b 92,144
+crates/irl-provider/src/catalog.rs
+  s_559ff505a78bde::t_73243ca42f0aa3 81-84,130-139
+  s_559ff505a78bde::t_7d412f87ce9fb3 1-80,85-129,140-165
+crates/obs/src/module.rs
+  s_559ff505a78bde::t_33a204e3cf93f5 52-84,88-89,94-95
+README.md
+  s_559ff505a78bde::t_4050d5977d9a0b 114-115
+docs/provider-protocol.md
+  s_559ff505a78bde::t_5015e4ee8fc32f 19
+  s_559ff505a78bde::t_4050d5977d9a0b 21-32
+crates/irl-provider/tests/catalog.rs
+  s_559ff505a78bde::t_3d112c0e04e27a 1-44,50-80,85-88,92-97,102-129
+  s_559ff505a78bde::t_73243ca42f0aa3 45-49,81-84,89-91,98-101
+crates/irl-provider/src/lib.rs
+  s_559ff505a78bde::t_f5d22dd23b4e10 26
+  s_559ff505a78bde::t_f0a8f98073005e 19-20
+  s_559ff505a78bde::t_c963b994e34258 36
+crates/irl-core/src/consts.rs
+  s_559ff505a78bde::t_b0aed7518614f7 348-351,358-360,364
+  s_559ff505a78bde::t_f6181c2834d1a1 354-357
+crates/obs-sys/src/lib.rs
+  s_559ff505a78bde::t_e0ef5773e975f3 774-777
+crates/irl-source/src/providers.rs
+  s_559ff505a78bde::t_5ac3ae9ec1edc2 196,199,205,214
+  s_559ff505a78bde::t_31ac834201bcdd 239-240,242
+  s_559ff505a78bde::t_91a46b59402423 251
+  s_559ff505a78bde::t_c24db7561e7cc7 28-31,34,37
+  s_559ff505a78bde::t_01c1cc8f49683e 67-121,123
+  s_559ff505a78bde::t_45c04a7be0163e 163-165,174,176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "b66c9a415f84da221cf8e95dfeca6071e08d3fd3",
+  "prompts": {},
+  "sessions": {
+    "s_559ff505a78bde": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "74ddda4c-f104-48ee-a403-fc1aeb807238",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
