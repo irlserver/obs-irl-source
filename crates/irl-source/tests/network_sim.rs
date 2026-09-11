@@ -557,6 +557,7 @@ fn video_keeps_flowing_while_the_receiver_is_blocked() {
                 packet: ffmpeg::Packet::new().unwrap(),
                 pts_ns: i * 33_333_333,
                 bytes: 4096,
+                received_ns: 0,
             },
             &sim.shared.lifetime,
         );
@@ -591,6 +592,7 @@ fn decoded_memory_does_not_grow_with_the_target() {
                 packet: ffmpeg::Packet::new().unwrap(),
                 pts_ns: i * 16_666_667,
                 bytes: 16 * 1024,
+                received_ns: 0,
             },
             &deep.shared.lifetime,
         );

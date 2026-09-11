@@ -330,6 +330,7 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 | `video_corrupt_held` | int | HEVC frames held back instead of shown because they were predicted from a missing reference and would have rendered gray; the last good frame stays on screen until the next keyframe |
 | `video_lead_ms` | int | How far ahead of real time the last video frame was timestamped. Tracks the audio buffer; a value climbing well past Target Buffer and staying there means concealment has inflated the A/V mapping |
 | `video_lead_excess` | int | Frames whose lead exceeded what OBS's async queue can absorb. Harmless while the lead is steady; sustained growth is what makes OBS drop queued video |
+| `video_delay_ms` | int | Standing delay added to the video schedule because video reached the plugin too late to be paced against the audio playout (the encoder sends video later than audio by more than Target Buffer covers). Lip sync is off by this much; raising Target Buffer by at least this takes it back to zero |
 | `stream_delay_ms` | int | End-to-end stream delay (SRT latency + decode + buffering) |
 | `low_latency_audio` | bool | Whether OBS async unbuffered low-latency mode is enabled |
 | `reconnect_count` | int | Number of reconnect attempts since the source was created |

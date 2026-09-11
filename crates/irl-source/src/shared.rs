@@ -205,6 +205,8 @@ pub struct ConnStats {
     pub last_frames_out: AtomicU32,
     pub last_samples_per_sec: AtomicU32,
     pub video_lead_ns: AtomicI64,
+    /// Mirror of the video thread's standing delay, for the stats.
+    pub video_delay_ns: AtomicU64,
     /// EMA of decoded PTS deltas; written by the receiver, read by video.
     pub video_frame_interval_ns: AtomicI64,
     // Mirrors of the video thread's anchors for stats / media_get_state.
@@ -292,6 +294,10 @@ pub struct TimedPacket {
     pub packet: ffmpeg::Packet,
     pub pts_ns: i64,
     pub bytes: usize,
+    /// OBS clock when the receiver queued it. The frames it decodes into can
+    /// be in hand no earlier, so this is where their arrival margin is
+    /// measured from (`irl_core::video_delay`).
+    pub received_ns: u64,
 }
 
 /// What the receiver sends the video thread, in order.

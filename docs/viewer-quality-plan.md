@@ -41,6 +41,11 @@ so a single log line describes the health of the whole path.
 ## Video behavior
 
 - First-keyframe gating is on by default.
+- Video that reaches the plugin too late to be paced (the encoder sends video
+  later than audio by more than Target Buffer covers) is delayed by a
+  standing, measured amount rather than dropped or shown unpaced.
+  `video_delay_ms` reports it. It is the lip-sync error, and the log line that
+  sets it says how much more Target Buffer would remove it.
 - Timestamped damaged H.264 frames are passed through during decoder
   corruption so video cadence stays smooth: H.264 concealment patches a damaged
   frame from the previous one, which is a usable picture.

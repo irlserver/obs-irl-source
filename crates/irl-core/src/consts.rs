@@ -307,6 +307,23 @@ pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// this is the slack past that before a stream whose audio never arrives is
 /// let through on the fallback anyway.
 pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
+
+/// Ceiling on the standing video delay (`irl_core::video_delay`).
+///
+/// The delay covers a sender whose video reaches the plugin later than the
+/// audio of the same instant by more than Target Buffer absorbs. A whole
+/// second of that is no longer a skew any encoder produces; it is a decoder
+/// or a host that cannot keep up, and past this the frames stay late (shown
+/// on arrival, as before the delay existed) rather than the picture drifting
+/// ever further behind the sound.
+pub const VIDEO_DELAY_MAX_MS: u64 = 1000;
+/// After the play head is anchored, a raise of the video delay moves the
+/// picture, so late frames must recur across this window before one is made.
+pub const VIDEO_DELAY_WINDOW_MS: u64 = 1000;
+/// Late frames within that window, spread over at least half of it, that count
+/// as recurring. A single scheduling hiccup on the host makes a couple of
+/// consecutive frames late; a sender skew makes them late all window long.
+pub const VIDEO_DELAY_MIN_FRAMES: u32 = 3;
 /// How long the last audio playout offset is reused after it goes away.
 pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 /// Video-only fallback: clamp on drift between stream and system clock.
@@ -443,6 +460,9 @@ mod tests {
         assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
         assert_eq!(VIDEO_PACING_LEAD_TICKS, 2); // IRL_VIDEO_PACING_LEAD_TICKS
         assert_eq!(VIDEO_ANCHOR_WAIT_MARGIN_MS, 1000);
+        assert_eq!(VIDEO_DELAY_MAX_MS, 1000);
+        assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
+        assert_eq!(VIDEO_DELAY_MIN_FRAMES, 3);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
         assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667); // IRL_VIDEO_CANVAS_TICK_DEFAULT_NS
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS

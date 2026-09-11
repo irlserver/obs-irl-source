@@ -38,6 +38,7 @@ fn distinct_snapshot() -> StatsSnapshot {
         video_corrupt_held: 119,
         video_lead_ms: 120,
         video_lead_excess: 121,
+        video_delay_ms: 124,
         stream_delay_ms: 122,
         low_latency_audio: true,
         reconnect_count: 123,
