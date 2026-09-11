@@ -1,0 +1,26 @@
+Makefile
+  s_0e16332cd18ddd::t_65b59048686943 9,30-37
+  s_0e16332cd18ddd::t_f5c4c185a656eb 38
+scripts/libobs-shim/libobs_shim.c
+  s_0e16332cd18ddd::t_65b59048686943 1-56
+scripts/test-with-libobs-shim.sh
+  s_0e16332cd18ddd::t_65b59048686943 1-63
+CLAUDE.md
+  s_0e16332cd18ddd::t_65b59048686943 70,200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "5e09e207acdb3f520ba914cb75908be98c902660",
+  "prompts": {},
+  "sessions": {
+    "s_0e16332cd18ddd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79fb9bc1-05df-4d96-bcaf-3e6aee154cf7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
