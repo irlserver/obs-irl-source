@@ -482,10 +482,16 @@ impl VideoThread {
     /// discarded by the warm-up or already played — and handing them over would
     /// anchor the connection late by however stale the first one was. They
     /// amount to a fraction of a second at connection start and nothing has
-    /// been shown yet. Their margins are still valid samples: a margin is set
-    /// by when a packet arrived against when its audio plays, not by how long
-    /// the frame has been queued, so the backlog measures the same sender skew
-    /// the live frames will.
+    /// been shown yet. Their margins are *not* measured: the probe buffers
+    /// about a second of packets and the receiver pushes them in one burst,
+    /// all stamped with the same arrival time, so the oldest of them looks
+    /// late by up to the probe span when it was merely buffered, and even the
+    /// one that happens to be on time may be so by buffering. Only the newest
+    /// frame in hand — the queue holds nothing behind it and the channel is
+    /// empty, so its arrival is a live one — says anything about the sender's
+    /// skew. An on-time head that is not the newest anchors unmeasured; if the
+    /// sender really is late, the hand-over measurement after the anchor sees
+    /// it within a window.
     ///
     /// "Past due" is measured against a canvas tick, not the emit slack: libobs
     /// quantises display to its ticks anyway, and a box with a coarse timer can
@@ -501,10 +507,15 @@ impl VideoThread {
             self.pacing.next_due(),
             self.pacing.head().map(Paced::received_ns),
         ) {
-            if let Some(raise) =
+            let on_time = now_ns as i64 - due_ns as i64 <= tick_ns as i64;
+            let newest_in_hand = self.pacing.len() == 1 && self.shared.video.is_empty();
+            let raise = if newest_in_hand {
                 self.delay
                     .before_anchor(due_ns as i64 - received_ns as i64, tick_ns, tick_ns)
-            {
+            } else {
+                None
+            };
+            if let Some(raise) = raise {
                 self.pacing.shift(raise.to_ns - raise.from_ns);
                 // One line for the whole settlement, from the first delay to
                 // the last.
@@ -517,7 +528,7 @@ impl VideoThread {
                 });
                 continue;
             }
-            if !audio_present || now_ns as i64 - due_ns as i64 <= tick_ns as i64 {
+            if !audio_present || on_time {
                 break;
             }
             self.pacing.pop();

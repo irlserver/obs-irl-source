@@ -1053,36 +1053,124 @@ fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
 /// "low fps" such a stream shows. The shortfall is measured instead and added
 /// to the schedule as a standing delay, sized so that frames are in hand a
 /// tick before they are due again, and the picture is on time from the first
-/// frame.
+/// frame. The canvas rate sets the tick and therefore the rounding, and at
+/// 30fps also caps the delivery lead, so both common rates are swept.
 #[test]
 fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
+    for canvas_fps in [30u64, 60] {
+        let tick = 1_000_000_000 / canvas_fps;
+        let shared = shared_with_audio();
+        let (thread, recorder) = thread_with(shared.clone());
+        let mut thread = thread.with_canvas_tick(Box::new(move || Some(tick)));
+
+        // Audio has primed such that a video frame arriving now maps 150 ms
+        // into the past, and every later frame likewise.
+        let t0 = obs::time::gettime_ns();
+        let late = 150_000_000;
+        publish_mapping(&shared, t0 - late, 10_000_000_000);
+
+        for i in 0..30u64 {
+            let arrival = t0 + i * FRAME;
+            let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+            frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
+            thread.pace_decoded(frame, arrival);
+            thread.run_once(arrival);
+        }
+
+        // 150 ms of lateness plus a tick of decode allowance, in whole ticks:
+        // 10 of 16.7 ms at 60fps, 6 of 33.3 ms at 30fps.
+        let delay = (late + tick).div_ceil(tick) * tick;
+        assert_eq!(
+            shared.conn.video_delay_ns.load(Relaxed),
+            delay,
+            "canvas {canvas_fps}fps"
+        );
+        let emitted = recorder.emitted();
+        assert_eq!(
+            emitted.len(),
+            30,
+            "canvas {canvas_fps}fps: every frame shown"
+        );
+        for (i, frame) in emitted.iter().enumerate() {
+            let arrival = t0 + i as u64 * FRAME;
+            assert_eq!(
+                frame.timestamp,
+                arrival - late + delay,
+                "canvas {canvas_fps}fps, frame {i}"
+            );
+        }
+        assert_eq!(thread.paced_len(), 0);
+    }
+}
+
+/// The probe buffers about a second of the stream and the receiver then hands
+/// it over in one burst, every packet stamped with the same arrival time. The
+/// older frames in that burst look late by up to the probe span against their
+/// mapped due times when they were merely buffered, and the one that happens
+/// to be on time has its few milliseconds of margin from buffering too. None
+/// of them may size the delay; only the newest frame in hand is a live
+/// arrival, and here it is not the one that anchors.
+#[test]
+fn a_stale_startup_burst_does_not_raise_the_delay() {
     let shared = shared_with_audio();
     let (mut thread, recorder) = thread_with(shared.clone());
 
-    // Audio has primed such that a video frame arriving now maps 150 ms into
-    // the past, and every later frame likewise.
+    // Twenty 30fps frames from the probe, all pushed at `t0`, mapping from
+    // 593 ms in the past up to one 40 ms out, with the one before it 6.7 ms
+    // out: on time, but only just.
+    let t0 = obs::time::gettime_ns();
+    let last_due = t0 + 40_000_000;
+    publish_mapping(&shared, last_due, 10_000_000_000 + 19 * FRAME as i64);
+    for i in 0..20i64 {
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(10_000_000_000 + i * FRAME as i64);
+        thread.pace_decoded(frame, t0);
+    }
+    thread.run_once(t0);
+
+    assert_eq!(thread.paced_len(), 2, "eighteen stale frames dropped");
+    assert_eq!(
+        shared.conn.video_delay_ns.load(Relaxed),
+        0,
+        "buffered frames are not evidence of a late sender"
+    );
+    thread.run_once(last_due - FRAME);
+    let emitted = recorder.emitted();
+    assert_eq!(
+        emitted[0].timestamp,
+        last_due - FRAME,
+        "anchored on the on-time frame"
+    );
+    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
+}
+
+/// When every frame in hand is late, the newest one is the measurement: its
+/// arrival is a live one, and the frames behind it in the queue only say how
+/// long the wait for the mapping was.
+#[test]
+fn a_late_stream_is_measured_on_its_newest_frame() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    // Three frames that arrived in real time over the last 67 ms, each
+    // mapping 150 ms before its arrival.
     let t0 = obs::time::gettime_ns();
     let late = 150_000_000;
-    publish_mapping(&shared, t0 - late, 10_000_000_000);
-
-    for i in 0..30u64 {
-        let arrival = t0 + i * FRAME;
+    publish_mapping(&shared, t0 - late, 10_000_000_000 + 2 * FRAME as i64);
+    for i in 0..3u64 {
         let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
         frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, arrival);
-        thread.run_once(arrival);
+        thread.pace_decoded(frame, t0 - (2 - i) * FRAME);
     }
+    thread.run_once(t0);
 
-    // 150 ms of lateness plus a 16.7 ms tick of decode allowance: 10 ticks.
+    // 150 ms plus a tick, in ticks, from the newest frame; the two older ones
+    // were stale even after that and went.
     let delay = 10 * TICK;
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), delay);
-    let emitted = recorder.emitted();
-    assert_eq!(emitted.len(), 30, "every frame shown, none dropped");
-    for (i, frame) in emitted.iter().enumerate() {
-        let arrival = t0 + i as u64 * FRAME;
-        assert_eq!(frame.timestamp, arrival - late + delay, "frame {i}");
-    }
-    assert_eq!(thread.paced_len(), 0);
+    assert_eq!(thread.paced_len(), 1);
+    thread.run_once(t0 - late + delay);
+    assert_eq!(recorder.only().timestamp, t0 - late + delay);
 }
 
 /// A sender whose skew sits right at the edge of what Target Buffer covers
