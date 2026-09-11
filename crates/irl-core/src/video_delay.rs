@@ -1,28 +1,32 @@
 //! The standing delay on the video schedule.
 //!
-//! Pacing hands each frame to libobs a delivery lead before it is due, which
-//! is what keeps libobs's async queue about one frame deep and the cadence
-//! smooth. That only works for a frame that is in hand at least a lead before
-//! its due time. How early it is in hand — its *arrival margin*, the due time
-//! minus the moment its packet reached the video thread — is set by the
-//! sender: video that leaves the encoder later than the audio of the same
-//! instant has that much less margin, and once that skew exceeds what Target
-//! Buffer covers the margin is negative and every frame is late. A late frame
-//! goes out on arrival, unpaced, and bursty arrival then shows as dropped
-//! frames, because libobs discards a frame it finds behind its play head
-//! whenever a newer one is already queued. That is the "low fps" a stream with
-//! trailing video shows, and it is what the delay here prevents.
+//! Pacing hands each frame to libobs before it is due, which is what keeps
+//! libobs's async queue about one frame deep and the cadence smooth. A frame
+//! handed over *after* it is due is shown a canvas tick late, and when two
+//! late frames reach libobs inside one tick it discards the older one: that is
+//! the "low fps" a stream shows when its video reaches the plugin later than
+//! the audio of the same instant by more than Target Buffer covers. How early
+//! a frame is in hand is the sender's to set, so the plugin cannot make a late
+//! frame early; what it can do is move the whole video schedule later by a
+//! fixed amount, so that the frames stop being late.
 //!
-//! The delay is added to every due time and sized from the worst margin seen,
-//! so that frames are in hand a full lead early again. It trades a fixed,
-//! known lip-sync error for a smooth picture; the caller's log line says how
-//! much more Target Buffer would take the error back to zero. Before libobs's
-//! play head is anchored nothing has been shown yet, so a shortfall is acted
-//! on at once. Afterwards a raise moves the picture (one frame holds for the
-//! size of the raise), so it takes a shortfall that recurs across a window,
-//! not a single late frame from a scheduling hiccup. The delay never shrinks
-//! within a connection: lowering it would be a second visible step, for a
-//! margin that might well tighten again.
+//! That amount is the delay here. It is added to every due time and sized from
+//! the worst shortfall seen. It trades a fixed, known lip-sync error for a
+//! smooth picture; the caller's log line says how much more Target Buffer
+//! would take the error back to zero. Before libobs's play head is anchored
+//! nothing has been shown yet, so a shortfall is acted on at once. Afterwards a
+//! raise moves the picture (one frame holds for the size of the raise), so it
+//! takes a shortfall that recurs across a window, not a single late frame from
+//! a scheduling hiccup. The delay never shrinks within a connection: lowering
+//! it would be a second visible step, for a margin that might well tighten
+//! again.
+//!
+//! The bar is deliberately "not late", not "a full delivery lead early". The
+//! lead the pacing queue applies to a frame it holds is an allowance for its
+//! own timer oversleeping on the way to the due time; a frame handed over on
+//! arrival never sleeps, and libobs shows it on time as long as it is in the
+//! queue before its due time passes. Asking every frame for the lead would
+//! delay a healthy stream by the lead for nothing.
 
 /// One change of the delay, for the caller to log and mirror into the stats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +38,7 @@ pub struct DelayRaise {
     /// Frames that fell short in the window that caused the raise; zero for a
     /// raise before the anchor, which one frame is enough for.
     pub frames: u32,
-    /// The margin called for more than the ceiling allows.
+    /// The shortfall called for more than the ceiling allows.
     pub capped: bool,
 }
 
@@ -83,13 +87,14 @@ impl VideoDelay {
         self.window = None;
     }
 
-    /// The whole delay a frame needs so that it is in hand `lead_ns` before it
-    /// is due, in whole canvas ticks. `due_ns` is the frame's scheduled time
-    /// *including* the current delay, as the pacing queue holds it, and
-    /// `received_ns` when its packet arrived.
-    fn required_ns(&self, due_ns: u64, received_ns: u64, lead_ns: u64, tick_ns: u64) -> u64 {
-        let margin_ns = due_ns as i64 - self.delay_ns as i64 - received_ns as i64;
-        let shortfall_ns = lead_ns as i64 - margin_ns;
+    /// The whole delay a frame needs so that it is in hand `want_ns` before it
+    /// is due, in whole canvas ticks. `margin_ns` is how early the frame was in
+    /// hand against its due time *as the pacing queue holds it*, delay
+    /// included, so the delay is taken back out before the shortfall is
+    /// measured.
+    fn required_ns(&self, margin_ns: i64, want_ns: u64, tick_ns: u64) -> u64 {
+        let raw_margin_ns = margin_ns - self.delay_ns as i64;
+        let shortfall_ns = want_ns as i64 - raw_margin_ns;
         if shortfall_ns <= 0 {
             return 0;
         }
@@ -112,33 +117,33 @@ impl VideoDelay {
         Some(raise)
     }
 
-    /// A frame considered for anchoring the play head. Nothing has been shown
-    /// yet, so a shortfall raises the delay at once.
+    /// A frame considered for anchoring the play head, `margin_ns` being its
+    /// due time minus its packet's arrival. Nothing has been shown yet, so a
+    /// shortfall against `want_ns` raises the delay at once.
     pub fn before_anchor(
         &mut self,
-        due_ns: u64,
-        received_ns: u64,
-        lead_ns: u64,
+        margin_ns: i64,
+        want_ns: u64,
         tick_ns: u64,
     ) -> Option<DelayRaise> {
         self.window = None;
-        let need_ns = self.required_ns(due_ns, received_ns, lead_ns, tick_ns);
+        let need_ns = self.required_ns(margin_ns, want_ns, tick_ns);
         self.raise_to(need_ns, 0)
     }
 
-    /// A frame handed over after the anchor. A shortfall is recorded; the
-    /// delay is raised only once the window says it recurs.
+    /// A frame handed over after the anchor, `margin_ns` being its due time
+    /// minus the hand-over time. A shortfall against `want_ns` is recorded;
+    /// the delay is raised only once the window says it recurs.
     pub fn note(
         &mut self,
         now_ns: u64,
-        due_ns: u64,
-        received_ns: u64,
-        lead_ns: u64,
+        margin_ns: i64,
+        want_ns: u64,
         tick_ns: u64,
     ) -> Option<DelayRaise> {
         // Against the delay its due time carries: a raise below must not make
         // this frame look short by the amount just added.
-        let need_ns = self.required_ns(due_ns, received_ns, lead_ns, tick_ns);
+        let need_ns = self.required_ns(margin_ns, want_ns, tick_ns);
         // An elapsed window is judged on what it holds, before this frame
         // starts the next one.
         let raise = self.expire(now_ns);
@@ -188,7 +193,6 @@ mod tests {
     use super::*;
 
     const TICK: u64 = 16_666_667;
-    const LEAD: u64 = 2 * TICK;
     const WINDOW: u64 = 1_000_000_000;
     const MAX: u64 = 1_000_000_000;
 
@@ -197,52 +201,49 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_with_a_full_lead_in_hand_needs_no_delay() {
+    fn a_frame_in_hand_early_enough_needs_no_delay() {
         let mut d = delay();
-        assert_eq!(d.before_anchor(1_000 + LEAD, 1_000, LEAD, TICK), None);
-        assert_eq!(
-            d.before_anchor(1_000 + 500_000_000, 1_000, LEAD, TICK),
-            None
-        );
+        assert_eq!(d.before_anchor(TICK as i64, TICK, TICK), None);
+        assert_eq!(d.before_anchor(500_000_000, TICK, TICK), None);
         assert_eq!(d.delay_ns(), 0);
     }
 
     #[test]
-    fn a_frame_with_no_margin_gets_the_lead_before_the_anchor() {
+    fn a_frame_with_no_margin_gets_the_wanted_allowance_before_the_anchor() {
         let mut d = delay();
-        let raise = d.before_anchor(5_000, 5_000, LEAD, TICK).expect("raised");
+        let raise = d.before_anchor(0, TICK, TICK).expect("raised");
         assert_eq!(raise.from_ns, 0);
-        assert_eq!(raise.to_ns, LEAD);
+        assert_eq!(raise.to_ns, TICK);
         assert!(!raise.capped);
-        assert_eq!(d.delay_ns(), LEAD);
+        assert_eq!(d.delay_ns(), TICK);
     }
 
     #[test]
-    fn a_late_frame_gets_its_lateness_plus_the_lead_in_whole_ticks() {
+    fn a_late_frame_gets_its_lateness_plus_the_allowance_in_whole_ticks() {
         let mut d = delay();
-        // 150 ms late: 150 + 33.3 = 183.3 ms, which is 11 ticks (183.33 ms).
-        let received = 1_000_000_000;
-        let due = received - 150_000_000;
-        let raise = d.before_anchor(due, received, LEAD, TICK).expect("raised");
+        // 150 ms late plus a 16.7 ms allowance is 166.7 ms: exactly 10 ticks.
+        let raise = d.before_anchor(-150_000_000, TICK, TICK).expect("raised");
+        assert_eq!(raise.to_ns, 10 * TICK);
+        // 151 ms late needs an eleventh.
+        let mut d = delay();
+        let raise = d.before_anchor(-151_000_000, TICK, TICK).expect("raised");
         assert_eq!(raise.to_ns, 11 * TICK);
     }
 
     #[test]
     fn the_delay_only_ever_grows_before_the_anchor() {
         let mut d = delay();
-        d.before_anchor(0, 100_000_000, LEAD, TICK).expect("raised");
+        d.before_anchor(-100_000_000, TICK, TICK).expect("raised");
         let first = d.delay_ns();
         // A frame with more margin (its due already carries the delay).
         assert_eq!(
-            d.before_anchor(first + 100_000_000, 0, LEAD, TICK),
+            d.before_anchor(first as i64 + 100_000_000, TICK, TICK),
             None,
             "a smaller shortfall must not lower the delay"
         );
         assert_eq!(d.delay_ns(), first);
         // A frame with less raises it further.
-        let more = d
-            .before_anchor(first, 200_000_000, LEAD, TICK)
-            .expect("raised");
+        let more = d.before_anchor(-200_000_000, TICK, TICK).expect("raised");
         assert_eq!(more.from_ns, first);
         assert!(more.to_ns > first);
     }
@@ -250,34 +251,42 @@ mod tests {
     #[test]
     fn the_existing_delay_counts_toward_the_margin() {
         let mut d = delay();
-        d.before_anchor(0, 0, LEAD, TICK)
-            .expect("raised to the lead");
-        // Due times now carry the delay: a frame due `LEAD` after it arrived
+        d.before_anchor(0, TICK, TICK).expect("raised to a tick");
+        // Due times now carry the delay: a frame due a tick after it arrived
         // has, net of the delay, no margin — exactly what the delay covers.
-        assert_eq!(d.before_anchor(10_000 + LEAD, 10_000, LEAD, TICK), None);
+        assert_eq!(d.before_anchor(TICK as i64, TICK, TICK), None);
     }
 
     #[test]
     fn the_ceiling_caps_the_delay_and_says_so() {
         let mut d = delay();
-        let received = 5_000_000_000;
-        let raise = d
-            .before_anchor(received - 2_000_000_000, received, LEAD, TICK)
-            .expect("raised");
+        let raise = d.before_anchor(-2_000_000_000, TICK, TICK).expect("raised");
         assert_eq!(raise.to_ns, MAX);
         assert!(raise.capped);
         // Still short at the ceiling: nothing more to do, nothing to report.
-        assert_eq!(
-            d.before_anchor(received - 3_000_000_000, received, LEAD, TICK),
-            None
-        );
+        assert_eq!(d.before_anchor(-3_000_000_000, TICK, TICK), None);
+    }
+
+    #[test]
+    fn after_the_anchor_a_frame_handed_over_before_it_is_due_is_not_short() {
+        let mut d = delay();
+        let t0 = 10_000_000_000;
+        // In hand with anything from a nanosecond to a full lead to spare.
+        for (i, margin) in [1, 5_000_000, 20_000_000, 33_333_334]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(d.note(t0 + i as u64 * 300_000_000, margin, 0, TICK), None);
+        }
+        assert_eq!(d.expire(t0 + 2 * WINDOW), None);
+        assert_eq!(d.delay_ns(), 0);
     }
 
     #[test]
     fn after_the_anchor_one_late_frame_does_not_raise_the_delay() {
         let mut d = delay();
         let t0 = 10_000_000_000;
-        assert_eq!(d.note(t0, t0, t0, LEAD, TICK), None);
+        assert_eq!(d.note(t0, -5_000_000, 0, TICK), None);
         assert_eq!(d.expire(t0 + WINDOW), None);
         assert_eq!(d.delay_ns(), 0);
     }
@@ -288,8 +297,7 @@ mod tests {
         let t0 = 10_000_000_000;
         // Six frames late within 100 ms: one hiccup, not a standing shortfall.
         for i in 0..6 {
-            let t = t0 + i * TICK;
-            assert_eq!(d.note(t, t, t, LEAD, TICK), None);
+            assert_eq!(d.note(t0 + i * TICK, -5_000_000, 0, TICK), None);
         }
         assert_eq!(d.expire(t0 + WINDOW), None);
         assert_eq!(d.delay_ns(), 0);
@@ -299,27 +307,12 @@ mod tests {
     fn after_the_anchor_a_recurring_shortfall_raises_the_delay_to_its_worst() {
         let mut d = delay();
         let t0 = 10_000_000_000;
-        // Three frames spread across the window, 10 ms, 0 ms and 5 ms of
-        // margin against a 33.3 ms lead: the worst needs 33.3 ms, two ticks.
-        assert_eq!(d.note(t0, t0 + 10_000_000, t0, LEAD, TICK), None);
+        // Three frames spread across the window, 5, 20 and 1 ms late: the
+        // worst needs 20 ms, which is two ticks.
+        assert_eq!(d.note(t0, -5_000_000, 0, TICK), None);
+        assert_eq!(d.note(t0 + 600_000_000, -20_000_000, 0, TICK), None);
         assert_eq!(
-            d.note(
-                t0 + 600_000_000,
-                t0 + 600_000_000,
-                t0 + 600_000_000,
-                LEAD,
-                TICK
-            ),
-            None
-        );
-        assert_eq!(
-            d.note(
-                t0 + 900_000_000,
-                t0 + 905_000_000,
-                t0 + 900_000_000,
-                LEAD,
-                TICK
-            ),
+            d.note(t0 + 900_000_000, -1_000_000, 0, TICK),
             None,
             "the window has not run its course"
         );
@@ -334,39 +327,36 @@ mod tests {
         let mut d = delay();
         let t0 = 10_000_000_000;
         for i in 0..3 {
-            let t = t0 + i * 400_000_000;
-            assert_eq!(d.note(t, t, t, LEAD, TICK), None);
+            assert_eq!(d.note(t0 + i * 400_000_000, -5_000_000, 0, TICK), None);
         }
         // The fourth frame arrives after the window elapsed: the raise comes
         // out of this call, judged on the three before it.
         let t = t0 + WINDOW + 1;
-        let raise = d.note(t, t, t, LEAD, TICK).expect("raised");
+        let raise = d.note(t, -5_000_000, 0, TICK).expect("raised");
         assert_eq!(raise.frames, 3);
-        assert_eq!(raise.to_ns, LEAD);
-        // The fourth frame needed the lead too, and the raise just provided
-        // it: it does not start a new window.
+        assert_eq!(raise.to_ns, TICK);
+        // The fourth frame needed a tick too, and the raise just provided it:
+        // it does not start a new window.
         assert_eq!(d.expire(t + WINDOW), None);
     }
 
     #[test]
     fn frames_covered_by_the_delay_are_not_counted() {
         let mut d = delay();
-        d.before_anchor(0, 0, LEAD, TICK)
-            .expect("raised to the lead");
+        d.before_anchor(0, TICK, TICK).expect("raised to a tick");
         let t0 = 10_000_000_000;
         for i in 0..5 {
-            let t = t0 + i * 300_000_000;
-            // Due carries the delay; net margin is zero, which the delay covers.
-            assert_eq!(d.note(t, t + LEAD, t, LEAD, TICK), None);
+            // Due carries the delay; net of it the frame is exactly on time.
+            assert_eq!(d.note(t0 + i * 300_000_000, TICK as i64, 0, TICK), None);
         }
         assert_eq!(d.expire(t0 + 2 * WINDOW), None);
-        assert_eq!(d.delay_ns(), LEAD);
+        assert_eq!(d.delay_ns(), TICK);
     }
 
     #[test]
     fn reset_returns_to_zero() {
         let mut d = delay();
-        d.before_anchor(0, 0, LEAD, TICK).expect("raised");
+        d.before_anchor(0, TICK, TICK).expect("raised");
         d.reset();
         assert_eq!(d.delay_ns(), 0);
         assert_eq!(d.expire(u64::MAX), None);

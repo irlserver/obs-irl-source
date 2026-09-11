@@ -388,11 +388,12 @@ impl VideoThread {
                 return;
             };
             if !self.anchor_pending {
-                let lead_ns = self.delivery_lead_ns(tick_ns);
-                if let Some(raise) =
-                    self.delay
-                        .note(now_ns, due_ns, paced.received_ns(), lead_ns, tick_ns)
-                {
+                // Measured at hand-over: a frame that reaches libobs before its
+                // due time is shown on time, whether or not it had the full
+                // delivery lead (that lead is an oversleep allowance for frames
+                // the queue holds, and this one may never have waited).
+                let handover_margin_ns = due_ns as i64 - now_ns as i64;
+                if let Some(raise) = self.delay.note(now_ns, handover_margin_ns, 0, tick_ns) {
                     self.apply_delay_raise(raise, false);
                 }
             }
@@ -458,10 +459,14 @@ impl VideoThread {
     /// Settle the frame that will anchor libobs's play head.
     ///
     /// Two things are decided for each head frame, in this order. First its
-    /// arrival margin: nothing has been shown yet, so a frame that reached this
-    /// thread less than a delivery lead before it is due raises the standing
-    /// video delay on the spot ([`VideoDelay::before_anchor`]) and the queue is
-    /// moved onto it. That is what keeps a sender whose video trails its audio
+    /// arrival margin: nothing has been shown yet, so a frame whose packet
+    /// reached this thread less than a canvas tick before it is due raises the
+    /// standing video delay on the spot ([`VideoDelay::before_anchor`]) and the
+    /// queue is moved onto it. A tick, not the delivery lead: the frame is
+    /// measured at its packet's arrival and still has to be decoded, so the
+    /// tick is the allowance for that, while the lead is an allowance for the
+    /// pacing timer oversleeping, which a frame handed over on arrival never
+    /// meets. That is what keeps a sender whose video trails its audio
     /// by more than Target Buffer covers from playing unpaced — every frame
     /// late, handed over on arrival, and dropped by libobs whenever two arrive
     /// inside one canvas tick — or, before this existed, from being dropped
@@ -486,20 +491,19 @@ impl VideoThread {
     /// quantises display to its ticks anyway, and a box with a coarse timer can
     /// oversleep by most of one, which must not make it drop every candidate in
     /// turn. Without audio there is nothing to be in sync with, and the
-    /// fallback frames go out as they always did, now a lead after they arrive
+    /// fallback frames go out as they always did, now a tick after they arrive
     /// instead of on arrival.
     fn settle_anchor_candidate(&mut self, now_ns: u64, tick_ns: u64) {
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
-        let lead_ns = self.delivery_lead_ns(tick_ns);
         let mut dropped = 0u32;
         let mut raised: Option<DelayRaise> = None;
         while let (Some(due_ns), Some(received_ns)) = (
             self.pacing.next_due(),
             self.pacing.head().map(Paced::received_ns),
         ) {
-            if let Some(raise) = self
-                .delay
-                .before_anchor(due_ns, received_ns, lead_ns, tick_ns)
+            if let Some(raise) =
+                self.delay
+                    .before_anchor(due_ns as i64 - received_ns as i64, tick_ns, tick_ns)
             {
                 self.pacing.shift(raise.to_ns - raise.from_ns);
                 // One line for the whole settlement, from the first delay to
@@ -544,10 +548,10 @@ impl VideoThread {
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
         match (at_anchor, audio_present) {
             (true, true) => irl_warn!(
-                "Video arrives too late for its audio to be paced; delaying video by {to_ms}ms so it can be. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead"
+                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead"
             ),
             (true, false) => {
-                irl_info!("Video arrives without its pacing lead; delaying video by {to_ms}ms")
+                irl_info!("Video reaches the plugin as it falls due; delaying video by {to_ms}ms")
             }
             (false, true) => irl_warn!(
                 "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead",

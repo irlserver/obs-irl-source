@@ -525,20 +525,20 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
 
     // Anchor the play head first: the very first frame out deliberately gets
     // no lead, so a second frame is needed to see one. The video-only fallback
-    // schedules it at its arrival, so it is delayed by a lead first (see
-    // `video_without_audio_is_delayed_by_a_lead_and_anchors_on_the_fallback`).
+    // schedules it at its arrival, so it is delayed by a tick first (see
+    // `video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback`).
     let t0 = obs::time::gettime_ns();
     let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     first.set_pts(t0 as i64);
     thread.pace_decoded(first, t0);
-    let now = t0 + 2 * TICK;
+    let now = t0 + TICK;
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1, "anchor frame emitted");
 
     // A frame due 25ms out: inside two 60fps ticks (33.3ms) of the lead, so
     // it should go now even though its due time has not arrived. (Its due
     // time is its PTS on the fallback epoch plus the delay: `t0 + 25 ms +
-    // 2 ticks`, 25 ms from `now`.)
+    // 1 tick`, 25 ms from `now`.)
     let mut soon = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     soon.set_pts(t0 as i64 + 25_000_000);
     thread.pace_decoded(soon, t0);
@@ -654,9 +654,9 @@ fn a_queued_frame_is_transferred_paced_and_emitted() {
     thread.pace_decoded(queued, now);
 
     // With no audio mapping the video-only anchor puts the first frame at its
-    // arrival, and the delivery lead it then lacks is added as the standing
-    // delay: one cycle at that due time takes it all the way out.
-    let wait = thread.run_once(now + 2 * TICK);
+    // arrival, and a tick's allowance is added as the standing delay: one
+    // cycle at that due time takes it all the way out.
+    let wait = thread.run_once(now + TICK);
 
     let emitted = recorder.only();
     assert_eq!(emitted.planes[0].0, source_plane, "still zero-copy");
@@ -681,7 +681,7 @@ fn a_future_frame_waits_instead_of_being_emitted() {
     // the first frame, so pace the *second* one forward.
     queued.set_pts(0);
     thread.pace_decoded(queued, now);
-    let now = now + 2 * TICK;
+    let now = now + TICK;
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1, "the anchor frame goes out");
 
@@ -709,7 +709,7 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
     let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     queued.set_pts(0);
     thread.pace_decoded(queued, now);
-    let now = now + 2 * TICK;
+    let now = now + TICK;
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1);
 
@@ -768,18 +768,18 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     thread.run_once(now);
     assert_eq!(thread.next_due_ns(), Some(now + 500_000_000));
 
-    // Once the offset says "now", the frame has no margin left to be paced
-    // with: the delivery lead is added as the standing delay, and it goes out
-    // at the end of it.
+    // Once the offset says "now", the frame has no margin left at all: a
+    // tick's allowance is added as the standing delay, and it goes out at the
+    // end of it.
     {
         let mut state = shared.audio_state();
         state.latest_obs_end_ts_ns = now;
     }
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
-    assert_eq!(thread.next_due_ns(), Some(now + 2 * TICK));
-    thread.run_once(now + 2 * TICK);
-    assert_eq!(recorder.only().timestamp, now + 2 * TICK);
+    assert_eq!(thread.next_due_ns(), Some(now + TICK));
+    thread.run_once(now + TICK);
+    assert_eq!(recorder.only().timestamp, now + TICK);
 }
 
 #[test]
@@ -1011,12 +1011,12 @@ fn video_stops_waiting_for_audio_that_never_primes() {
 }
 
 /// Without an audio stream there is nothing to wait for and nothing to be in
-/// sync with: the video-only fallback anchors as soon as the first frame has
-/// its delivery lead. The fallback schedules that frame at its arrival, which
-/// leaves it no lead at all, so the lead is added as the standing video delay
-/// and the frame goes out two canvas ticks after it arrived.
+/// sync with: the video-only fallback anchors as soon as the first frame can
+/// be on time. The fallback schedules that frame at its arrival, which leaves
+/// no time to decode it, so a canvas tick is added as the standing video delay
+/// and the frame goes out one tick after it arrived.
 #[test]
-fn video_without_audio_is_delayed_by_a_lead_and_anchors_on_the_fallback() {
+fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
     let shared = shared();
     let (mut thread, recorder) = thread_with(shared.clone());
 
@@ -1027,14 +1027,14 @@ fn video_without_audio_is_delayed_by_a_lead_and_anchors_on_the_fallback() {
     thread.run_once(t0);
     assert!(
         recorder.emitted().is_empty(),
-        "no audio to wait for, but no lead yet either"
+        "no audio to wait for, but not decodable in time either"
     );
-    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 2 * TICK);
+    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), TICK);
     // The fallback anchors on the clock as `due_time` read it, a hair after
-    // `t0`, so the due time is two ticks past that rather than past `t0`.
+    // `t0`, so the due time is a tick past that rather than past `t0`.
     let due = thread.next_due_ns().expect("paced");
     assert!(
-        due >= t0 + 2 * TICK && due < t0 + 2 * TICK + 1_000_000,
+        due >= t0 + TICK && due < t0 + TICK + 1_000_000,
         "due {due} vs t0 {t0}"
     );
 
@@ -1052,7 +1052,7 @@ fn video_without_audio_is_delayed_by_a_lead_and_anchors_on_the_fallback() {
 /// dropped by libobs whenever two arrive inside one canvas tick, which is the
 /// "low fps" such a stream shows. The shortfall is measured instead and added
 /// to the schedule as a standing delay, sized so that frames are in hand a
-/// full delivery lead early again, and the picture is paced from the first
+/// tick before they are due again, and the picture is on time from the first
 /// frame.
 #[test]
 fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
@@ -1073,8 +1073,8 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
         thread.run_once(arrival);
     }
 
-    // 150 ms of lateness plus the 33.3 ms lead is 183.3 ms: 11 ticks.
-    let delay = 11 * TICK;
+    // 150 ms of lateness plus a 16.7 ms tick of decode allowance: 10 ticks.
+    let delay = 10 * TICK;
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), delay);
     let emitted = recorder.emitted();
     assert_eq!(emitted.len(), 30, "every frame shown, none dropped");
@@ -1086,13 +1086,13 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
 }
 
 /// A sender whose skew sits right at the edge of what Target Buffer covers
-/// gets some frames in hand with a lead and some without. The anchor frame may
-/// well be one of the former, and from then on every frame that arrives short
-/// is handed over on arrival, unpaced: the same dropped-frame judder in
-/// libobs. A shortfall that recurs across a window raises the delay to cover
-/// it. A raise moves the picture, so it happens once, not per frame.
+/// gets some frames in hand before they are due and some after. The anchor
+/// frame may well be one of the former, and from then on every frame that
+/// arrives past due is handed over late, unpaced: the same dropped-frame
+/// judder in libobs. Lateness that recurs across a window raises the delay to
+/// cover it. A raise moves the picture, so it happens once, not per frame.
 #[test]
-fn a_recurring_shortfall_after_the_anchor_raises_the_delay_once() {
+fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
     let shared = shared_with_audio();
     let (mut thread, recorder) = thread_with(shared.clone());
 
@@ -1106,9 +1106,9 @@ fn a_recurring_shortfall_after_the_anchor_raises_the_delay_once() {
     assert_eq!(recorder.emitted().len(), 1, "anchored with a full margin");
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
-    // From here every frame arrives with only 10 ms in hand against a 33.3 ms
-    // lead, 90 ms later relative to its due time than the anchor frame did.
-    let arrival_of = |i: u64| t0 + 90_000_000 + i * FRAME;
+    // From here every frame arrives 5 ms after it was due, 105 ms later
+    // relative to its due time than the anchor frame did.
+    let arrival_of = |i: u64| t0 + 105_000_000 + i * FRAME;
     let mut delay_seen = Vec::new();
     for i in 1..=80u64 {
         let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
@@ -1117,26 +1117,52 @@ fn a_recurring_shortfall_after_the_anchor_raises_the_delay_once() {
         thread.run_once(arrival_of(i));
         delay_seen.push(shared.conn.video_delay_ns.load(Relaxed));
     }
-    thread.run_once(arrival_of(81));
 
     // The window opened with frame 1 and ran its course a second later, at
-    // frame 32: raised then, by two ticks, and never again for the same
-    // shortfall.
+    // frame 32: raised then, by one tick, and never again for the same
+    // lateness.
     assert_eq!(delay_seen[30], 0, "frame 31: still inside the window");
-    assert_eq!(delay_seen[31], 2 * TICK, "frame 32: raised");
-    assert!(
-        delay_seen[31..].iter().all(|&d| d == 2 * TICK),
-        "raised once"
-    );
+    assert_eq!(delay_seen[31], TICK, "frame 32: raised");
+    assert!(delay_seen[31..].iter().all(|&d| d == TICK), "raised once");
 
     let emitted = recorder.emitted();
     assert_eq!(emitted.len(), 81, "no frame dropped across the raise");
     for (i, frame) in emitted.iter().enumerate().skip(1) {
         let i = i as u64;
-        let due = arrival_of(i) + 10_000_000;
-        let expected = if i < 32 { due } else { due + 2 * TICK };
+        let due = arrival_of(i) - 5_000_000;
+        let expected = if i < 32 { due } else { due + TICK };
         assert_eq!(frame.timestamp, expected, "frame {i}");
     }
+}
+
+/// A frame in hand with anything to spare is on time, however little that is:
+/// the delivery lead is an allowance for the pacing timer oversleeping, and a
+/// frame handed over on arrival never sleeps. Demanding the lead of every
+/// frame would delay a healthy stream by the lead for nothing.
+#[test]
+fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    let t0 = obs::time::gettime_ns();
+    publish_mapping(&shared, t0 + 100_000_000, 10_000_000_000);
+    let mut anchor = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    anchor.set_pts(10_000_000_000);
+    thread.pace_decoded(anchor, t0);
+    thread.run_once(t0 + 100_000_000);
+    assert_eq!(recorder.emitted().len(), 1);
+
+    // Two seconds of frames with 3 ms in hand: a tenth of the lead.
+    let arrival_of = |i: u64| t0 + 97_000_000 + i * FRAME;
+    for i in 1..=60u64 {
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
+        thread.pace_decoded(frame, arrival_of(i));
+        thread.run_once(arrival_of(i));
+    }
+
+    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
+    assert_eq!(recorder.emitted().len(), 61);
 }
 
 /// A few late frames in a row are a scheduling hiccup on the host, not a
@@ -1193,7 +1219,7 @@ fn a_clear_forgets_the_video_delay() {
     frame.set_pts(10_000_000_000);
     thread.pace_decoded(frame, t0);
     thread.run_once(t0);
-    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 11 * TICK);
+    assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 10 * TICK);
 
     shared.video.request_clear();
     let t1 = t0 + 5_000_000_000;
