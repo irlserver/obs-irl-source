@@ -1,0 +1,26 @@
+crates/irl-source/src/video/thread.rs
+  s_0e16332cd18ddd::t_a24072fcf5a633 510-511,515-518,531
+  s_0e16332cd18ddd::t_3926b17b504d3e 488-494,512
+  s_0e16332cd18ddd::t_64c5adf9597a42 485-487
+CLAUDE.md
+  s_0e16332cd18ddd::t_3926b17b504d3e 133,175
+crates/irl-source/tests/video_pipeline.rs
+  s_0e16332cd18ddd::t_3926b17b504d3e 1109-1112,1119-1120,1122-1123,1131,1137-1144
+  s_0e16332cd18ddd::t_a24072fcf5a633 1056-1057,1060-1108,1113-1114,1118,1124-1130,1132-1136,1145-1153,1155-1160,1163,1165,1167-1168,1171-1173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "745e8408f1c1bbc8ea687c13f4e5e46c3d7a1e48",
+  "prompts": {},
+  "sessions": {
+    "s_0e16332cd18ddd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79fb9bc1-05df-4d96-bcaf-3e6aee154cf7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
