@@ -50,9 +50,16 @@ impl InterruptWatch {
 
     /// Point the watch at the context being opened, so it can read
     /// `pb->bytes_read`. Cleared when the context goes away.
+    ///
+    /// The byte count starts at -1, which no `bytes_read` can equal, so the
+    /// first callback that sees a connection counts it as progress and
+    /// restarts the clock. Starting at 0 matched a fresh connection's count,
+    /// and the deadline then ran from `arm()`, which for a listener was when
+    /// it started waiting: a sender that called in more than `timeout_us`
+    /// later was aborted on its first read, before it could send anything.
     fn track(&self, ptr: *mut ffmpeg_sys_next::AVFormatContext) {
         self.fmt.store(ptr, Ordering::Relaxed);
-        self.io_bytes_read.store(0, Ordering::Relaxed);
+        self.io_bytes_read.store(-1, Ordering::Relaxed);
     }
 
     fn untrack(&self) {
@@ -91,8 +98,9 @@ impl InterruptWatch {
     ///   the socket. A caller URL keeps the deadline: it is dialing a host that
     ///   either answers or does not, and libsrt's own `SRTO_CONNTIMEO` bounds
     ///   it besides.
-    /// - Once connected, the stall is measured from the last byte that
-    ///   actually arrived rather than from the start of the call.
+    /// - Once connected, the stall is measured from the connection or the
+    ///   last byte that actually arrived, whichever is later, rather than
+    ///   from the start of the call.
     ///   `avformat_open_input` accepts the connection and then probes over the
     ///   same deadline, so without this a sender that arrived nine seconds into
     ///   the accept got one second to deliver a PAT/PMT — a healthy stream
@@ -383,6 +391,57 @@ mod tests {
         assert!(watch.should_abort());
         watch.disarm();
         assert!(!watch.should_abort());
+    }
+
+    /// A listener that waited longer than the timeout for its caller must
+    /// give the caller the full timeout once it connects, not abort its first
+    /// read against the clock armed when the wait began.
+    #[test]
+    fn listener_stall_clock_starts_at_connect() {
+        let active = Arc::new(AtomicBool::new(true));
+        let watch = InterruptWatch::new(active, 1_000_000);
+        watch.set_awaits_caller(true);
+        let long_ago = || crate::gettime_us() as u64 - 5_000_000;
+
+        // SAFETY: a fresh context and AVIO context owned by this test, freed
+        // below; the watch only reads `pb` and `bytes_read` through them.
+        unsafe {
+            let ctx = ffmpeg_sys_next::avformat_alloc_context();
+            assert!(!ctx.is_null());
+            watch.track(ctx);
+            watch.io_start_us.store(long_ago(), Ordering::Relaxed);
+            assert!(!watch.should_abort(), "waiting to be called is not a stall");
+
+            let buf = ffmpeg_sys_next::av_malloc(4096) as *mut u8;
+            let mut pb = ffmpeg_sys_next::avio_alloc_context(
+                buf,
+                4096,
+                0,
+                core::ptr::null_mut(),
+                None,
+                None,
+                None,
+            );
+            assert!(!pb.is_null());
+            (*ctx).pb = pb;
+            assert!(
+                !watch.should_abort(),
+                "a caller that just connected has had no time to send"
+            );
+
+            // The deadline still applies from the connection onwards.
+            watch.io_start_us.store(long_ago(), Ordering::Relaxed);
+            assert!(
+                watch.should_abort(),
+                "a connection that sends nothing stalls"
+            );
+
+            watch.untrack();
+            (*ctx).pb = core::ptr::null_mut();
+            ffmpeg_sys_next::av_freep((&raw mut (*pb).buffer).cast());
+            ffmpeg_sys_next::avio_context_free(&mut pb);
+            ffmpeg_sys_next::avformat_free_context(ctx);
+        }
     }
 
     #[test]
