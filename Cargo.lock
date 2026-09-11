@@ -384,18 +384,18 @@ dependencies = [
 
 [[package]]
 name = "irl-core"
-version = "2.1.1"
+version = "2.1.2"
 
 [[package]]
 name = "irl-ffmpeg"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "ffmpeg-sys-next",
 ]
 
 [[package]]
 name = "irl-provider"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "base64",
  "parking_lot",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "irl-source"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "irl-core",
  "irl-ffmpeg",
@@ -532,14 +532,14 @@ dependencies = [
 
 [[package]]
 name = "obs"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "obs-sys",
 ]
 
 [[package]]
 name = "obs-sys"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "bindgen",
 ]
