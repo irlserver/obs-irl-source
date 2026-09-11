@@ -1,0 +1,30 @@
+crates/irl-source/tests/video_pipeline.rs
+  s_0e16332cd18ddd::t_0520b286524bf5 528-529,534,541,657-659,684,712,771-773,780-782,1014-1017,1019,1055,1076-1077,1089-1093,1095,1109-1111,1122-1123,1125-1126,1132-1133,1138-1167,1222
+  s_0e16332cd18ddd::t_24bec24efa110f 1030,1032,1034,1037
+crates/irl-core/src/video_delay.rs
+  s_0e16332cd18ddd::t_b5c08ed0d2009b 3-11,13-29,41,90-97,120-122,130,134-136,146,204,206-207,212,214,216,218,222-227,229,236,240,246,254-255,257,263,267-274,279-282,289,300,310-313,315,330,335,337-339,346,349-350,353,359
+  s_0e16332cd18ddd::t_24bec24efa110f 125-126,140-141,275-278
+crates/irl-source/src/video/thread.rs
+  s_0e16332cd18ddd::t_0520b286524bf5 391-396,462-469,494,551,554
+  s_0e16332cd18ddd::t_24bec24efa110f 504-506
+CLAUDE.md
+  s_0e16332cd18ddd::t_0520b286524bf5 132,174,246
+Cargo.lock
+  s_0e16332cd18ddd::t_96d0b6e9f5356f 387,391,398,410,535,542
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4d659e1213bfe4f4c52dec894cacb6d363e35128",
+  "prompts": {},
+  "sessions": {
+    "s_0e16332cd18ddd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79fb9bc1-05df-4d96-bcaf-3e6aee154cf7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
