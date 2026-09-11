@@ -245,13 +245,20 @@ impl Source for IrlSource {
     fn media_restart(&self) {
         irl_info!("Media restart requested");
 
-        let mut state = self.obs_state.lock();
-        // An explicit restart overrides a previous Stop.
-        state.media_stopped = false;
-        stop_receiver(&mut state, self.source, true);
-        start_receiver(&mut state, self.source, &self.lifetime);
+        let started = {
+            let mut state = self.obs_state.lock();
+            // An explicit restart overrides a previous Stop.
+            state.media_stopped = false;
+            stop_receiver(&mut state, self.source, true);
+            start_receiver(&mut state, self.source, &self.lifetime);
+            state.running.is_some()
+        };
 
-        if state.running.is_some() {
+        // Outside the lock: signal handlers run synchronously on this thread,
+        // and one that asks this source for its media state or stats would
+        // otherwise deadlock on the non-recursive mutex, and take OBS's
+        // graphics thread (where libobs runs media actions) down with it.
+        if started {
             self.source.media_started();
         }
     }
@@ -388,6 +395,7 @@ fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<Lif
 /// outright (no URL, teardown, an explicit media Stop) decide for themselves.
 fn stop_receiver(state: &mut ObsState, source: SourceHandle, clear_video: bool) {
     if let Some(running) = state.running.take() {
+        let stop_start_ns = obs::time::gettime_ns();
         // Clearing the flag also trips the FFmpeg interrupt watch, so a
         // receiver blocked in `av_read_frame` returns instead of waiting out
         // its I/O timeout.
@@ -398,6 +406,13 @@ fn stop_receiver(state: &mut ObsState, source: SourceHandle, clear_video: bool) 
         let _ = running.receiver.join();
         // Whatever the video thread never got to; frees the pinned surfaces.
         running.shared.video.drain();
+        // The joins block the calling thread, which for the media controls
+        // and show/hide is OBS's graphics thread: this is how long the whole
+        // render loop stood still.
+        irl_info!(
+            "Receiver stopped in {}ms",
+            obs::time::gettime_ns().saturating_sub(stop_start_ns) / 1_000_000
+        );
     }
 
     if clear_video && state.config.hot.clear_on_disconnect {
