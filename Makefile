@@ -6,7 +6,7 @@
 CONFIG_DIR = .config
 CARGO = cargo
 
-.PHONY: default build check style style-check lint test spell-check tls-provider sim clean
+.PHONY: default build check style style-check lint test test-shim spell-check tls-provider sim clean
 
 default: check
 
@@ -26,6 +26,15 @@ lint:
 
 test:
 	$(CARGO) xtest
+
+# The libobs-dependent integration tests on a Mac, where there is no libobs to
+# link and `cargo test` dies on the first call into it. The script links the
+# four-function stand-in in scripts/libobs-shim/ into the test binaries it
+# covers and runs them; ARGS is passed to the test harness as a name filter.
+# Linux gets the real libobs through libobs-dev, so CI never needs this, and it
+# is not part of `check`.
+test-shim:
+	scripts/test-with-libobs-shim.sh $(ARGS)
 
 spell-check:
 	codespell --config $(CONFIG_DIR)/codespellrc
