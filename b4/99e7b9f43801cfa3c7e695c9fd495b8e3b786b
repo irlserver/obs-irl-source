@@ -1,0 +1,16 @@
+Cargo.lock
+  h_99821c4ddfca12 68-86,208,404,408,415,427,552,559,561
+Cargo.toml
+  h_99821c4ddfca12 15,40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b499e7b9f43801cfa3c7e695c9fd495b8e3b786b",
+  "prompts": {},
+  "humans": {
+    "h_99821c4ddfca12": {
+      "author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
