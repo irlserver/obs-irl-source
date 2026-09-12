@@ -213,14 +213,19 @@ impl Receiver {
             let _ = opts.set(&key, &value);
         }
 
-        // Whether this URL waits to be called decides whether the stall
+        // Whether this input waits to be called decides whether the stall
         // deadline applies before a connection exists. Latched per attempt,
-        // because a settings edit can change the URL.
-        self.shared
-            .interrupt
-            .set_awaits_caller(irl_core::url_awaits_caller(&url.to_string_lossy()));
+        // because a settings edit can change the URL or the options.
+        let awaits_caller =
+            irl_core::awaits_caller(&url_str, self.shared.cfg.ffmpeg_options.as_deref());
+        self.shared.interrupt.set_awaits_caller(awaits_caller);
 
         crate::log::log_input_url("Connecting to", &url);
+        if awaits_caller {
+            // The redacted URL above cannot show the mode, and the mode is
+            // what decides how a wait for the sender is treated, so say it.
+            irl_info!("Listening for the sender to call in; no I/O deadline until it does");
+        }
 
         // Unrecognised options are dropped without a word, as `av_dict_free`
         // does in the C: FFmpeg option names differ per protocol, so the

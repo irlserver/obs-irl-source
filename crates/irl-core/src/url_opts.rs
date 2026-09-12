@@ -126,26 +126,42 @@ pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Does this URL wait to be called, rather than dialing out?
+/// Does this input wait to be called, rather than dialing out?
 ///
 /// It decides whether the I/O stall deadline applies before a connection
-/// exists. `srt://` and `rist://` both spell it in the query string, and
-/// rendezvous waits the same way from the caller's point of view.
+/// exists. `srt://` and `rist://` both spell it as an option, and rendezvous
+/// waits the same way from the caller's point of view. The option reaches
+/// FFmpeg either way the user writes it — in the URL's query string or in the
+/// FFmpeg Options field, which [`demuxer_options`] merges into the same
+/// dictionary — so both are read here. Reading only the URL made a listener
+/// configured through FFmpeg Options keep the caller's deadline: the accept
+/// was torn down every 10 s and rebound after the reconnect delay, and a
+/// sender whose handshake landed in the gap never got in.
 ///
-/// The test is on the query only: a path or a passphrase that happens to
+/// The URL test is on the query only: a path or a passphrase that happens to
 /// contain the word must not decide this.
-pub fn url_awaits_caller(url: &str) -> bool {
-    let Some((_, query)) = url.split_once('?') else {
-        return false;
-    };
-    query.contains("mode=listener")
-        || query.contains("mode=rendezvous")
-        || query.contains("listen=1")
+pub fn awaits_caller(url: &str, extra: Option<&str>) -> bool {
+    let in_query = url.split_once('?').is_some_and(|(_, query)| {
+        query.contains("mode=listener")
+            || query.contains("mode=rendezvous")
+            || query.contains("listen=1")
+    });
+    let in_extra = extra.is_some_and(|extra| {
+        parse_extra(extra).iter().any(|(key, value)| {
+            (key == "mode" && (value == "listener" || value == "rendezvous"))
+                || (key == "listen" && value == "1")
+        })
+    });
+    in_query || in_extra
 }
 
 #[cfg(test)]
 mod awaits_caller_tests {
-    use super::url_awaits_caller;
+    use super::awaits_caller;
+
+    fn url_awaits_caller(url: &str) -> bool {
+        awaits_caller(url, None)
+    }
 
     #[test]
     fn listener_and_rendezvous_urls_wait_to_be_called() {
@@ -154,6 +170,33 @@ mod awaits_caller_tests {
         assert!(url_awaits_caller("rist://0.0.0.0:7000?listen=1"));
         assert!(url_awaits_caller(
             "srt://0.0.0.0:7000?latency=200000&mode=listener"
+        ));
+    }
+
+    /// The field OBS shows next to the URL is where many people put it, and
+    /// libsrt does not care which: the two land in one dictionary.
+    #[test]
+    fn listener_mode_in_the_ffmpeg_options_counts_too() {
+        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=listener")));
+        assert!(awaits_caller(
+            "srt://0.0.0.0:7654",
+            Some("latency=2000000 mode=listener")
+        ));
+        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=rendezvous")));
+        assert!(awaits_caller("rist://0.0.0.0:7654", Some("listen=1")));
+        assert!(!awaits_caller(
+            "srt://host.example:7000",
+            Some("mode=caller")
+        ));
+        assert!(!awaits_caller(
+            "srt://host.example:7000",
+            Some("latency=2000000")
+        ));
+        assert!(!awaits_caller("srt://host.example:7000", Some("")));
+        // A value that merely contains the word is not the option.
+        assert!(!awaits_caller(
+            "srt://host.example:7000",
+            Some("passphrase=mode=listener")
         ));
     }
 

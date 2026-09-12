@@ -131,7 +131,7 @@ Buffer regulation happens through playback speed only, asymmetric like IRLToolki
 | `dsp.rs` | Fades, shaped concealment silence, last-sample memory. |
 | `video_time.rs` | Mapping video PTS through the audio playout offset, the fallback anchor and its clamps, the frame-interval EMA. |
 | `video_delay.rs` | The standing video delay: sized from the worst shortfall seen so that no frame reaches libobs after its due time, raised at once before the play head is anchored (measured at packet arrival on the newest frame in hand only, with a tick's allowance for decode) and only for lateness that recurs across a window after it (measured at hand-over), capped, never lowered within a connection. |
-| `url_opts.rs` | The demuxer option table (probe sizes, SRT latency, RIST/UDP buffers, `tls_verify=0`), parsing of the user's FFmpeg Options, and `url_awaits_caller`, which decides whether the I/O stall deadline applies before a connection exists. |
+| `url_opts.rs` | The demuxer option table (probe sizes, SRT latency, RIST/UDP buffers, `tls_verify=0`), parsing of the user's FFmpeg Options, and `awaits_caller`, which decides from the URL's query *and* the FFmpeg Options whether the I/O stall deadline applies before a connection exists. |
 | `stats.rs` | `FIELDS`, `StatsSnapshot`, `proc_declaration()`. |
 | `config.rs` | `HwDecode`, `Watermarks::derive`. |
 
