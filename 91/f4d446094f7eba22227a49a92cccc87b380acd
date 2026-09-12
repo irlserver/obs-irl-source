@@ -1,0 +1,32 @@
+README.md
+  s_0e16332cd18ddd::t_18a14d4bfceffa 95
+  s_0e16332cd18ddd::t_79214a67a96c96 104-107
+crates/ffmpeg/src/format.rs
+  s_0e16332cd18ddd::t_79214a67a96c96 46
+crates/irl-core/src/url_opts.rs
+  s_0e16332cd18ddd::t_79214a67a96c96 144-148,187-194,200
+  s_0e16332cd18ddd::t_18a14d4bfceffa 129,132-139,141,143,149-155,160-164,176-186,195-199,201
+  s_0e16332cd18ddd::t_4e4d9f8f355769 202
+CLAUDE.md
+  s_0e16332cd18ddd::t_18a14d4bfceffa 134
+crates/irl-source/src/receiver/stream.rs
+  s_0e16332cd18ddd::t_18a14d4bfceffa 216,218-221,224-228
+crates/irl-core/src/lib.rs
+  s_0e16332cd18ddd::t_18a14d4bfceffa 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "91f4d446094f7eba22227a49a92cccc87b380acd",
+  "prompts": {},
+  "sessions": {
+    "s_0e16332cd18ddd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79fb9bc1-05df-4d96-bcaf-3e6aee154cf7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Thomas Lekanger <thomas.lekanger@hotmail.com>"
+    }
+  }
+}
