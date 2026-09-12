@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 # Single source of truth for the plugin version. release.yml verifies the
 # pushed tag against it and the Windows installer reads it from here.
-version = "2.1.2"
+version = "2.1.3"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-or-later"
@@ -37,7 +37,7 @@ ffmpeg-sys-next = { version = "9.0", default-features = false, features = [
     "swscale",
 ] }
 parking_lot = "0.12"
-bindgen = "0.72"
+bindgen = "0.73"
 
 [profile.release]
 opt-level = 3
