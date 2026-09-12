@@ -43,7 +43,7 @@ impl InterruptWatch {
     }
 
     /// Latch whether this URL waits to be called (see
-    /// `irl_core::url_awaits_caller`). Set before opening.
+    /// `irl_core::awaits_caller`). Set before opening.
     pub fn set_awaits_caller(&self, awaits: bool) {
         self.awaits_caller.store(awaits, Ordering::Relaxed);
     }
