@@ -37,7 +37,10 @@ ffmpeg-sys-next = { version = "9.0", default-features = false, features = [
     "swscale",
 ] }
 parking_lot = "0.12"
-bindgen = "0.73"
+# Exact pin: 0.73.1+ accept syn 2..4 and prettyplease 0.2..0.4 independently,
+# so the resolver can pair syn 3 with prettyplease 0.2 and bindgen fails to
+# compile. 0.73.0 requires syn 3 and prettyplease 0.3 together.
+bindgen = "=0.73.0"
 
 [profile.release]
 opt-level = 3
