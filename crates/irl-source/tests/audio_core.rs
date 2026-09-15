@@ -78,6 +78,7 @@ fn stream_config(low_latency: bool) -> StreamConfig {
         ffmpeg_options: None,
         hw_decode: HwDecode::Auto,
         low_latency_audio: low_latency,
+        compensate_av_skew: consts::DEFAULT_COMPENSATE_AV_SKEW,
         small_gap_ms: consts::SMALL_GAP_MS,
         large_gap_ms: consts::LARGE_GAP_MS,
     }

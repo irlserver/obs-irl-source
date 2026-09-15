@@ -52,6 +52,7 @@ impl Config {
                 ffmpeg_options: settings.get_str(c"ffmpeg_options"),
                 hw_decode,
                 low_latency_audio: settings.get_bool(c"low_latency_audio"),
+                compensate_av_skew: settings.get_bool(c"compensate_av_skew"),
                 small_gap_ms: consts::SMALL_GAP_MS,
                 large_gap_ms: consts::LARGE_GAP_MS,
             },
@@ -80,15 +81,16 @@ impl Config {
 
     /// Which settings force a reconnect. `url` and `ffmpeg_options` are
     /// consumed by `avformat_open_input`, `hw_decode` picks the decoder at
-    /// open, and `low_latency_audio` latches priming/pump semantics across
-    /// all three threads. Everything else is re-read live every cycle, so it
-    /// can be swapped in place: a restart costs an SRT handshake and wipes
-    /// every per-connection stat counter.
+    /// open, and `low_latency_audio` and `compensate_av_skew` latch
+    /// priming/pump semantics across all three threads. Everything else is
+    /// re-read live every cycle, so it can be swapped in place: a restart
+    /// costs an SRT handshake and wipes every per-connection stat counter.
     pub fn requires_restart(&self, other: &Self) -> bool {
         self.stream.url != other.stream.url
             || self.stream.ffmpeg_options != other.stream.ffmpeg_options
             || self.stream.hw_decode != other.stream.hw_decode
             || self.stream.low_latency_audio != other.stream.low_latency_audio
+            || self.stream.compensate_av_skew != other.stream.compensate_av_skew
     }
 
     /// `config_apply_hot`: swap the live settings into a running receiver.
@@ -96,37 +98,29 @@ impl Config {
     /// Lock order is the documented one: `audio_state`, then the jitter
     /// buffer, then the watermark mutex. Nothing below takes any of them.
     ///
-    /// The ring grows before the new watermarks are published, and they are
-    /// published only if that succeeded: the receiver's backpressure ceiling
-    /// is 3x `max_ms` and must never exceed ring capacity, or a burst between
-    /// fill checks would push writes past the end and drop audio. On failure
-    /// the old target stays in force — including in the caller's copy of the
-    /// config, which is why the effective watermarks are returned.
+    /// The published target is the user's Target Buffer plus the connection's
+    /// audio hold (`audio::av_skew`), so the new user target is composed with
+    /// the hold in force before it is compared and published. On failure the
+    /// old target stays in force — including in the caller's copy of the
+    /// config, which is why the effective *user* watermarks are returned.
     pub fn apply_hot(&self, shared: &Shared) -> Watermarks {
-        let _state = shared.audio_state();
+        let state = shared.audio_state();
 
+        let hold_ms = shared.conn.av_skew_hold_ms.load(Relaxed);
         let current = shared.hot.watermarks();
-        let next = self.hot.watermarks;
-        let mut effective = current;
+        let user_next = self.hot.watermarks;
+        let next = Watermarks::derive(user_next.target_ms + hold_ms);
+        let mut effective = user_next;
 
-        if current.target_ms != next.target_ms {
-            let resized = match shared.audio_buf().as_mut() {
-                Some(buf) => buf.resize(next.target_ms, next.min_ms, next.max_ms),
-                // No audio frame has configured the ring yet; the first one
-                // sizes it from the watermarks published below.
-                None => true,
-            };
-            if resized {
-                *shared.hot.watermarks.lock() = next;
-                effective = next;
-            } else {
-                irl_warn!(
-                    "Could not resize jitter buffer to {}ms; keeping {}ms",
-                    next.target_ms,
-                    current.target_ms
-                );
-            }
+        if current.target_ms != next.target_ms && !publish_watermarks(shared, &state, next) {
+            irl_warn!(
+                "Could not resize jitter buffer to {}ms; keeping {}ms",
+                next.target_ms,
+                current.target_ms
+            );
+            effective = Watermarks::derive(current.target_ms - hold_ms);
         }
+        drop(state);
 
         shared
             .hot
@@ -151,4 +145,30 @@ impl Config {
 
         effective
     }
+}
+
+/// Grow the ring to `next` and publish it, in the documented lock order:
+/// the caller holds `audio_state`, this takes the jitter buffer and then the
+/// watermark mutex. Nothing below takes any of them.
+///
+/// The ring grows before the new watermarks are published, and they are
+/// published only if that succeeded: the receiver's backpressure ceiling is
+/// 3x `max_ms` and must never exceed ring capacity, or a burst between fill
+/// checks would push writes past the end and drop audio. Returns whether the
+/// watermarks are now in force.
+pub(crate) fn publish_watermarks(
+    shared: &Shared,
+    _audio_state: &crate::shared::AudioState,
+    next: Watermarks,
+) -> bool {
+    let resized = match shared.audio_buf().as_mut() {
+        Some(buf) => buf.resize(next.target_ms, next.min_ms, next.max_ms),
+        // No audio frame has configured the ring yet; the first one sizes it
+        // from the watermarks published below.
+        None => true,
+    };
+    if resized {
+        *shared.hot.watermarks.lock() = next;
+    }
+    resized
 }

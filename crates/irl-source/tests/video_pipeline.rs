@@ -97,6 +97,7 @@ fn stream_config(low_latency_audio: bool) -> StreamConfig {
         ffmpeg_options: None,
         hw_decode: irl_core::HwDecode::Auto,
         low_latency_audio,
+        compensate_av_skew: irl_core::consts::DEFAULT_COMPENSATE_AV_SKEW,
         small_gap_ms: irl_core::consts::SMALL_GAP_MS,
         large_gap_ms: irl_core::consts::LARGE_GAP_MS,
     }

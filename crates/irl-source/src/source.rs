@@ -525,6 +525,7 @@ fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     snap.video_lead_ms = conn.video_lead_ns.load(Relaxed) / 1_000_000;
     snap.video_delay_ms = (conn.video_delay_ns.load(Relaxed) / 1_000_000) as i64;
     snap.av_skew_ms = av_skew_ms(&audio);
+    snap.audio_hold_ms = i64::from(conn.av_skew_hold_ms.load(Relaxed));
 
     // Stream delay: how far behind real time the video output is, computed as
     // wall clock minus the anchored video PTS. Includes SRT latency, decode

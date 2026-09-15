@@ -58,6 +58,11 @@ pub const CATCHUP_PERCENT_MAX: i32 = 15;
 pub const DEFAULT_WAIT_FOR_KEYFRAME: bool = true;
 /// Low-latency (unbuffered) audio mode default.
 pub const DEFAULT_LOW_LATENCY_AUDIO: bool = false;
+/// Keep Lip Sync With Late Video: hold audio back for a sender whose video
+/// is stamped behind its audio (`irl_core::av_skew`). On, because the media
+/// source does the equivalent and the alternative is sound that runs ahead
+/// of the picture by the whole skew.
+pub const DEFAULT_COMPENSATE_AV_SKEW: bool = true;
 /// Close the stream when the source is hidden/inactive.
 pub const DEFAULT_CLOSE_WHEN_INACTIVE: bool = false;
 /// Show nothing when the stream ends.
@@ -308,6 +313,23 @@ pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// let through on the fallback anyway.
 pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 
+/// Margin the audio hold leaves for video: how early, against its due time,
+/// a frame stamped exactly the measured skew behind its audio should be in
+/// hand once the hold is in force. Covers the chunk the buffer level dithers
+/// by, the frame-and-chunk granularity of the mux-order skew measurement, and
+/// a canvas tick to decode in.
+pub const AV_SKEW_HOLD_MARGIN_MS: i32 = 100;
+/// Ceiling on the audio hold. The same as the video delay ceiling: past this
+/// the stream plays unpaced rather than the buffer chasing a sender whose
+/// skew has no bound.
+pub const AV_SKEW_HOLD_MAX_MS: i32 = 5000;
+/// How long a primeable audio buffer waits for the first video packet to
+/// measure the skew against, when the connection carries video. A video
+/// packet normally follows within a frame interval of the audio being
+/// admitted; a relay that starts a subscriber at the next keyframe can hold
+/// them a keyframe interval.
+pub const AV_SKEW_WAIT_MS: u64 = 2000;
+
 /// Ceiling on the standing video delay (`irl_core::video_delay`).
 ///
 /// The delay covers a sender whose video reaches the plugin later than the
@@ -393,6 +415,7 @@ mod tests {
         assert_eq!(CATCHUP_PERCENT_MAX, 15); // IRL_CATCHUP_PERCENT_MAX
         const { assert!(DEFAULT_WAIT_FOR_KEYFRAME) }; // IRL_DEFAULT_WAIT_KEYFRAME
         const { assert!(!DEFAULT_LOW_LATENCY_AUDIO) }; // IRL_DEFAULT_LOW_LATENCY_AUDIO
+        const { assert!(DEFAULT_COMPENSATE_AV_SKEW) };
         const { assert!(!DEFAULT_CLOSE_WHEN_INACTIVE) }; // IRL_DEFAULT_CLOSE_WHEN_INACTIVE
         const { assert!(DEFAULT_CLEAR_ON_DISCONNECT) }; // IRL_DEFAULT_CLEAR_ON_DISCONNECT
 
@@ -466,6 +489,9 @@ mod tests {
         assert_eq!(VIDEO_PACING_LEAD_TICKS, 2); // IRL_VIDEO_PACING_LEAD_TICKS
         assert_eq!(VIDEO_ANCHOR_WAIT_MARGIN_MS, 1000);
         assert_eq!(VIDEO_DELAY_MAX_MS, 5000);
+        assert_eq!(AV_SKEW_HOLD_MARGIN_MS, 100);
+        assert_eq!(AV_SKEW_HOLD_MAX_MS, 5000);
+        assert_eq!(AV_SKEW_WAIT_MS, 2000);
         assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
         assert_eq!(VIDEO_DELAY_MIN_FRAMES, 3);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS

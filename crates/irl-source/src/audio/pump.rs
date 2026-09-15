@@ -233,6 +233,12 @@ impl AudioPump {
             if !has_audio || fill_ms < prime_ms {
                 return false;
             }
+            // Enough audio, but a sender whose video is stamped behind its
+            // audio needs the target raised before the clock anchors, and the
+            // first video packet is what says by how much.
+            if super::av_skew::prime_may_wait(shared, state, now) {
+                return false;
+            }
 
             state.primed = true;
             state.anchor_ns = now + chunk_ns;

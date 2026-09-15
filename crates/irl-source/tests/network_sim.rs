@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use parking_lot::Mutex;
 
 use irl_core::{HwDecode, Watermarks, consts};
+use obs_irl_source::audio::av_skew;
 use obs_irl_source::audio::{AudioPump, AudioSink};
 use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
@@ -131,10 +132,20 @@ struct Sim {
     chunk_debt: f64,
     /// Every chunk PTS handed to the plugin, in order.
     delivered: Vec<i64>,
+    /// The sender also carries video, stamped this far behind its audio
+    /// (`None`: no video stream). One video packet reaches the receiver per
+    /// audio chunk, in mux order, as it does for real: the receiver's skew
+    /// measurement is driven from here, the decoder is not.
+    video_skew_ns: Option<i64>,
 }
 
 impl Sim {
     fn new(target_ms: i32) -> Self {
+        Self::with_lip_sync(target_ms, true)
+    }
+
+    /// A sim with Keep Lip Sync When Video Arrives Late set as given.
+    fn with_lip_sync(target_ms: i32, compensate_av_skew: bool) -> Self {
         // SAFETY: no code under test dereferences the handle — audio leaves
         // through the recording sink and nothing here calls into libobs.
         let source = unsafe { obs::SourceHandle::from_raw(NonNull::dangling()) };
@@ -144,6 +155,7 @@ impl Sim {
             ffmpeg_options: None,
             hw_decode: HwDecode::Off,
             low_latency_audio: false,
+            compensate_av_skew,
             small_gap_ms: consts::SMALL_GAP_MS,
             large_gap_ms: consts::LARGE_GAP_MS,
         };
@@ -197,7 +209,52 @@ impl Sim {
             next_pts_ns: 0,
             chunk_debt: 0.0,
             delivered: Vec::new(),
+            video_skew_ns: None,
         }
+    }
+
+    /// Give the sender a video stream stamped `skew_ns` behind its audio.
+    fn with_video_trailing_by(mut self, skew_ns: i64) -> Self {
+        self.shared.flags.video_present.store(true, Relaxed);
+        self.video_skew_ns = Some(skew_ns);
+        self
+    }
+
+    /// Give the sender a video stream that never delivers a packet.
+    fn with_silent_video(self) -> Self {
+        self.shared.flags.video_present.store(true, Relaxed);
+        self
+    }
+
+    /// The audio hold in force, in ms.
+    fn hold_ms(&self) -> i32 {
+        self.shared.conn.av_skew_hold_ms.load(Relaxed)
+    }
+
+    /// OBS time of the first chunk submitted, relative to the sim's start.
+    fn first_audio_out_ns(&self) -> Option<u64> {
+        self.audio_out
+            .emitted
+            .lock()
+            .first()
+            .map(|e| e.timestamp - 1_000_000_000)
+    }
+
+    /// How early a video frame arriving now, stamped the sender's skew behind
+    /// the newest audio, is in hand against its due time on the audio playout
+    /// mapping: positive is on time. What the video thread would measure for
+    /// such a frame and cover with a standing delay if negative.
+    fn video_margin_now_ms(&self) -> i64 {
+        let skew = self.video_skew_ns.expect("a sender with video");
+        let pts = self.delivered.last().expect("audio delivered") - skew;
+        let state = self.shared.audio_state();
+        assert!(state.latest_obs_end_ts_ns != 0, "audio has not primed");
+        let due = irl_core::video_time::map_through_playout(
+            pts,
+            state.latest_obs_end_ts_ns,
+            state.latest_buffered_end_pts_ns,
+        );
+        (due as i64 - self.now_ns() as i64) / 1_000_000
     }
 
     fn now_ns(&self) -> u64 {
@@ -260,6 +317,9 @@ impl Sim {
                 self.intake
                     .handle_frame(&self.shared, &mut self.flags, &frame, TB_NS);
                 self.delivered.push(pts);
+                if let Some(skew) = self.video_skew_ns {
+                    av_skew::observe_video_packet(&self.shared, pts - skew);
+                }
             }
         }
 
@@ -614,4 +674,108 @@ fn decoded_memory_does_not_grow_with_the_target() {
         0,
         "8s of 1080p60 must fit the packet queue without dropping"
     );
+}
+
+/// A phone with video stabilization on sends each frame a second or more
+/// after the audio of the same instant, both stamped with the capture time
+/// (#33). Playing audio as it arrives then puts the sound that far ahead of
+/// the picture, and no video schedule can fix that: a frame cannot be shown
+/// before it is in hand. The media source pays the skew by pacing both
+/// streams on their PTS; this is the plugin doing the same by holding audio
+/// back for the connection, sized from the first video packet, before the
+/// clock anchors. Audio starts later by the hold, nothing is skipped or
+/// inserted, and video then maps with an ordinary margin.
+#[test]
+fn a_sender_whose_video_trails_its_audio_holds_audio_back_to_keep_lip_sync() {
+    let skew_ms = 1650;
+    let mut sim = Sim::new(120).with_video_trailing_by(skew_ms * 1_000_000);
+    sim.run(40.0, Link::Up);
+
+    // The uncovered part of the skew: 1650 + 100 margin - 120 target - 80
+    // lead. Reported, and folded into the target the loop regulates.
+    let hold = i64::from(sim.hold_ms());
+    assert_eq!(hold, skew_ms + 100 - 120 - 80);
+    assert_eq!(sim.shared.hot.watermarks().target_ms, 120 + hold as i32);
+
+    // Audio started later by about the hold, together with the picture,
+    // rather than at the plain prime point ~200 ms in.
+    let started_ms = sim.first_audio_out_ns().expect("audio primed") / 1_000_000;
+    assert!(
+        started_ms > 1_500 && started_ms < 2_200,
+        "audio started {started_ms}ms in against a {hold}ms hold"
+    );
+
+    // The clock is one line, nothing audible was skipped, and the cushion
+    // settled on the raised target.
+    sim.assert_clock_only_jumps_where_declared();
+    sim.assert_no_audible_audio_dropped();
+    assert_eq!(sim.underruns(), 0);
+    let mean = sim.mean_fill_ms(20.0);
+    assert!(
+        (mean - (120.0 + hold as f64)).abs() <= 25.0,
+        "held {mean:.1}ms on average against a {}ms effective target",
+        120 + hold
+    );
+
+    // And video stamped the sender's skew behind the newest audio is in hand
+    // before it is due: the margin the hold was sized for, give or take the
+    // chunk the level dithers by. No standing video delay is needed.
+    let margin = sim.video_margin_now_ms();
+    assert!(
+        (40..=200).contains(&margin),
+        "video arriving now is {margin}ms early against its audio"
+    );
+}
+
+/// The same sender with the hold turned off: audio primes at the plain
+/// threshold and video arriving now is already a second and a half past
+/// due. This is what the setting costs, and what the video delay then paces.
+#[test]
+fn without_the_hold_the_same_sender_leaves_video_far_behind_its_audio() {
+    let mut sim = Sim::with_lip_sync(120, false).with_video_trailing_by(1_650_000_000);
+    sim.run(10.0, Link::Up);
+
+    assert_eq!(sim.hold_ms(), 0);
+    assert_eq!(sim.shared.hot.watermarks().target_ms, 120);
+    let started_ms = sim.first_audio_out_ns().expect("audio primed") / 1_000_000;
+    assert!(started_ms < 600, "audio started {started_ms}ms in");
+    let margin = sim.video_margin_now_ms();
+    assert!(
+        margin < -1_300,
+        "video arriving now is {margin}ms against its audio; expected ~-1450"
+    );
+}
+
+/// A connection that carries video but has not delivered a packet by the
+/// time the audio is primeable waits a bounded time for one, then primes
+/// without a measurement rather than holding the sound forever.
+#[test]
+fn audio_primes_without_a_video_packet_once_the_wait_runs_out() {
+    let mut sim = Sim::new(120).with_silent_video();
+    sim.run(4.0, Link::Up);
+
+    assert_eq!(sim.hold_ms(), 0);
+    let started_ms = sim.first_audio_out_ns().expect("audio primed") / 1_000_000;
+    let wait_ms = consts::AV_SKEW_WAIT_MS;
+    assert!(
+        started_ms >= wait_ms && started_ms < wait_ms + 500,
+        "audio started {started_ms}ms in against a {wait_ms}ms wait"
+    );
+    sim.assert_clock_only_jumps_where_declared();
+    sim.assert_no_audible_audio_dropped();
+}
+
+/// A sender whose video is stamped within what Target Buffer already covers
+/// needs no hold, and the measurement must not add one for the jitter of
+/// its own granularity.
+#[test]
+fn a_sender_within_the_target_gets_no_hold() {
+    let mut sim = Sim::new(120).with_video_trailing_by(50_000_000);
+    sim.run(10.0, Link::Up);
+
+    assert_eq!(sim.hold_ms(), 0);
+    assert_eq!(sim.shared.hot.watermarks().target_ms, 120);
+    let started_ms = sim.first_audio_out_ns().expect("audio primed") / 1_000_000;
+    assert!(started_ms < 600, "audio started {started_ms}ms in");
+    assert!(sim.video_margin_now_ms() > 0);
 }

@@ -194,6 +194,12 @@ impl Receiver {
             .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
         let bytes = self.pkt.size().max(0) as usize;
 
+        // Where the audio hold is measured: this packet's PTS against the
+        // newest audio decoded before it, in mux order.
+        if pts_ns != 0 {
+            crate::audio::av_skew::observe_video_packet(&self.shared, pts_ns);
+        }
+
         match self.pkt.new_ref() {
             Ok(packet) => self.shared.video.push_packet(
                 TimedPacket {

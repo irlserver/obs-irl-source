@@ -2,6 +2,7 @@
 //! W2-B owns this module. The functions here are the ones the other threads
 //! call; their signatures are frozen.
 
+pub mod av_skew;
 pub mod pump;
 
 use std::sync::Arc;

@@ -132,6 +132,8 @@ Video uses a rebasing approach: the first frame's stream PTS is anchored to `os_
 
 Instead of a fixed audio offset, video is delayed by the current buffered-audio age when audio exists. That tracks the real state of the audio path better than always adding the configured target buffer.
 
+That mapping assumes the sender stamps both streams from one clock and delivers them together. Some do not: a phone with video stabilization on delivers each frame a second or more after the audio of the same instant, both stamped with the capture time. Mapped through the audio playout, such video is past due on arrival, and no video schedule can fix that. With Keep Lip Sync When Video Arrives Late on (the default), the receiver measures the skew as the first video packets arrive, in mux order, and raises the jitter buffer's target for the connection by the part of it that Target Buffer and the output lead do not cover, before playback primes. Audio then starts later by that hold, together with the picture, the speed controller regulates around the raised target, and video maps with an ordinary margin. The hold is reported as `audio_hold_ms`, the raw stamp difference as `av_skew_ms`. It is measured only before priming and only ever rises within a connection; a skew that appears later is left to the standing video delay.
+
 When there is no audio playout mapping yet (audio-less start), video falls back to the rebased timestamp, and if that drifts too far from wall clock (over 500ms) it is clamped rather than fully re-anchored. That avoids visible jumps while still preventing long freezes if the stream sends a bad future timestamp.
 
 ## What this means in practice

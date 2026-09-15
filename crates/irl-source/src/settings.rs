@@ -25,6 +25,7 @@ pub fn defaults(settings: &Data<'_>) {
     settings.set_default_i64(c"hw_decode", HwDecode::default().as_i64());
     settings.set_default_bool(c"wait_for_keyframe", consts::DEFAULT_WAIT_FOR_KEYFRAME);
     settings.set_default_bool(c"low_latency_audio", consts::DEFAULT_LOW_LATENCY_AUDIO);
+    settings.set_default_bool(c"compensate_av_skew", consts::DEFAULT_COMPENSATE_AV_SKEW);
     settings.set_default_bool(c"close_when_inactive", consts::DEFAULT_CLOSE_WHEN_INACTIVE);
     settings.set_default_bool(c"clear_on_disconnect", consts::DEFAULT_CLEAR_ON_DISCONNECT);
 }
@@ -102,6 +103,7 @@ pub fn properties(instance: Option<&IrlSource>) -> Properties {
 
     props.add_bool(c"wait_for_keyframe", module_text(c"WaitForKeyframe"));
     props.add_bool(c"low_latency_audio", module_text(c"LowLatencyAudio"));
+    props.add_bool(c"compensate_av_skew", module_text(c"KeepLipSync"));
     props.add_bool(c"clear_on_disconnect", module_text(c"ClearOnDisconnect"));
     props.add_bool(c"close_when_inactive", module_text(c"CloseWhenInactive"));
     props.add_text(

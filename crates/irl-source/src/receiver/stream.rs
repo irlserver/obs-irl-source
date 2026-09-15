@@ -254,6 +254,7 @@ impl Receiver {
         self.audio_stream_idx = -1;
         self.shared.flags.audio_present.store(false, Relaxed);
         self.video_stream_idx = -1;
+        self.shared.flags.video_present.store(false, Relaxed);
         self.flags.has_audio_stream = false;
         self.flags.has_video_stream = false;
 
@@ -327,6 +328,7 @@ impl Receiver {
                                 ffmpeg::codec_name(codec_id),
                                 i32::from(*using_hw_decode)
                             );
+                            shared.flags.video_present.store(true, Relaxed);
                             // The video thread owns the decoder from here:
                             // it decides when each packet is decoded, and this
                             // thread spends a stall blocked in av_read_frame.
@@ -416,6 +418,7 @@ impl Receiver {
         self.audio_stream_idx = -1;
         self.shared.flags.audio_present.store(false, Relaxed);
         self.video_stream_idx = -1;
+        self.shared.flags.video_present.store(false, Relaxed);
         self.using_hw_decode = false;
 
         self.audio_in.reset();
@@ -433,6 +436,8 @@ impl Receiver {
         state.fade_in_pending = true;
         state.fade_in_frames_remaining = 0;
         state.startup_warmup_remaining_ms = consts::STARTUP_AUDIO_WARMUP_MS;
+        // The hold was sized for the last connection's sender.
+        crate::audio::av_skew::reset(&self.shared, &mut state);
     }
 
     /// `irl_wait_for_reconnect`. Returns whether the run is still active.
@@ -561,7 +566,7 @@ impl Receiver {
              audio_flushes={} corrupt={} held={} vq_drops={} \
              obs_lead={}ms chunk={}@{} \
              stream_chunk={}ms obs_chunk={}ms \
-             restarts={} av_drift={}ms av_skew={}ms reanchors={} \
+             restarts={} av_drift={}ms av_skew={}ms hold={}ms reanchors={} \
              vlead={}ms peak={}ms excess={} vdelay={}ms vfps={:.1} \
              pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
@@ -598,6 +603,7 @@ impl Receiver {
             conn.audio_output_restarts.load(Relaxed),
             av_drift_ms,
             av_skew_ms,
+            conn.av_skew_hold_ms.load(Relaxed),
             lifetime.audio_offset_reanchors.load(Relaxed),
             conn.video_lead_ns.load(Relaxed) / 1_000_000,
             lifetime.video_lead_peak_ns.load(Relaxed) / 1_000_000,

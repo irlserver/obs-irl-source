@@ -42,6 +42,9 @@ pub struct StreamConfig {
     pub ffmpeg_options: Option<String>,
     pub hw_decode: HwDecode,
     pub low_latency_audio: bool,
+    /// Keep Lip Sync With Late Video (`irl_core::av_skew`). Latched at open
+    /// because it decides how priming behaves.
+    pub compensate_av_skew: bool,
     pub small_gap_ms: i32,
     pub large_gap_ms: i32,
 }
@@ -99,6 +102,9 @@ pub struct RunFlags {
     /// `audio_stream_present`: "this connection carries audio", mirrored for
     /// the video thread, which must not touch `audio_stream_idx`.
     pub audio_present: AtomicBool,
+    /// "This connection carries video", for the audio pump's prime gate
+    /// (`audio::av_skew::prime_may_wait`).
+    pub video_present: AtomicBool,
 }
 
 /// Everything the C guarded with `audio_state_lock` that is not a counter.
@@ -130,6 +136,11 @@ pub struct AudioState {
     // Stream PTS mirrors (ns).
     pub latest_audio_stream_pts_ns: i64,
     pub latest_video_stream_pts_ns: i64,
+
+    /// When the buffer first became primeable while the audio hold still
+    /// waited for a video packet to measure against; zero while not waiting.
+    /// See `audio::av_skew::prime_may_wait`.
+    pub skew_wait_since_ns: u64,
 
     /// Underrun recovery hold (FFmpeg µs domain).
     pub recovery_until_us: u64,
@@ -168,6 +179,7 @@ impl AudioState {
             decoded_frame_samples: 0,
             latest_audio_stream_pts_ns: 0,
             latest_video_stream_pts_ns: 0,
+            skew_wait_since_ns: 0,
             recovery_until_us: 0,
             drain: DrainWatch::default(),
             speed_trim: SpeedTrim::new(),
@@ -207,6 +219,13 @@ pub struct ConnStats {
     pub video_lead_ns: AtomicI64,
     /// Mirror of the video thread's standing delay, for the stats.
     pub video_delay_ns: AtomicU64,
+    /// How much longer than the user's Target Buffer audio is held this
+    /// connection, folded into the published watermarks
+    /// (`audio::av_skew`). Written by the receiver thread.
+    pub av_skew_hold_ms: AtomicI32,
+    /// A video packet has been measured against audio this connection (or
+    /// the wait for one ran out), so the pump may prime.
+    pub av_skew_seen: AtomicBool,
     /// EMA of decoded PTS deltas; written by the receiver, read by video.
     pub video_frame_interval_ns: AtomicI64,
     // Mirrors of the video thread's anchors for stats / media_get_state.
@@ -546,6 +565,7 @@ impl Shared {
                 thread_active,
                 reconnecting: AtomicBool::new(false),
                 audio_present: AtomicBool::new(false),
+                video_present: AtomicBool::new(false),
             },
             cfg,
         })
