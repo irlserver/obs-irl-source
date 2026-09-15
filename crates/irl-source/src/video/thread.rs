@@ -576,13 +576,13 @@ impl VideoThread {
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
         match (at_anchor, audio_present) {
             (true, true) => irl_warn!(
-                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead"
+                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms"
             ),
             (true, false) => {
                 irl_info!("Video reaches the plugin as it falls due; delaying video by {to_ms}ms")
             }
             (false, true) => irl_warn!(
-                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. Raise Target Buffer by at least {to_ms}ms to keep lip sync instead",
+                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms",
                 raise.frames,
                 consts::VIDEO_DELAY_WINDOW_MS
             ),
@@ -594,7 +594,7 @@ impl VideoThread {
         }
         if raise.capped {
             irl_warn!(
-                "Video is late by more than the {}ms delay ceiling (the sender's video trails its audio by that much, or the decoder or the host is not keeping up); frames past it go out on arrival",
+                "Video is late by more than the {}ms delay ceiling; frames past it go out on arrival, unpaced",
                 consts::VIDEO_DELAY_MAX_MS
             );
         }

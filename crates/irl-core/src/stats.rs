@@ -51,6 +51,7 @@ pub const FIELDS: &[(&str, StatKind)] = &[
     ("video_lead_ms", StatKind::Int),
     ("video_lead_excess", StatKind::Int),
     ("video_delay_ms", StatKind::Int),
+    ("av_skew_ms", StatKind::Int),
     ("stream_delay_ms", StatKind::Int),
     ("low_latency_audio", StatKind::Bool),
     ("reconnect_count", StatKind::Int),
@@ -110,6 +111,10 @@ pub struct StatsSnapshot {
     /// Standing delay added to the video schedule so late-arriving video can
     /// still be paced; lip sync is off by this much.
     pub video_delay_ms: i64,
+    /// Video PTS minus audio PTS of what last reached the plugin: how the
+    /// sender stamps the two streams against each other, before any buffering
+    /// here. Near zero for a healthy sender; negative when video trails audio.
+    pub av_skew_ms: i64,
     /// Estimated end-to-end delay.
     pub stream_delay_ms: i64,
     /// Low latency audio enabled.
@@ -158,6 +163,7 @@ impl StatsSnapshot {
             StatValue::Int(self.video_lead_ms),
             StatValue::Int(self.video_lead_excess),
             StatValue::Int(self.video_delay_ms),
+            StatValue::Int(self.av_skew_ms),
             StatValue::Int(self.stream_delay_ms),
             StatValue::Bool(self.low_latency_audio),
             StatValue::Int(self.reconnect_count),
@@ -196,7 +202,8 @@ mod tests {
     /// The declaration `irl_source_create` passed to `proc_handler_add`
     /// (`src/irl-source.c`), with `out int video_decoder_flushes` removed —
     /// that stat was always zero and is not ported — and `out int
-    /// video_delay_ms` added for the port's standing video delay.
+    /// video_delay_ms` and `out int av_skew_ms` added for the port's standing
+    /// video delay and the sender's audio/video timestamp skew.
     const C_DECLARATION: &str = "void get_stats(out int buffer_fill_ms, \
 out float current_speed, out bool adaptive_latency_control, \
 out bool reconnecting, \
@@ -212,12 +219,12 @@ out int audio_output_restarts, out int obs_lead_ms, \
 out int audio_decoder_flushes, \
 out int video_corrupt_frames, out int video_corrupt_held, \
 out int video_lead_ms, out int video_lead_excess, \
-out int video_delay_ms, out int stream_delay_ms, out bool low_latency_audio, \
+out int video_delay_ms, out int av_skew_ms, out int stream_delay_ms, out bool low_latency_audio, \
 out int reconnect_count)";
 
     #[test]
-    fn there_are_twenty_eight_fields() {
-        assert_eq!(FIELDS.len(), 28);
+    fn there_are_twenty_nine_fields() {
+        assert_eq!(FIELDS.len(), 29);
         // video_decoder_flushes was removed (it was always 0 in C).
         assert!(
             !FIELDS
@@ -270,6 +277,7 @@ out int reconnect_count)";
             video_lead_ms: 20,
             video_lead_excess: 21,
             video_delay_ms: 24,
+            av_skew_ms: 25,
             stream_delay_ms: 22,
             low_latency_audio: true,
             reconnect_count: 23,
@@ -307,7 +315,7 @@ out int reconnect_count)";
         assert_eq!(values[1], StatValue::Float(1.05));
         assert_eq!(values[2], StatValue::Bool(true));
         assert_eq!(values[3], StatValue::Bool(true));
-        assert_eq!(values[26], StatValue::Bool(true));
+        assert_eq!(values[27], StatValue::Bool(true));
 
         // Spot-check the by-name accessor against the same snapshot.
         assert_eq!(snap.get("buffer_fill_ms"), Some(StatValue::Int(1)));

@@ -1341,9 +1341,10 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
     let (mut thread, recorder) = thread_with(shared.clone());
     let max = irl_core::consts::VIDEO_DELAY_MAX_MS * 1_000_000;
 
-    // A frame arriving now maps 1.6 s into the past, and every later one too.
+    // A frame arriving now maps six seconds into the past, past the ceiling,
+    // and every later one too.
     let t0 = obs::time::gettime_ns();
-    let late = 1_600_000_000;
+    let late = 6_000_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
 
     for i in 0..60u64 {

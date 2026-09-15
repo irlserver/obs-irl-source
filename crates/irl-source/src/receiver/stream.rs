@@ -532,9 +532,10 @@ impl Receiver {
         // The rest of what other threads write are atomics, so unlike the C
         // they need no lock at all — and the stats line is the last place the
         // audio_state / video queue lock edge should be introduced.
-        let av_drift_ms = {
+        let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
-            if state.offset_baseline_set
+            let skew = crate::source::av_skew_ms(&state);
+            let drift = if state.offset_baseline_set
                 && state.latest_obs_end_ts_ns != 0
                 && state.latest_buffered_end_pts_ns > 0
             {
@@ -544,7 +545,8 @@ impl Receiver {
                     / 1_000_000
             } else {
                 0
-            }
+            };
+            (drift, skew)
         };
 
         let video_frame_interval_ns = conn.video_frame_interval_ns.load(Relaxed);
@@ -559,7 +561,7 @@ impl Receiver {
              audio_flushes={} corrupt={} held={} vq_drops={} \
              obs_lead={}ms chunk={}@{} \
              stream_chunk={}ms obs_chunk={}ms \
-             restarts={} av_drift={}ms reanchors={} \
+             restarts={} av_drift={}ms av_skew={}ms reanchors={} \
              vlead={}ms peak={}ms excess={} vdelay={}ms vfps={:.1} \
              pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
@@ -595,6 +597,7 @@ impl Receiver {
             conn.last_chunk_obs_ns.load(Relaxed) / 1_000_000,
             conn.audio_output_restarts.load(Relaxed),
             av_drift_ms,
+            av_skew_ms,
             lifetime.audio_offset_reanchors.load(Relaxed),
             conn.video_lead_ns.load(Relaxed) / 1_000_000,
             lifetime.video_lead_peak_ns.load(Relaxed) / 1_000_000,

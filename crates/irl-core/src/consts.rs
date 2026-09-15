@@ -311,15 +311,17 @@ pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 /// Ceiling on the standing video delay (`irl_core::video_delay`).
 ///
 /// The delay covers a sender whose video reaches the plugin later than the
-/// audio of the same instant by more than Target Buffer absorbs. Past this
-/// the frames stay late (shown on arrival, as before the delay existed)
-/// rather than the delay chasing a decoder or a host that cannot keep up ever
-/// further. A skew this large is not only the host's, though: a phone whose
-/// video pipeline runs a stabiliser has sent video 1.6 s behind its audio
-/// (#33), and such a stream must still play, late and unpaced, not be dropped
-/// while it waits for a frame that is on time. Raising Target Buffer past the
-/// skew is what puts it back in sync.
-pub const VIDEO_DELAY_MAX_MS: u64 = 1000;
+/// audio of the same instant by more than Target Buffer absorbs. It costs
+/// nothing to carry: a late frame is shown on arrival with or without it, the
+/// delay only lets it be paced, so the ceiling is not a latency bound but a
+/// stop on a decoder or a host that cannot keep up, whose lateness grows
+/// without end. It has to clear every skew a phone can produce, though: a
+/// video pipeline running a stabiliser has sent video 1.6 s behind its audio
+/// (#33), and past the ceiling the stream plays unpaced (see
+/// `VideoThread::settle_anchor_candidate`). Raising Target Buffer past the
+/// skew, or OBS's own Sync Offset on the source, is what puts it back in
+/// sync.
+pub const VIDEO_DELAY_MAX_MS: u64 = 5000;
 /// After the play head is anchored, a raise of the video delay moves the
 /// picture, so late frames must recur across this window before one is made.
 pub const VIDEO_DELAY_WINDOW_MS: u64 = 1000;
@@ -463,7 +465,7 @@ mod tests {
         assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
         assert_eq!(VIDEO_PACING_LEAD_TICKS, 2); // IRL_VIDEO_PACING_LEAD_TICKS
         assert_eq!(VIDEO_ANCHOR_WAIT_MARGIN_MS, 1000);
-        assert_eq!(VIDEO_DELAY_MAX_MS, 1000);
+        assert_eq!(VIDEO_DELAY_MAX_MS, 5000);
         assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
         assert_eq!(VIDEO_DELAY_MIN_FRAMES, 3);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
