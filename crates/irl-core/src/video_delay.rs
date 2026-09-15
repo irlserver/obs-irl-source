@@ -81,6 +81,12 @@ impl VideoDelay {
         self.delay_ns
     }
 
+    /// Whether the delay has reached its ceiling: a shortfall past this cannot
+    /// be scheduled away, and the frames stay late.
+    pub fn at_ceiling(&self) -> bool {
+        self.delay_ns >= self.max_ns
+    }
+
     /// Back to zero, for a new connection or a cleared source.
     pub fn reset(&mut self) {
         self.delay_ns = 0;
@@ -260,11 +266,24 @@ mod tests {
     #[test]
     fn the_ceiling_caps_the_delay_and_says_so() {
         let mut d = delay();
+        assert!(!d.at_ceiling());
         let raise = d.before_anchor(-2_000_000_000, TICK, TICK).expect("raised");
         assert_eq!(raise.to_ns, MAX);
         assert!(raise.capped);
+        assert!(d.at_ceiling());
         // Still short at the ceiling: nothing more to do, nothing to report.
         assert_eq!(d.before_anchor(-3_000_000_000, TICK, TICK), None);
+        assert!(d.at_ceiling());
+    }
+
+    #[test]
+    fn a_delay_below_the_ceiling_is_not_at_it() {
+        let mut d = delay();
+        d.before_anchor(-150_000_000, TICK, TICK).expect("raised");
+        assert!(d.delay_ns() > 0);
+        assert!(!d.at_ceiling());
+        d.reset();
+        assert!(!d.at_ceiling());
     }
 
     #[test]

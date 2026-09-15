@@ -493,6 +493,14 @@ impl VideoThread {
     /// sender really is late, the hand-over measurement after the anchor sees
     /// it within a window.
     ///
+    /// A sender later than the delay ceiling covers is the one case where the
+    /// stale test must not run its course: no frame of such a stream is ever
+    /// on time, so dropping until one is drops the whole connection, which
+    /// audio still plays through (#33). Once the delay sits at its ceiling,
+    /// the newest frame in hand anchors however late it is, and the
+    /// connection plays unpaced from there — every frame handed over on
+    /// arrival — exactly as the ceiling's warning says it does.
+    ///
     /// "Past due" is measured against a canvas tick, not the emit slack: libobs
     /// quantises display to its ticks anyway, and a box with a coarse timer can
     /// oversleep by most of one, which must not make it drop every candidate in
@@ -529,6 +537,15 @@ impl VideoThread {
                 continue;
             }
             if !audio_present || on_time {
+                break;
+            }
+            // Late past the delay ceiling, on the newest frame there is: no
+            // delay can make this stream on time, and waiting for a frame that
+            // is would wait forever, dropping every one of them meanwhile
+            // (#33). It anchors as it is — late, and handed over on arrival
+            // from here on, as the ceiling promises — rather than showing
+            // nothing.
+            if newest_in_hand && self.delay.at_ceiling() {
                 break;
             }
             self.pacing.pop();
@@ -577,7 +594,7 @@ impl VideoThread {
         }
         if raise.capped {
             irl_warn!(
-                "Video is late by more than the {}ms delay ceiling; the decoder or the host is not keeping up, and frames past it go out on arrival",
+                "Video is late by more than the {}ms delay ceiling (the sender's video trails its audio by that much, or the decoder or the host is not keeping up); frames past it go out on arrival",
                 consts::VIDEO_DELAY_MAX_MS
             );
         }

@@ -1326,3 +1326,52 @@ fn a_clear_forgets_the_video_delay() {
     );
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 }
+
+/// A sender can be later than the delay ceiling covers: a phone whose video
+/// pipeline runs a stabiliser has sent video 1.6 s behind its audio (#33).
+/// No delay makes such a stream on time, so the stale test cannot be allowed
+/// to run its course — it would wait for an on-time frame forever, dropping
+/// every frame meanwhile while the audio played on, which is a source with
+/// sound and no picture. The delay stops at its ceiling, the newest frame in
+/// hand anchors as it is, and the connection plays unpaced from there: every
+/// frame handed over on arrival, none dropped here.
+#[test]
+fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+    let max = irl_core::consts::VIDEO_DELAY_MAX_MS * 1_000_000;
+
+    // A frame arriving now maps 1.6 s into the past, and every later one too.
+    let t0 = obs::time::gettime_ns();
+    let late = 1_600_000_000;
+    publish_mapping(&shared, t0 - late, 10_000_000_000);
+
+    for i in 0..60u64 {
+        let arrival = t0 + i * FRAME;
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
+        thread.pace_decoded(frame, arrival);
+        thread.run_once(arrival);
+        assert_eq!(thread.paced_len(), 0, "frame {i} neither held nor dropped");
+    }
+
+    assert_eq!(
+        shared.conn.video_delay_ns.load(Relaxed),
+        max,
+        "the delay stops at its ceiling"
+    );
+    let emitted = recorder.emitted();
+    assert_eq!(
+        emitted.len(),
+        60,
+        "every frame shown, the first one anchoring"
+    );
+    for (i, frame) in emitted.iter().enumerate() {
+        let arrival = t0 + i as u64 * FRAME;
+        assert_eq!(
+            frame.timestamp,
+            arrival - late + max,
+            "frame {i}: the schedule carries the ceiling, no more"
+        );
+    }
+}

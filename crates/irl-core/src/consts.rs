@@ -311,11 +311,14 @@ pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 /// Ceiling on the standing video delay (`irl_core::video_delay`).
 ///
 /// The delay covers a sender whose video reaches the plugin later than the
-/// audio of the same instant by more than Target Buffer absorbs. A whole
-/// second of that is no longer a skew any encoder produces; it is a decoder
-/// or a host that cannot keep up, and past this the frames stay late (shown
-/// on arrival, as before the delay existed) rather than the picture drifting
-/// ever further behind the sound.
+/// audio of the same instant by more than Target Buffer absorbs. Past this
+/// the frames stay late (shown on arrival, as before the delay existed)
+/// rather than the delay chasing a decoder or a host that cannot keep up ever
+/// further. A skew this large is not only the host's, though: a phone whose
+/// video pipeline runs a stabiliser has sent video 1.6 s behind its audio
+/// (#33), and such a stream must still play, late and unpaced, not be dropped
+/// while it waits for a frame that is on time. Raising Target Buffer past the
+/// skew is what puts it back in sync.
 pub const VIDEO_DELAY_MAX_MS: u64 = 1000;
 /// After the play head is anchored, a raise of the video delay moves the
 /// picture, so late frames must recur across this window before one is made.
