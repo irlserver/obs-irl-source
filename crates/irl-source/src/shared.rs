@@ -207,6 +207,10 @@ pub struct ConnStats {
     pub video_lead_ns: AtomicI64,
     /// Mirror of the video thread's standing delay, for the stats.
     pub video_delay_ns: AtomicU64,
+    /// PTS of the newest video packet the receiver pushed, for `av_skew_ms`.
+    /// Taken at arrival: the decoded-frame PTS trails it by however long the
+    /// packet waited for its due time, which is not the sender's doing.
+    pub video_arrival_pts_ns: AtomicI64,
     /// EMA of decoded PTS deltas; written by the receiver, read by video.
     pub video_frame_interval_ns: AtomicI64,
     // Mirrors of the video thread's anchors for stats / media_get_state.

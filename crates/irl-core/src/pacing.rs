@@ -168,6 +168,14 @@ impl<F: PacedFrame> PacingQueue<F> {
         }
     }
 
+    /// Move every due time earlier by `delta_ns`: the video delay is ramping
+    /// back down.
+    pub fn shift_earlier(&mut self, delta_ns: u64) {
+        for entry in &mut self.entries {
+            entry.due_ns = entry.due_ns.saturating_sub(delta_ns);
+        }
+    }
+
     /// Pop the head.
     pub fn pop(&mut self) -> Option<F> {
         let entry = self.entries.pop_front()?;

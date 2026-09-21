@@ -329,6 +329,14 @@ pub const VIDEO_DELAY_WINDOW_MS: u64 = 1000;
 /// as recurring. A single scheduling hiccup on the host makes a couple of
 /// consecutive frames late; a sender skew makes them late all window long.
 pub const VIDEO_DELAY_MIN_FRAMES: u32 = 3;
+/// How long every frame handed over must have needed less than the video
+/// delay in force before it ramps back down. Long enough that one quiet
+/// stretch on a link that really is late does not start a ramp a raise then
+/// has to undo.
+pub const VIDEO_DELAY_RELAX_WINDOW_MS: u64 = 10_000;
+/// Surplus delay below this is left alone: a ramp is not worth starting for
+/// a couple of canvas ticks.
+pub const VIDEO_DELAY_RELAX_MIN_MS: u64 = 50;
 /// How long the last audio playout offset is reused after it goes away.
 pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 /// Video-only fallback: clamp on drift between stream and system clock.
@@ -468,6 +476,8 @@ mod tests {
         assert_eq!(VIDEO_DELAY_MAX_MS, 5000);
         assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
         assert_eq!(VIDEO_DELAY_MIN_FRAMES, 3);
+        assert_eq!(VIDEO_DELAY_RELAX_WINDOW_MS, 10_000);
+        assert_eq!(VIDEO_DELAY_RELAX_MIN_MS, 50);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
         assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667); // IRL_VIDEO_CANVAS_TICK_DEFAULT_NS
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS

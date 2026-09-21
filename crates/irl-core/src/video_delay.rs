@@ -17,9 +17,21 @@
 //! nothing has been shown yet, so a shortfall is acted on at once. Afterwards a
 //! raise moves the picture (one frame holds for the size of the raise), so it
 //! takes a shortfall that recurs across a window, not a single late frame from
-//! a scheduling hiccup. The delay never shrinks within a connection: lowering
-//! it would be a second visible step, for a margin that might well tighten
-//! again.
+//! a scheduling hiccup.
+//!
+//! The delay is also taken back, slowly. The measurement that sets it before
+//! the anchor is one frame at the start of a connection, and on a poor link
+//! that moment is a burst followed by catch-up (a relay replaying video from
+//! an older keyframe next to live audio, a throttled uplink draining its
+//! queue): the frame can look more than a second late on a stream that has no
+//! skew at all once it settles, and a delay that never shrank then held
+//! on-time video that far behind its audio for the whole connection. So every
+//! frame handed over also reports its *arrival* margin, and when a whole
+//! window of them needed less than the delay in force by more than a
+//! threshold, the delay ramps down to what the window needed plus a tick. It
+//! ramps rather than steps: due times move a little earlier each cycle, so
+//! the picture plays a few percent fast (the caller passes the Catch-Up
+//! Speed) and nothing jumps or is skipped. A raise cancels a ramp.
 //!
 //! The bar is deliberately "not late", not "a full delivery lead early". The
 //! lead the pacing queue applies to a frame it holds is an allowance for its
@@ -42,6 +54,35 @@ pub struct DelayRaise {
     pub capped: bool,
 }
 
+/// The delay turned out larger than a whole window of frames needed, and
+/// starts ramping down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DelayRelax {
+    /// The delay in force.
+    pub from_ns: u64,
+    /// Where the ramp ends.
+    pub to_ns: u64,
+}
+
+/// One step of the ramp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RampStep {
+    /// The delay now.
+    pub delay_ns: u64,
+    /// How much earlier every due time moved this step.
+    pub moved_ns: u64,
+    /// The ramp reached its target.
+    pub done: bool,
+}
+
+/// What the frames handed over since `since_ns` needed, at most.
+#[derive(Debug, Clone, Copy)]
+struct Surplus {
+    since_ns: u64,
+    frames: u32,
+    worst_need_ns: u64,
+}
+
 /// Late frames seen since the play head was anchored, awaiting a verdict.
 #[derive(Debug, Clone, Copy)]
 struct Window {
@@ -60,6 +101,14 @@ pub struct VideoDelay {
     window_ns: u64,
     min_frames: u32,
     window: Option<Window>,
+    /// Relaxing: the observation window, the threshold a surplus must exceed,
+    /// what has been observed, and the ramp in progress. A zero window turns
+    /// relaxing off.
+    relax_window_ns: u64,
+    relax_min_ns: u64,
+    surplus: Option<Surplus>,
+    ramp_to_ns: Option<u64>,
+    ramp_at_ns: u64,
 }
 
 impl VideoDelay {
@@ -73,7 +122,21 @@ impl VideoDelay {
             window_ns,
             min_frames,
             window: None,
+            relax_window_ns: 0,
+            relax_min_ns: 0,
+            surplus: None,
+            ramp_to_ns: None,
+            ramp_at_ns: 0,
         }
+    }
+
+    /// Let the delay ramp back down when every frame across `window_ns`
+    /// needed less than it by more than `min_ns`.
+    #[must_use]
+    pub fn with_relax(mut self, window_ns: u64, min_ns: u64) -> Self {
+        self.relax_window_ns = window_ns;
+        self.relax_min_ns = min_ns;
+        self
     }
 
     /// The delay every due time carries.
@@ -91,6 +154,8 @@ impl VideoDelay {
     pub fn reset(&mut self) {
         self.delay_ns = 0;
         self.window = None;
+        self.surplus = None;
+        self.ramp_to_ns = None;
     }
 
     /// The whole delay a frame needs so that it is in hand `want_ns` before it
@@ -120,7 +185,80 @@ impl VideoDelay {
             capped: need_ns > self.max_ns,
         };
         self.delay_ns = to_ns;
+        // The evidence for a smaller delay is void.
+        self.surplus = None;
+        self.ramp_to_ns = None;
         Some(raise)
+    }
+
+    /// A frame handed over after the anchor, `arrival_margin_ns` being its
+    /// due time minus its packet's arrival, delay included. Records what it
+    /// needed; once a whole relax window needed less than the delay in force
+    /// by more than the threshold, starts a ramp down to that plus a tick.
+    pub fn note_arrival(
+        &mut self,
+        now_ns: u64,
+        arrival_margin_ns: i64,
+        tick_ns: u64,
+    ) -> Option<DelayRelax> {
+        if self.relax_window_ns == 0 {
+            return None;
+        }
+        let need_ns = self.required_ns(arrival_margin_ns, tick_ns, tick_ns);
+        // A ramp must not run past what a frame in hand needs.
+        if let Some(to_ns) = self.ramp_to_ns {
+            let floor_ns = need_ns + tick_ns;
+            if floor_ns >= self.delay_ns {
+                self.ramp_to_ns = None;
+            } else if floor_ns > to_ns {
+                self.ramp_to_ns = Some(floor_ns);
+            }
+        }
+        let surplus = self.surplus.get_or_insert(Surplus {
+            since_ns: now_ns,
+            frames: 0,
+            worst_need_ns: 0,
+        });
+        surplus.frames += 1;
+        surplus.worst_need_ns = surplus.worst_need_ns.max(need_ns);
+        if now_ns.saturating_sub(surplus.since_ns) < self.relax_window_ns {
+            return None;
+        }
+        let seen = *surplus;
+        self.surplus = None;
+        if seen.frames < self.min_frames || self.ramp_to_ns.is_some() {
+            return None;
+        }
+        let to_ns = seen.worst_need_ns + tick_ns;
+        if self.delay_ns <= to_ns + self.relax_min_ns {
+            return None;
+        }
+        self.ramp_to_ns = Some(to_ns);
+        self.ramp_at_ns = now_ns;
+        Some(DelayRelax {
+            from_ns: self.delay_ns,
+            to_ns,
+        })
+    }
+
+    /// Advance a ramp in progress to `now_ns`, moving the delay down by
+    /// `rate` of the time since the last step (0.05 plays video 5% fast).
+    pub fn ramp(&mut self, now_ns: u64, rate: f64) -> Option<RampStep> {
+        let to_ns = self.ramp_to_ns?;
+        let elapsed_ns = now_ns.saturating_sub(self.ramp_at_ns);
+        self.ramp_at_ns = now_ns;
+        let want_ns = (elapsed_ns as f64 * rate.max(0.0)) as u64;
+        let moved_ns = want_ns.min(self.delay_ns.saturating_sub(to_ns));
+        self.delay_ns -= moved_ns;
+        let done = self.delay_ns <= to_ns;
+        if done {
+            self.ramp_to_ns = None;
+        }
+        (moved_ns > 0 || done).then_some(RampStep {
+            delay_ns: self.delay_ns,
+            moved_ns,
+            done,
+        })
     }
 
     /// A frame considered for anchoring the play head, `margin_ns` being its
@@ -387,5 +525,99 @@ mod tests {
         assert_eq!(round_up_to_tick(TICK, TICK), TICK);
         assert_eq!(round_up_to_tick(TICK + 1, TICK), 2 * TICK);
         assert_eq!(round_up_to_tick(12_345, 0), 12_345);
+    }
+
+    const RELAX: u64 = 10_000_000_000;
+
+    fn relaxing() -> VideoDelay {
+        delay().with_relax(RELAX, 50_000_000)
+    }
+
+    /// Feed `secs` of 30fps frames whose raw margin (delay excluded) is
+    /// `raw_margin_ns`, stepping the ramp at 5% as the caller does.
+    fn run(d: &mut VideoDelay, t0: u64, secs: u64, raw_margin_ns: i64) -> Vec<DelayRelax> {
+        let mut relaxes = Vec::new();
+        for i in 0..secs * 30 {
+            let now = t0 + i * 33_333_333;
+            d.ramp(now, 0.05);
+            let margin = raw_margin_ns + d.delay_ns() as i64;
+            relaxes.extend(d.note_arrival(now, margin, TICK));
+        }
+        relaxes
+    }
+
+    #[test]
+    fn a_delay_set_by_a_startup_transient_ramps_back_down() {
+        let mut d = relaxing();
+        // One frame 1.3 s late at the anchor, on a stream whose frames then
+        // arrive 100 ms early for good.
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        let set = d.delay_ns();
+        let relaxes = run(&mut d, 1_000_000_000, 60, 100_000_000);
+        assert_eq!(relaxes.len(), 1, "one decision, not one per window");
+        assert_eq!(relaxes[0].from_ns, set);
+        assert_eq!(
+            relaxes[0].to_ns, TICK,
+            "nothing needed, so one tick of headroom"
+        );
+        assert_eq!(d.delay_ns(), TICK);
+    }
+
+    #[test]
+    fn the_ramp_is_gradual() {
+        let mut d = relaxing();
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        let set = d.delay_ns();
+        // Eleven seconds: the window closes at ten, then one second of ramp
+        // at 5% takes back about 50 ms, not the whole delay.
+        run(&mut d, 1_000_000_000, 11, 100_000_000);
+        let taken = set - d.delay_ns();
+        assert!((30_000_000..70_000_000).contains(&taken), "took {taken}ns");
+    }
+
+    #[test]
+    fn a_delay_the_sender_really_needs_stays() {
+        let mut d = relaxing();
+        d.before_anchor(-150_000_000, TICK, TICK).expect("raised");
+        let set = d.delay_ns();
+        // Every frame keeps arriving 150 ms late.
+        assert!(run(&mut d, 1_000_000_000, 60, -150_000_000).is_empty());
+        assert_eq!(d.delay_ns(), set);
+    }
+
+    #[test]
+    fn one_late_frame_in_the_window_keeps_the_delay_it_needed() {
+        let mut d = relaxing();
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        let t0 = 1_000_000_000;
+        run(&mut d, t0, 5, 100_000_000);
+        // Mid-window, one frame 400 ms late.
+        let margin = -400_000_000 + d.delay_ns() as i64;
+        d.note_arrival(t0 + 5_000_000_000, margin, TICK);
+        let relaxes = run(&mut d, t0 + 5_033_333_333, 60, 100_000_000);
+        // 400 ms plus the tick allowance, in ticks, plus a tick of headroom.
+        assert_eq!(relaxes[0].to_ns, 26 * TICK);
+    }
+
+    #[test]
+    fn a_raise_cancels_the_ramp() {
+        let mut d = relaxing();
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        run(&mut d, 1_000_000_000, 12, 100_000_000);
+        let mid = d.delay_ns();
+        let raise = d.before_anchor(-2_000_000_000 + mid as i64, TICK, TICK);
+        assert!(raise.is_some());
+        let after = d.delay_ns();
+        assert_eq!(d.ramp(20_000_000_000, 0.05), None);
+        assert_eq!(d.delay_ns(), after);
+    }
+
+    #[test]
+    fn without_with_relax_the_delay_never_shrinks() {
+        let mut d = delay();
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        let set = d.delay_ns();
+        assert!(run(&mut d, 1_000_000_000, 60, 100_000_000).is_empty());
+        assert_eq!(d.delay_ns(), set);
     }
 }

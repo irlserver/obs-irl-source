@@ -468,16 +468,19 @@ fn fit_to_canvas(source: SourceHandle) {
 /// the same fields after `reset_runtime_state` had zeroed them — while the
 /// lifetime counters and the settings-derived flags still report.
 /// `av_skew_ms`: video PTS minus audio PTS of what last reached the plugin,
-/// in ms. Both values are stamped at intake (audio as the receiver writes the
-/// jitter buffer, video as the video thread decodes, which follows arrival by
-/// at most the decode lead), so the difference is the sender's timestamp skew
-/// before any buffering here, whichever way the two streams are scheduled
-/// afterwards. Zero until both streams have delivered something.
-pub(crate) fn av_skew_ms(audio: &AudioState) -> i64 {
-    if audio.latest_video_stream_pts_ns == 0 || audio.latest_audio_stream_pts_ns == 0 {
+/// in ms. Both values are stamped by the receiver at arrival (audio as it
+/// writes the jitter buffer, video as it pushes the packet), so the
+/// difference is the sender's timestamp skew before any buffering here. The
+/// decoded-frame PTS would not do for the video side: a packet waits in the
+/// channel for its due time, standing video delay included, so that PTS
+/// trails arrival by the queue depth and the delay would read as a skew.
+/// Zero until both streams have delivered something.
+pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
+    let video_pts_ns = shared.conn.video_arrival_pts_ns.load(Relaxed);
+    if video_pts_ns == 0 || audio.latest_audio_stream_pts_ns == 0 {
         return 0;
     }
-    (audio.latest_video_stream_pts_ns - audio.latest_audio_stream_pts_ns) / 1_000_000
+    (video_pts_ns - audio.latest_audio_stream_pts_ns) / 1_000_000
 }
 
 fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
@@ -524,7 +527,7 @@ fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     snap.video_corrupt_held = conn.video_corrupt_held.load(Relaxed) as i64;
     snap.video_lead_ms = conn.video_lead_ns.load(Relaxed) / 1_000_000;
     snap.video_delay_ms = (conn.video_delay_ns.load(Relaxed) / 1_000_000) as i64;
-    snap.av_skew_ms = av_skew_ms(&audio);
+    snap.av_skew_ms = av_skew_ms(shared, &audio);
 
     // Stream delay: how far behind real time the video output is, computed as
     // wall clock minus the anchored video PTS. Includes SRT latency, decode

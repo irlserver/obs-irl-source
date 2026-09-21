@@ -1376,3 +1376,71 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
         );
     }
 }
+
+/// The delay before the anchor is sized from one frame, and on a poor link
+/// that frame lies: a relay replays video from an older keyframe next to live
+/// audio, or a throttled uplink is still draining its queue, and the frame
+/// looks more than a second late on a stream that has no skew once it
+/// settles. A delay that never shrank then held on-time video that far behind
+/// its audio for the whole connection, which a tester heard as the sound
+/// running ahead of the picture until the stream dropped. Once a whole window
+/// of frames has needed less, the delay ramps back down at the Catch-Up
+/// Speed: video plays slightly fast, nothing jumps and nothing is dropped.
+#[test]
+fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    // The first frame in hand maps 1.3 s into the past.
+    let t0 = obs::time::gettime_ns();
+    publish_mapping(&shared, t0 - 1_300_000_000, 10_000_000_000);
+    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    first.set_pts(10_000_000_000);
+    thread.pace_decoded(first, t0);
+    thread.run_once(t0);
+    let set = shared.conn.video_delay_ns.load(Relaxed);
+    assert_eq!(set, (1_300_000_000 + TICK).div_ceil(TICK) * TICK);
+
+    // The stream then settles: every frame from here arrives 100 ms before
+    // its undelayed due time, for a minute.
+    let frames = 60 * 30u64;
+    let pts_of = |i: u64| 10_000_000_000 + 1_400_000_000 + (i * FRAME) as i64;
+    let mut delays = Vec::new();
+    for i in 1..=frames {
+        let arrival = t0 + i * FRAME;
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(pts_of(i));
+        thread.pace_decoded(frame, arrival);
+        thread.run_once(arrival);
+        delays.push(shared.conn.video_delay_ns.load(Relaxed));
+    }
+    for k in 1..=60u64 {
+        thread.run_once(t0 + (frames + k) * FRAME);
+    }
+
+    // Untouched for the ten-second window, then down to a tick of headroom,
+    // gradually: 5% takes back 1.3 s in about 26 s.
+    assert_eq!(delays[8 * 30], set, "inside the window the delay stands");
+    assert_eq!(*delays.last().unwrap(), TICK, "settled on what frames need");
+    let halfway = delays[(10 + 13) * 30];
+    assert!(
+        halfway > set / 3 && halfway < set * 2 / 3,
+        "13 s into the ramp the delay is {halfway}ns of {set}ns"
+    );
+    assert!(
+        delays.windows(2).all(|w| w[1] <= w[0]),
+        "the delay only ever comes down here"
+    );
+
+    // Every frame shown, in order, and no jump: consecutive timestamps are a
+    // frame apart, or 5% less while the ramp runs.
+    let emitted = recorder.emitted();
+    assert_eq!(emitted.len() as u64, frames + 1, "no frame dropped");
+    for pair in emitted[1..].windows(2) {
+        let step = pair[1].timestamp - pair[0].timestamp;
+        assert!(
+            (FRAME * 9 / 10..=FRAME + 1).contains(&step),
+            "frames {step}ns apart"
+        );
+    }
+}

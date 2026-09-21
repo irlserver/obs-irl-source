@@ -36,4 +36,4 @@ pub use speed::{
 };
 pub use stats::{StatKind, StatValue, StatsSnapshot};
 pub use url_opts::awaits_caller;
-pub use video_delay::{DelayRaise, VideoDelay};
+pub use video_delay::{DelayRaise, DelayRelax, RampStep, VideoDelay};

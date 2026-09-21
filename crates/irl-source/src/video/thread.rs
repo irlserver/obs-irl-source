@@ -16,7 +16,7 @@ use std::time::Duration;
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
 use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacedFrame, PacingQueue};
-use irl_core::video_delay::{DelayRaise, VideoDelay};
+use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
 
 use crate::shared::{Shared, VideoDecoder, VideoMsg};
 use crate::video::VideoSink;
@@ -173,6 +173,10 @@ impl VideoThread {
                 consts::VIDEO_DELAY_MAX_MS * 1_000_000,
                 consts::VIDEO_DELAY_WINDOW_MS * 1_000_000,
                 consts::VIDEO_DELAY_MIN_FRAMES,
+            )
+            .with_relax(
+                consts::VIDEO_DELAY_RELAX_WINDOW_MS * 1_000_000,
+                consts::VIDEO_DELAY_RELAX_MIN_MS * 1_000_000,
             ),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
@@ -368,8 +372,11 @@ impl VideoThread {
         let tick_ns = self.canvas_tick_ns();
         if self.anchor_pending {
             self.settle_anchor_candidate(now_ns, tick_ns);
-        } else if let Some(raise) = self.delay.expire(now_ns) {
-            self.apply_delay_raise(raise, false);
+        } else {
+            self.step_delay_ramp(now_ns);
+            if let Some(raise) = self.delay.expire(now_ns) {
+                self.apply_delay_raise(raise, false);
+            }
         }
         loop {
             // While the play head needs anchoring, a hard ceiling must not
@@ -395,6 +402,12 @@ impl VideoThread {
                 let handover_margin_ns = due_ns as i64 - now_ns as i64;
                 if let Some(raise) = self.delay.note(now_ns, handover_margin_ns, 0, tick_ns) {
                     self.apply_delay_raise(raise, false);
+                }
+                // And at arrival, which is what says whether the delay in
+                // force is more than this stream needs.
+                let arrival_margin_ns = due_ns as i64 - paced.received_ns() as i64;
+                if let Some(relax) = self.delay.note_arrival(now_ns, arrival_margin_ns, tick_ns) {
+                    self.announce_delay_relax(relax);
                 }
             }
             let submitted = self.output_frame(paced.frame(), due_ns);
@@ -597,6 +610,42 @@ impl VideoThread {
                 "Video is late by more than the {}ms delay ceiling; frames past it go out on arrival, unpaced",
                 consts::VIDEO_DELAY_MAX_MS
             );
+        }
+    }
+
+    /// A whole window of frames needed less delay than is in force: say so.
+    /// The ramp itself runs from [`Self::step_delay_ramp`].
+    fn announce_delay_relax(&self, relax: DelayRelax) {
+        irl_info!(
+            "No frame in the last {}s needed more than {}ms of the {}ms video delay; playing video {:.0}% fast until it is back in step with its audio",
+            consts::VIDEO_DELAY_RELAX_WINDOW_MS / 1000,
+            relax.to_ns / 1_000_000,
+            relax.from_ns / 1_000_000,
+            self.delay_ramp_rate() * 100.0
+        );
+    }
+
+    /// How fast a ramp takes the delay back: the Catch-Up Speed, the same
+    /// promise the audio side makes about a backlog. Video has no pitch, so
+    /// the rate is far less noticeable here than it is there.
+    fn delay_ramp_rate(&self) -> f64 {
+        f64::from(self.shared.hot.max_speed() - 1.0).max(0.0)
+    }
+
+    /// Advance a delay ramp in progress: every due time, queued frames
+    /// included, moves earlier by this cycle's share, so the picture plays
+    /// slightly fast instead of jumping.
+    fn step_delay_ramp(&mut self, now_ns: u64) {
+        let Some(step) = self.delay.ramp(now_ns, self.delay_ramp_rate()) else {
+            return;
+        };
+        self.pacing.shift_earlier(step.moved_ns);
+        self.shared
+            .conn
+            .video_delay_ns
+            .store(step.delay_ns, Relaxed);
+        if step.done {
+            irl_info!("Video delay settled at {}ms", step.delay_ns / 1_000_000);
         }
     }
 

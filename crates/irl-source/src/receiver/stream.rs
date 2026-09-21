@@ -428,6 +428,7 @@ impl Receiver {
         self.shared.video_flags.first_keyframe.store(false, Relaxed);
         self.shared.video_flags.corrupted.store(false, Relaxed);
         self.shared.conn.video_ts_init.store(false, Relaxed);
+        self.shared.conn.video_arrival_pts_ns.store(0, Relaxed);
 
         let mut state = self.shared.audio_state();
         state.fade_in_pending = true;
@@ -534,7 +535,7 @@ impl Receiver {
         // audio_state / video queue lock edge should be introduced.
         let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
-            let skew = crate::source::av_skew_ms(&state);
+            let skew = crate::source::av_skew_ms(shared, &state);
             let drift = if state.offset_baseline_set
                 && state.latest_obs_end_ts_ns != 0
                 && state.latest_buffered_end_pts_ns > 0

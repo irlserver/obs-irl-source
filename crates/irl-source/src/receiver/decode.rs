@@ -193,6 +193,7 @@ impl Receiver {
             .pts_or_dts()
             .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
         let bytes = self.pkt.size().max(0) as usize;
+        self.shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
 
         match self.pkt.new_ref() {
             Ok(packet) => self.shared.video.push_packet(
