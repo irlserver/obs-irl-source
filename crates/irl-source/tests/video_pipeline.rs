@@ -1044,6 +1044,22 @@ fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
 
 /* ── The standing video delay ─────────────────────────────── */
 
+/// Frames of real-time arrival history before video counts as live and may
+/// size the delay: the lookback, in whole frames.
+const LIVE_FRAMES: u64 = (irl_core::consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000).div_ceil(FRAME);
+
+/// Give the thread a lookback of live history ending one frame before a
+/// frame with `next_pts_ns` arrives at `next_arrival_ns`: the frames a
+/// connection that has been delivering in real time would already have
+/// handed over. They are queued like any others, and go as stale.
+fn live_history(thread: &mut VideoThread, next_arrival_ns: u64, next_pts_ns: i64) {
+    for k in (1..=LIVE_FRAMES).rev() {
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(next_pts_ns - (k * FRAME) as i64);
+        thread.pace_decoded(frame, next_arrival_ns - k * FRAME);
+    }
+}
+
 /// The mapping can also put *every* frame in the past: a sender whose video
 /// leaves the encoder later than the audio of the same instant by more than
 /// Target Buffer covers. Dropping stale frames until an on-time one turns up
@@ -1085,14 +1101,17 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
             delay,
             "canvas {canvas_fps}fps"
         );
+        // The first lookback of frames went as stale while the thread waited
+        // to see that this video is live, not catching up; every frame from
+        // the one that sized the delay is shown.
         let emitted = recorder.emitted();
         assert_eq!(
-            emitted.len(),
-            30,
-            "canvas {canvas_fps}fps: every frame shown"
+            emitted.len() as u64,
+            30 - LIVE_FRAMES,
+            "canvas {canvas_fps}fps: every frame shown once live"
         );
         for (i, frame) in emitted.iter().enumerate() {
-            let arrival = t0 + i as u64 * FRAME;
+            let arrival = t0 + (i as u64 + LIVE_FRAMES) * FRAME;
             assert_eq!(
                 frame.timestamp,
                 arrival - late + delay,
@@ -1152,19 +1171,18 @@ fn a_late_stream_is_measured_on_its_newest_frame() {
     let shared = shared_with_audio();
     let (mut thread, recorder) = thread_with(shared.clone());
 
-    // Three frames that arrived in real time over the last 67 ms, each
-    // mapping 150 ms before its arrival.
+    // Frames that arrived in real time over the last lookback, each mapping
+    // 150 ms before its arrival, the newest one now.
     let t0 = obs::time::gettime_ns();
     let late = 150_000_000;
-    publish_mapping(&shared, t0 - late, 10_000_000_000 + 2 * FRAME as i64);
-    for i in 0..3u64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, t0 - (2 - i) * FRAME);
-    }
+    publish_mapping(&shared, t0 - late, 10_000_000_000);
+    live_history(&mut thread, t0, 10_000_000_000);
+    let mut newest = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    newest.set_pts(10_000_000_000);
+    thread.pace_decoded(newest, t0);
     thread.run_once(t0);
 
-    // 150 ms plus a tick, in ticks, from the newest frame; the two older ones
+    // 150 ms plus a tick, in ticks, from the newest frame; the older ones
     // were stale even after that and went.
     let delay = 10 * TICK;
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), delay);
@@ -1303,6 +1321,7 @@ fn a_clear_forgets_the_video_delay() {
 
     let t0 = obs::time::gettime_ns();
     publish_mapping(&shared, t0 - 150_000_000, 10_000_000_000);
+    live_history(&mut thread, t0, 10_000_000_000);
     let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     frame.set_pts(10_000_000_000);
     thread.pace_decoded(frame, t0);
@@ -1361,14 +1380,12 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
         max,
         "the delay stops at its ceiling"
     );
+    // Every frame from the one that showed the video to be live, not
+    // catching up, is shown; the lookback before it went as stale.
     let emitted = recorder.emitted();
-    assert_eq!(
-        emitted.len(),
-        60,
-        "every frame shown, the first one anchoring"
-    );
+    assert_eq!(emitted.len() as u64, 60 - LIVE_FRAMES);
     for (i, frame) in emitted.iter().enumerate() {
-        let arrival = t0 + i as u64 * FRAME;
+        let arrival = t0 + (i as u64 + LIVE_FRAMES) * FRAME;
         assert_eq!(
             frame.timestamp,
             arrival - late + max,
@@ -1377,11 +1394,10 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
     }
 }
 
-/// The delay before the anchor is sized from one frame, and on a poor link
-/// that frame lies: a relay replays video from an older keyframe next to live
-/// audio, or a throttled uplink is still draining its queue, and the frame
-/// looks more than a second late on a stream that has no skew once it
-/// settles. A delay that never shrank then held on-time video that far behind
+/// The delay before the anchor is sized from one frame, and that frame can
+/// still lie in a way the live check cannot see: a sender that is late for
+/// its first seconds and then is not (an encoder warming up, a stabiliser
+/// switched off), arriving in real time throughout. A delay that never shrank then held on-time video that far behind
 /// its audio for the whole connection, which a tester heard as the sound
 /// running ahead of the picture until the stream dropped. Once a whole window
 /// of frames has needed less, the delay ramps back down at the Catch-Up
@@ -1394,6 +1410,7 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     // The first frame in hand maps 1.3 s into the past.
     let t0 = obs::time::gettime_ns();
     publish_mapping(&shared, t0 - 1_300_000_000, 10_000_000_000);
+    live_history(&mut thread, t0, 10_000_000_000);
     let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     first.set_pts(10_000_000_000);
     thread.pace_decoded(first, t0);
@@ -1443,4 +1460,73 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
             "frames {step}ns apart"
         );
     }
+}
+
+/// A relay hands a new subscriber video from its last keyframe next to live
+/// audio, so the connection opens with video a second behind its audio, and
+/// that video then arrives faster than real time until it has caught up. A
+/// frame measured during the catch-up reads as a late sender on a stream
+/// with no skew at all; a tester on a throttled link got 1333 ms of delay
+/// from it and the sound ran ahead of the picture until the stream dropped.
+/// The network cannot cause this (both streams share one mux), so it is not
+/// a poor-link problem and must not be answered like one: video sizes the
+/// delay only once it is live, and this stream anchors in sync with none.
+#[test]
+fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    // 39 frames, 1.3 s of video, arrive at four times real time; from then
+    // on frames arrive live, 100 ms before they are due.
+    let t0 = obs::time::gettime_ns();
+    let caught_up = 39u64;
+    let live_from = t0 + (caught_up - 1) * FRAME / 4;
+    let arrival_of = |i: u64| {
+        if i < caught_up {
+            t0 + i * FRAME / 4
+        } else {
+            live_from + (i + 1 - caught_up) * FRAME
+        }
+    };
+    let pts_of = |i: u64| 10_000_000_000 + (i * FRAME) as i64;
+    // Frame `caught_up` is due 100 ms after it arrives.
+    publish_mapping(
+        &shared,
+        arrival_of(caught_up) + 100_000_000,
+        pts_of(caught_up),
+    );
+
+    for i in 0..caught_up + 90 {
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(pts_of(i));
+        thread.pace_decoded(frame, arrival_of(i));
+        thread.run_once(arrival_of(i));
+        assert_eq!(
+            shared.conn.video_delay_ns.load(Relaxed),
+            0,
+            "frame {i}: a catch-up is not a late sender"
+        );
+    }
+
+    // The first frame of the catch-up was 850 ms past due and the early ones
+    // went as stale; the play head anchored on the first frame that was on
+    // time, at its real due time, and every frame after it was shown.
+    let emitted = recorder.emitted();
+    let first = emitted.first().expect("anchored");
+    let base = arrival_of(caught_up) as i64 + 100_000_000;
+    let first_index =
+        ((first.timestamp as i64 - base).div_euclid(FRAME as i64) + caught_up as i64) as u64;
+    assert!(
+        (30..caught_up).contains(&first_index),
+        "anchored on frame {first_index}"
+    );
+    for (k, frame) in emitted.iter().enumerate() {
+        let i = first_index + k as u64;
+        assert_eq!(
+            frame.timestamp as i64,
+            base + (i as i64 - caught_up as i64) * FRAME as i64,
+            "frame {i} shown at its undelayed due time"
+        );
+    }
+    assert!(emitted.len() >= 85, "{} frames shown", emitted.len());
 }

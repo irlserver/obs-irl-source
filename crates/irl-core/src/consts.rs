@@ -329,6 +329,18 @@ pub const VIDEO_DELAY_WINDOW_MS: u64 = 1000;
 /// as recurring. A single scheduling hiccup on the host makes a couple of
 /// consecutive frames late; a sender skew makes them late all window long.
 pub const VIDEO_DELAY_MIN_FRAMES: u32 = 3;
+/// Before the anchor, video sizes the delay only once it is live rather than
+/// still catching up (`irl_core::arrival`): the floor of arrival minus PTS
+/// must not have fallen by more than the tolerance across the lookback. The
+/// lookback is what a genuinely late sender pays before its first picture;
+/// the tolerance is half a 30fps frame, above ordinary arrival jitter and
+/// well below the frame-per-frame fall of a catch-up.
+pub const VIDEO_LIVE_LOOKBACK_MS: u64 = 250;
+/// How far the arrival floor may fall across the lookback and still count as
+/// settled; see [`VIDEO_LIVE_LOOKBACK_MS`].
+pub const VIDEO_LIVE_TOLERANCE_MS: u64 = 16;
+/// A stream that never stops catching up is measured anyway after this.
+pub const VIDEO_LIVE_MAX_WAIT_MS: u64 = 2000;
 /// How long every frame handed over must have needed less than the video
 /// delay in force before it ramps back down. Long enough that one quiet
 /// stretch on a link that really is late does not start a ramp a raise then
@@ -476,6 +488,9 @@ mod tests {
         assert_eq!(VIDEO_DELAY_MAX_MS, 5000);
         assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
         assert_eq!(VIDEO_DELAY_MIN_FRAMES, 3);
+        assert_eq!(VIDEO_LIVE_LOOKBACK_MS, 250);
+        assert_eq!(VIDEO_LIVE_TOLERANCE_MS, 16);
+        assert_eq!(VIDEO_LIVE_MAX_WAIT_MS, 2000);
         assert_eq!(VIDEO_DELAY_RELAX_WINDOW_MS, 10_000);
         assert_eq!(VIDEO_DELAY_RELAX_MIN_MS, 50);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS

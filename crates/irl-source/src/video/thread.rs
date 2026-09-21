@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
+use irl_core::arrival::ArrivalFloor;
 use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacedFrame, PacingQueue};
 use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
@@ -128,6 +129,9 @@ pub struct VideoThread {
     /// this thread too late to be paced against the audio playout still can
     /// be. See [`Self::settle_anchor_candidate`].
     pub(crate) delay: VideoDelay,
+    /// Whether video arriving now is live or still catching up to live, which
+    /// decides whether a frame may size the delay before the anchor.
+    arrival: ArrivalFloor,
     /// The OBS canvas tick. Injectable so tests can drive pacing without a
     /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
     /// video state and faults when `obs_startup` never ran.
@@ -177,6 +181,11 @@ impl VideoThread {
             .with_relax(
                 consts::VIDEO_DELAY_RELAX_WINDOW_MS * 1_000_000,
                 consts::VIDEO_DELAY_RELAX_MIN_MS * 1_000_000,
+            ),
+            arrival: ArrivalFloor::new(
+                consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000,
+                consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
+                consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
             ),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
@@ -337,6 +346,7 @@ impl VideoThread {
         // Releases the decoder's surface before the next packet is sent.
         drop(frame);
         if let Some(f) = sysmem {
+            self.arrival.note(received_ns, f.pts());
             self.pacing.push(Paced::new(f, received_ns), due_ns);
         }
     }
@@ -530,7 +540,12 @@ impl VideoThread {
         ) {
             let on_time = now_ns as i64 - due_ns as i64 <= tick_ns as i64;
             let newest_in_hand = self.pacing.len() == 1 && self.shared.video.is_empty();
-            let raise = if newest_in_hand {
+            // With audio to be in sync with, only live video says anything
+            // about the sender: video still catching up to live (a relay
+            // replaying from its last keyframe next to live audio) is behind
+            // its audio for now, not for good.
+            let measurable = newest_in_hand && (!audio_present || self.arrival.live(now_ns));
+            let raise = if measurable {
                 self.delay
                     .before_anchor(due_ns as i64 - received_ns as i64, tick_ns, tick_ns)
             } else {
@@ -651,6 +666,7 @@ impl VideoThread {
 
     /// Forget the delay: a new connection or a cleared source sizes its own.
     fn reset_delay(&mut self) {
+        self.arrival.reset();
         self.delay.reset();
         self.shared.conn.video_delay_ns.store(0, Relaxed);
     }

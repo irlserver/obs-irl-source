@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod arrival;
 pub mod audio_buffer;
 pub mod config;
 pub mod consts;
