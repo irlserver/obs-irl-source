@@ -178,20 +178,8 @@ impl VideoThread {
             // A fresh source has libobs's `last_frame_ts` at 0 too.
             anchor_pending: true,
             anchor_wait: AnchorWait::Idle,
-            delay: VideoDelay::new(
-                consts::VIDEO_DELAY_MAX_MS * 1_000_000,
-                consts::VIDEO_DELAY_WINDOW_MS * 1_000_000,
-                consts::VIDEO_DELAY_MIN_FRAMES,
-            )
-            .with_relax(
-                consts::VIDEO_DELAY_RELAX_WINDOW_MS * 1_000_000,
-                consts::VIDEO_DELAY_RELAX_MIN_MS * 1_000_000,
-            ),
-            arrival: ArrivalFloor::new(
-                consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000,
-                consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
-                consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
-            ),
+            delay: VideoDelay::default(),
+            arrival: ArrivalFloor::default(),
             hold_built_seen_ns: None,
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,

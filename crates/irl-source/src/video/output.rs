@@ -12,7 +12,6 @@ use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
 use irl_core::{consts, video_time};
 use obs::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
-use crate::shared::LifetimeStats;
 use crate::video::thread::VideoThread;
 
 /// `AV_NUM_DATA_POINTERS` and libobs's `MAX_AV_PLANES`; both are 8.
@@ -326,7 +325,10 @@ impl VideoThread {
         // Keep the high-water mark too: stats are sampled every 30 s, and an
         // excursion that drains in ~17 s is very likely to fall between two
         // samples.
-        LifetimeStats::note_peak_i64(&self.shared.lifetime.video_lead_peak_ns, lead_ns);
+        self.shared
+            .lifetime
+            .video_lead_peak_ns
+            .fetch_max(lead_ns, Relaxed);
         if lead_ns > queue_safe_ns {
             self.shared.lifetime.video_lead_excess.fetch_add(1, Relaxed);
         }

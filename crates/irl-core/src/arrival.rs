@@ -24,6 +24,8 @@
 
 use std::collections::VecDeque;
 
+use crate::consts;
+
 /// The floor of `arrival - PTS` over a connection, with enough history to say
 /// whether it is still falling.
 #[derive(Debug)]
@@ -89,6 +91,17 @@ impl ArrivalFloor {
             return false; // not a lookback of history yet
         }
         floor_then_ns - self.floor_ns <= self.tolerance_ns
+    }
+}
+
+impl Default for ArrivalFloor {
+    /// The plugin's floor, from the `VIDEO_LIVE_*` constants.
+    fn default() -> Self {
+        Self::new(
+            consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000,
+            consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
+            consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
+        )
     }
 }
 

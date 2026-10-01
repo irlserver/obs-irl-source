@@ -32,7 +32,7 @@ use ffmpeg::Resampler;
 use irl_core::{SpeedCarry, SpeedController, SpeedInputs, consts, dsp, timing};
 
 use crate::audio::AudioSink;
-use crate::shared::{AudioState, LifetimeStats, Shared};
+use crate::shared::{AudioState, Shared};
 
 /// Audio-thread-owned state: the speed resampler, scratch buffers and the
 /// speed controller.
@@ -173,7 +173,10 @@ impl AudioPump {
         let chunk_count = peek.map_or(0, |s| s.chunk_count);
         // The receiver thread reads this for the stats line; the audio state
         // lock is held for the whole pump, so the publish is covered.
-        LifetimeStats::note_peak_i32(&shared.lifetime.audio_fill_peak_ms, fill_ms);
+        shared
+            .lifetime
+            .audio_fill_peak_ms
+            .fetch_max(fill_ms, Relaxed);
 
         if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
         {

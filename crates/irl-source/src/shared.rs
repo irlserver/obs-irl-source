@@ -101,7 +101,7 @@ pub struct RunFlags {
 }
 
 /// Everything the C guarded with `audio_state_lock` that is not a counter.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AudioState {
     // Output clock: `ts = anchor + samples / rate`, anchored once at prime.
     pub primed: bool,
@@ -172,45 +172,6 @@ pub struct AudioState {
     /// The pump may prime as far as the hold is concerned: a reading was
     /// taken, or the wait for one ran out.
     pub hold_wait_done: bool,
-}
-
-impl AudioState {
-    pub fn new(startup_warmup_ms: i32) -> Self {
-        Self {
-            primed: false,
-            anchor_ns: 0,
-            samples: 0,
-            latest_obs_end_ts_ns: 0,
-            latest_buffered_end_pts_ns: 0,
-            offset_baseline_ns: 0,
-            offset_baseline_set: false,
-            out_last: LastSample::default(),
-            conceal_fade_pending: false,
-            fade_in_pending: false,
-            fade_in_frames_remaining: 0,
-            startup_warmup_remaining_ms: startup_warmup_ms,
-            decoded_frame_samples: 0,
-            latest_audio_stream_pts_ns: 0,
-            latest_video_stream_pts_ns: 0,
-            recovery_until_us: 0,
-            drain: DrainWatch::default(),
-            speed_trim: SpeedTrim::new(),
-            speed_carry: SpeedCarry::new(),
-            align_read_pending: false,
-            hold: AudioHold::default(),
-            hold_live: ArrivalFloor::new(
-                irl_core::consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000,
-                irl_core::consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
-                irl_core::consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
-            ),
-            hold_ms: 0,
-            hold_unbuilt_ns: 0,
-            hold_built_ns: 0,
-            offset_baseline_hold_ms: 0,
-            hold_wait_since_ns: 0,
-            hold_wait_done: false,
-        }
-    }
 }
 
 /// Per-connection counters: zeroed with every new `Shared`.
@@ -295,17 +256,6 @@ pub struct LifetimeStats {
     pub audio_pkt_dropped: AtomicU64,
 }
 
-impl LifetimeStats {
-    /// `field = max(field, value)`.
-    pub fn note_peak_i32(field: &AtomicI32, value: i32) {
-        field.fetch_max(value, Relaxed);
-    }
-
-    pub fn note_peak_i64(field: &AtomicI64, value: i64) {
-        field.fetch_max(value, Relaxed);
-    }
-}
-
 /// The receiver → video queue: **compressed packets**, not decoded frames.
 ///
 /// This is where the stream's configured latency is held. Video has to be
@@ -324,6 +274,7 @@ impl LifetimeStats {
 /// Bounded by media duration and bytes. Overflow drops from the front, which
 /// costs artifacts until the next keyframe; it should not happen, because the
 /// receiver's own read backpressure stops ingest long before this fills.
+#[derive(Default)]
 pub struct VideoChannel {
     q: Mutex<VideoQueue>,
     cv: Condvar,
@@ -358,6 +309,7 @@ pub struct VideoDecoder {
     pub codec_id: ffmpeg::AVCodecID,
 }
 
+#[derive(Default)]
 struct VideoQueue {
     msgs: std::collections::VecDeque<VideoMsg>,
     packets: usize,
@@ -369,6 +321,16 @@ struct VideoQueue {
 }
 
 impl VideoQueue {
+    fn clear(&mut self) {
+        self.msgs.clear();
+        self.packets = 0;
+        self.bytes = 0;
+    }
+
+    fn has_work(&self, has_room: bool) -> bool {
+        self.clear_pending || (has_room && !self.msgs.is_empty())
+    }
+
     /// Media time between the oldest and newest queued packet.
     fn span_ns(&self) -> i64 {
         let mut first = None;
@@ -387,18 +349,6 @@ impl VideoQueue {
 }
 
 impl VideoChannel {
-    pub fn new() -> Self {
-        Self {
-            q: Mutex::new(VideoQueue {
-                msgs: std::collections::VecDeque::new(),
-                packets: 0,
-                bytes: 0,
-                clear_pending: false,
-            }),
-            cv: Condvar::new(),
-        }
-    }
-
     /// Receiver thread: hand the video thread the decoder for a new
     /// connection.
     pub fn install_decoder(&self, decoder: VideoDecoder) {
@@ -431,8 +381,9 @@ impl VideoChannel {
             }
         }
 
-        let depth = q.packets as i32;
-        LifetimeStats::note_peak_i32(&lifetime.video_queue_peak, depth);
+        lifetime
+            .video_queue_peak
+            .fetch_max(q.packets as i32, Relaxed);
         drop(q);
         self.cv.notify_one();
     }
@@ -441,9 +392,7 @@ impl VideoChannel {
     /// video thread to clear the OBS frame.
     pub fn request_clear(&self) {
         let mut q = self.q.lock();
-        q.msgs.clear();
-        q.packets = 0;
-        q.bytes = 0;
+        q.clear();
         q.clear_pending = true;
         drop(q);
         self.cv.notify_one();
@@ -499,8 +448,7 @@ impl VideoChannel {
     /// channel carries the whole configured latency as packets, is the *normal*
     /// steady state at any Target Buffer above that lead.
     pub fn has_work(&self, has_room: bool) -> bool {
-        let q = self.q.lock();
-        q.clear_pending || (has_room && !q.msgs.is_empty())
+        self.q.lock().has_work(has_room)
     }
 
     /// Video thread pacing sleep: returns as soon as there is work, or the run
@@ -509,8 +457,7 @@ impl VideoChannel {
     /// OBS clock every cycle.
     pub fn wait(&self, timeout: Duration, has_room: bool, active: &AtomicBool) {
         let mut q = self.q.lock();
-        let work = q.clear_pending || (has_room && !q.msgs.is_empty());
-        if !work && active.load(Relaxed) {
+        if !q.has_work(has_room) && active.load(Relaxed) {
             self.cv.wait_for(&mut q, timeout);
         }
     }
@@ -522,16 +469,7 @@ impl VideoChannel {
 
     /// Receiver stop: drain everything.
     pub fn drain(&self) {
-        let mut q = self.q.lock();
-        q.msgs.clear();
-        q.packets = 0;
-        q.bytes = 0;
-    }
-}
-
-impl Default for VideoChannel {
-    fn default() -> Self {
-        Self::new()
+        self.q.lock().clear();
     }
 }
 
@@ -569,9 +507,12 @@ impl Shared {
         );
         Arc::new(Self {
             source,
-            audio_state: Mutex::new(AudioState::new(irl_core::consts::STARTUP_AUDIO_WARMUP_MS)),
+            audio_state: Mutex::new(AudioState {
+                startup_warmup_remaining_ms: irl_core::consts::STARTUP_AUDIO_WARMUP_MS,
+                ..AudioState::default()
+            }),
             audio_buf: Mutex::new(None),
-            video: VideoChannel::new(),
+            video: VideoChannel::default(),
             video_flags: VideoFlags::default(),
             conn: ConnStats::default(),
             lifetime,

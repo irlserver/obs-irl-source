@@ -40,6 +40,8 @@
 //! queue before its due time passes. Asking every frame for the lead would
 //! delay a healthy stream by the lead for nothing.
 
+use crate::consts;
+
 /// One change of the delay, for the caller to log and mirror into the stats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DelayRaise {
@@ -132,8 +134,9 @@ impl VideoDelay {
 
     /// Let the delay ramp back down when every frame across `window_ns`
     /// needed less than it by more than `min_ns`.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_relax(mut self, window_ns: u64, min_ns: u64) -> Self {
+    fn with_relax(mut self, window_ns: u64, min_ns: u64) -> Self {
         self.relax_window_ns = window_ns;
         self.relax_min_ns = min_ns;
         self
@@ -345,6 +348,21 @@ impl VideoDelay {
             return None;
         }
         self.raise_to(window.worst_ns, window.frames)
+    }
+}
+
+impl Default for VideoDelay {
+    /// The plugin's delay, from the `VIDEO_DELAY_*` constants, relaxing on.
+    fn default() -> Self {
+        Self {
+            relax_window_ns: consts::VIDEO_DELAY_RELAX_WINDOW_MS * 1_000_000,
+            relax_min_ns: consts::VIDEO_DELAY_RELAX_MIN_MS * 1_000_000,
+            ..Self::new(
+                consts::VIDEO_DELAY_MAX_MS * 1_000_000,
+                consts::VIDEO_DELAY_WINDOW_MS * 1_000_000,
+                consts::VIDEO_DELAY_MIN_FRAMES,
+            )
+        }
     }
 }
 
