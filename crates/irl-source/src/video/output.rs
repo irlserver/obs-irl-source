@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
-use irl_core::{consts, video_time};
+use irl_core::{consts, timing, video_time};
 use obs::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
 use crate::video::thread::VideoThread;
@@ -339,8 +339,11 @@ impl VideoThread {
 
         // Only a risk while the lead is still climbing — a steady lead of any
         // size is free — so this is a "watch this" line, not a fault.
-        if now.saturating_sub(self.lead_warn_time_ns) >= consts::VIDEO_LEAD_WARN_INTERVAL_NS {
-            self.lead_warn_time_ns = now;
+        if timing::throttle(
+            &mut self.lead_warn_time_ns,
+            now,
+            consts::VIDEO_LEAD_WARN_INTERVAL_NS,
+        ) {
             irl_info!(
                 "Video lead {}ms is beyond what OBS can queue ({}ms at {:.0}fps); harmless while it holds steady, but a rise of that size would make OBS drop queued video",
                 lead_ns / 1_000_000,

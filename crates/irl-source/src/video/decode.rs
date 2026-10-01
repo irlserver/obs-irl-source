@@ -10,18 +10,10 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use irl_core::consts;
+use irl_core::{consts, timing};
 
 use crate::shared::{Shared, VideoDecoder};
 use crate::video::intake::{self, DecodeState};
-
-fn should_log_warning(last_warning_us: &mut u64, now_us: u64) -> bool {
-    if *last_warning_us != 0 && now_us - *last_warning_us < consts::DECODER_WARNING_INTERVAL_US {
-        return false;
-    }
-    *last_warning_us = now_us;
-    true
-}
 
 fn note_decode_error(shared: &Shared, state: &mut DecodeState, stage: &str) {
     state.decode_errors += 1;
@@ -30,7 +22,11 @@ fn note_decode_error(shared: &Shared, state: &mut DecodeState, stage: &str) {
         return;
     }
     let now_us = ffmpeg::gettime_us() as u64;
-    if should_log_warning(&mut state.last_warning_us, now_us) {
+    if timing::throttle(
+        &mut state.last_warning_us,
+        now_us,
+        consts::DECODER_WARNING_INTERVAL_US,
+    ) {
         irl_warn!(
             "Video decoder {stage}: corruption burst ({} consecutive errors), waiting for the next keyframe",
             state.decode_errors

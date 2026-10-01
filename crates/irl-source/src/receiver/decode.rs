@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::{CodecContext, Frame, Rational};
-use irl_core::consts;
+use irl_core::{consts, timing};
 
 use crate::audio;
 use crate::receiver::audio_in::AudioIntake;
@@ -15,23 +15,45 @@ use crate::shared::{Shared, TimedPacket};
 /// duration bound.
 const NS_TIME_BASE: Rational = Rational::new(1, 1_000_000_000);
 
-fn should_log_decoder_warning(last_warning_time_us: &mut u64, now_us: u64) -> bool {
-    if *last_warning_time_us != 0
-        && now_us - *last_warning_time_us < consts::DECODER_WARNING_INTERVAL_US
-    {
-        return false;
+/// Count one audio decode error. At a burst, log it (rate limited) and flush
+/// the decoder unless a flush is cooling down; returns when it flushed.
+fn audio_error_burst(
+    dec: &mut CodecContext,
+    shared: &Shared,
+    flags: &mut ReceiverFlags,
+    stage: &str,
+    flushing: &str,
+    cooling: &str,
+) -> Option<u64> {
+    flags.audio_decode_errors += 1;
+    if flags.audio_decode_errors < consts::DECODER_ERROR_BURST {
+        return None;
     }
-    *last_warning_time_us = now_us;
-    true
-}
-
-fn should_flush_decoder(last_flush_time_us: &mut u64, now_us: u64) -> bool {
-    if *last_flush_time_us != 0 && now_us - *last_flush_time_us < consts::DECODER_FLUSH_COOLDOWN_US
-    {
-        return false;
+    let now_us = ffmpeg::gettime_us() as u64;
+    let do_flush = timing::throttle(
+        &mut flags.audio_last_decoder_flush_time_us,
+        now_us,
+        consts::DECODER_FLUSH_COOLDOWN_US,
+    );
+    if timing::throttle(
+        &mut flags.audio_last_decoder_warning_time_us,
+        now_us,
+        consts::DECODER_WARNING_INTERVAL_US,
+    ) {
+        irl_warn!(
+            "Audio decoder{stage}: corruption burst ({} consecutive errors){}",
+            flags.audio_decode_errors,
+            if do_flush { flushing } else { cooling }
+        );
     }
-    *last_flush_time_us = now_us;
-    true
+    flags.audio_decode_errors = 0;
+    if !do_flush {
+        return None;
+    }
+    dec.flush();
+    shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
+    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
+    Some(now_us)
 }
 
 /// Drain everything the audio decoder has ready.
@@ -47,44 +69,27 @@ fn drain_audio_frames(
         match dec.receive_frame(frame) {
             Err(err) if err.is_eagain() || err.is_eof() => return,
             Err(_) => {
-                flags.audio_decode_errors += 1;
-                if flags.audio_decode_errors >= consts::DECODER_ERROR_BURST {
-                    let now_us = ffmpeg::gettime_us() as u64;
-                    let do_flush =
-                        should_flush_decoder(&mut flags.audio_last_decoder_flush_time_us, now_us);
-                    if should_log_decoder_warning(
-                        &mut flags.audio_last_decoder_warning_time_us,
-                        now_us,
-                    ) {
-                        irl_warn!(
-                            "Audio decoder receive: corruption burst ({} consecutive errors){}",
-                            flags.audio_decode_errors,
-                            if do_flush {
-                                ", resetting audio state"
-                            } else {
-                                ", reset cooldown active"
-                            }
+                if let Some(now_us) = audio_error_burst(
+                    dec,
+                    shared,
+                    flags,
+                    " receive",
+                    ", resetting audio state",
+                    ", reset cooldown active",
+                ) {
+                    {
+                        let mut state = shared.audio_state();
+                        if let Some(buf) = shared.audio_buf().as_mut() {
+                            buf.flush();
+                        }
+                        audio::reset_audio_timing_state(shared, &mut state);
+                        audio::mark_audio_recovery(
+                            &mut state,
+                            now_us,
+                            consts::AUDIO_RESET_RECOVERY_HOLD_US,
                         );
                     }
-                    if do_flush {
-                        dec.flush();
-                        shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
-                        shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                        {
-                            let mut state = shared.audio_state();
-                            if let Some(buf) = shared.audio_buf().as_mut() {
-                                buf.flush();
-                            }
-                            audio::reset_audio_timing_state(shared, &mut state);
-                            audio::mark_audio_recovery(
-                                &mut state,
-                                now_us,
-                                consts::AUDIO_RESET_RECOVERY_HOLD_US,
-                            );
-                        }
-                        audio_in.init_pts_repair(audio_tb);
-                    }
-                    flags.audio_decode_errors = 0;
+                    audio_in.init_pts_repair(audio_tb);
                 }
                 return;
             }
@@ -142,32 +147,14 @@ impl Receiver {
 
         match &result {
             Err(err) if !err.is_eagain() && !err.is_eof() => {
-                flags.audio_decode_errors += 1;
-                if flags.audio_decode_errors >= consts::DECODER_ERROR_BURST {
-                    let now_us = ffmpeg::gettime_us() as u64;
-                    let do_flush =
-                        should_flush_decoder(&mut flags.audio_last_decoder_flush_time_us, now_us);
-                    if should_log_decoder_warning(
-                        &mut flags.audio_last_decoder_warning_time_us,
-                        now_us,
-                    ) {
-                        irl_warn!(
-                            "Audio decoder: corruption burst ({} consecutive errors){}",
-                            flags.audio_decode_errors,
-                            if do_flush {
-                                ", flushing"
-                            } else {
-                                ", suppressing repeated flush"
-                            }
-                        );
-                    }
-                    if do_flush {
-                        dec.flush();
-                        shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
-                        shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                    }
-                    flags.audio_decode_errors = 0;
-                }
+                audio_error_burst(
+                    dec,
+                    shared,
+                    flags,
+                    "",
+                    ", flushing",
+                    ", suppressing repeated flush",
+                );
             }
             _ => flags.audio_decode_errors = 0,
         }

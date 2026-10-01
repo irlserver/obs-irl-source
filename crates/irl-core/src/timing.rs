@@ -145,6 +145,20 @@ pub fn frames_to_ns(frames: u64, rate: u32) -> u64 {
     (frames as u128 * 1_000_000_000 / rate as u128) as u64
 }
 
+/// Rate limit: true, and `last` moves to `now`, unless the previous pass was
+/// less than `interval` ago. A zero `last` has never passed, so the first call
+/// always does. Units are the caller's, as long as all three agree.
+///
+/// The difference wraps: `av_gettime` is wall clock, and a step backwards must
+/// not suppress a decoder flush until the clock has caught up again.
+pub fn throttle(last: &mut u64, now: u64, interval: u64) -> bool {
+    if *last != 0 && now.wrapping_sub(*last) < interval {
+        return false;
+    }
+    *last = now;
+    true
+}
+
 #[cfg(test)]
 mod alignment_tests {
     use super::*;
@@ -354,5 +368,17 @@ mod tests {
         assert_eq!(output_lead_ns(960, 0, false), 80_000_000);
         assert_eq!(output_lead_ns(960, 0, true), 0);
         assert_eq!(output_lead_ns(0, 48_000, false), 80_000_000);
+    }
+
+    #[test]
+    fn throttle_passes_first_then_once_per_interval() {
+        let mut last = 0;
+        assert!(throttle(&mut last, 5, 10));
+        assert!(!throttle(&mut last, 14, 10));
+        assert_eq!(last, 5);
+        assert!(throttle(&mut last, 15, 10));
+        assert_eq!(last, 15);
+        // A clock stepped back behind the last pass does not hold it shut.
+        assert!(throttle(&mut last, 3, 10));
     }
 }
