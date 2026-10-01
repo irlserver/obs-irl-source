@@ -30,7 +30,7 @@ pub fn set_pointer(module: *mut obs_sys::obs_module_t) {
 
 /// The pointer stored by [`set_pointer`] (the C `obs_current_module()`).
 #[must_use]
-pub fn current_module() -> *mut obs_sys::obs_module_t {
+pub(crate) fn current_module() -> *mut obs_sys::obs_module_t {
     MODULE.load(Ordering::Acquire)
 }
 

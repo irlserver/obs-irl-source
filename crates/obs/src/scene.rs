@@ -6,35 +6,22 @@ use core::ptr::NonNull;
 use crate::panic::guard;
 use crate::source::SourceHandle;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The subset of `enum obs_bounds_type` the plugin sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundsType {
-    #[default]
-    None,
-    Stretch,
     ScaleInner,
-    ScaleOuter,
-    ScaleToWidth,
-    ScaleToHeight,
-    MaxOnly,
 }
 
 impl BoundsType {
     fn to_sys(self) -> obs_sys::obs_bounds_type {
-        use obs_sys::obs_bounds_type as B;
         match self {
-            Self::None => B::OBS_BOUNDS_NONE,
-            Self::Stretch => B::OBS_BOUNDS_STRETCH,
-            Self::ScaleInner => B::OBS_BOUNDS_SCALE_INNER,
-            Self::ScaleOuter => B::OBS_BOUNDS_SCALE_OUTER,
-            Self::ScaleToWidth => B::OBS_BOUNDS_SCALE_TO_WIDTH,
-            Self::ScaleToHeight => B::OBS_BOUNDS_SCALE_TO_HEIGHT,
-            Self::MaxOnly => B::OBS_BOUNDS_MAX_ONLY,
+            Self::ScaleInner => obs_sys::obs_bounds_type::OBS_BOUNDS_SCALE_INNER,
         }
     }
 }
 
 /// `struct obs_transform_info` in Rust terms.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TransformInfo {
     pub pos: (f32, f32),
     pub rot: f32,
@@ -76,10 +63,6 @@ impl TransformInfo {
 pub struct VideoInfo {
     pub base_width: u32,
     pub base_height: u32,
-    pub output_width: u32,
-    pub output_height: u32,
-    pub fps_num: u32,
-    pub fps_den: u32,
 }
 
 /// `obs_get_video_info` (through the slack wrapper).
@@ -102,10 +85,6 @@ pub fn get_video_info() -> Option<VideoInfo> {
     Some(VideoInfo {
         base_width: ovi.base_width,
         base_height: ovi.base_height,
-        output_width: ovi.output_width,
-        output_height: ovi.output_height,
-        fps_num: ovi.fps_num,
-        fps_den: ovi.fps_den,
     })
 }
 

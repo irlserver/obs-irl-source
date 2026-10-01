@@ -17,8 +17,6 @@ use crate::panic::guard;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextType {
     Default,
-    Password,
-    Multiline,
     Info,
 }
 
@@ -27,52 +25,7 @@ impl TextType {
         use obs_sys::obs_text_type as T;
         match self {
             Self::Default => T::OBS_TEXT_DEFAULT,
-            Self::Password => T::OBS_TEXT_PASSWORD,
-            Self::Multiline => T::OBS_TEXT_MULTILINE,
             Self::Info => T::OBS_TEXT_INFO,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComboFormat {
-    Int,
-    String,
-}
-
-impl ComboFormat {
-    fn to_sys(self) -> obs_sys::obs_combo_format {
-        use obs_sys::obs_combo_format as F;
-        match self {
-            Self::Int => F::OBS_COMBO_FORMAT_INT,
-            Self::String => F::OBS_COMBO_FORMAT_STRING,
-        }
-    }
-}
-
-/// Which combo widget a string list is drawn as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComboType {
-    /// A plain dropdown. Stores the selected item's *value* while displaying
-    /// its name, which is what lets an entry read "Relay 3" and resolve to a
-    /// URL.
-    ///
-    /// When the saved value matches no item and the list is non-empty, the
-    /// frontend writes item 0 back into settings on dialog open. A list bound
-    /// to a key that can legitimately hold an off-list value therefore needs an
-    /// item whose value is the empty string.
-    List,
-    /// A dropdown the user can also type into. Stores the *displayed text*, so
-    /// its item names must equal their values.
-    Editable,
-}
-
-impl ComboType {
-    fn to_sys(self) -> obs_sys::obs_combo_type {
-        use obs_sys::obs_combo_type as T;
-        match self {
-            Self::List => T::OBS_COMBO_TYPE_LIST,
-            Self::Editable => T::OBS_COMBO_TYPE_EDITABLE,
         }
     }
 }
@@ -196,7 +149,7 @@ impl Property<'_> {
 }
 
 /// `obs_properties_t` being built. Ownership passes to libobs when the
-/// `get_properties` shim returns [`Properties::into_raw`].
+/// `get_properties` shim returns `Properties::into_raw`.
 #[derive(Debug)]
 pub struct Properties(NonNull<obs_sys::obs_properties_t>);
 
@@ -298,7 +251,7 @@ impl Properties {
                 id.as_ptr(),
                 description.as_ptr(),
                 obs_sys::obs_combo_type::OBS_COMBO_TYPE_LIST,
-                ComboFormat::Int.to_sys(),
+                obs_sys::obs_combo_format::OBS_COMBO_FORMAT_INT,
             )
         };
         IntList(
@@ -307,13 +260,16 @@ impl Properties {
         )
     }
 
-    /// `obs_properties_add_list(..., OBS_COMBO_FORMAT_STRING)`.
-    pub fn add_string_list(
-        &self,
-        id: &CStr,
-        description: &CStr,
-        kind: ComboType,
-    ) -> StringList<'_> {
+    /// `obs_properties_add_list(..., OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING)`:
+    /// a plain dropdown. It stores the selected item's *value* while
+    /// displaying its name, which is what lets an entry read "Relay 3" and
+    /// resolve to a URL.
+    ///
+    /// When the saved value matches no item and the list is non-empty, the
+    /// frontend writes item 0 back into settings on dialog open. A list bound
+    /// to a key that can legitimately hold an off-list value therefore needs an
+    /// item whose value is the empty string.
+    pub fn add_string_list(&self, id: &CStr, description: &CStr) -> StringList<'_> {
         // SAFETY: as above; the property belongs to this properties object,
         // which the returned StringList borrows.
         let ptr = unsafe {
@@ -321,22 +277,14 @@ impl Properties {
                 self.0.as_ptr(),
                 id.as_ptr(),
                 description.as_ptr(),
-                kind.to_sys(),
-                ComboFormat::String.to_sys(),
+                obs_sys::obs_combo_type::OBS_COMBO_TYPE_LIST,
+                obs_sys::obs_combo_format::OBS_COMBO_FORMAT_STRING,
             )
         };
         StringList(
             NonNull::new(ptr).expect("obs_properties_add_list returned NULL"),
             PhantomData,
         )
-    }
-
-    /// `obs_properties_get`: a property added earlier in this build, for
-    /// setting its initial visibility.
-    pub fn get(&self, id: &CStr) -> Option<Property<'_>> {
-        // SAFETY: live handle owned by `self`; `id` is NUL-terminated.
-        let ptr = unsafe { obs_sys::obs_properties_get(self.0.as_ptr(), id.as_ptr()) };
-        NonNull::new(ptr).map(|p| Property(p, PhantomData))
     }
 
     /// `obs_properties_add_button`, calling `A::clicked` on press.
@@ -354,7 +302,7 @@ impl Properties {
     }
 
     /// Hand ownership to libobs. Every `get_properties` shim ends here.
-    pub fn into_raw(self) -> *mut obs_sys::obs_properties_t {
+    pub(crate) fn into_raw(self) -> *mut obs_sys::obs_properties_t {
         let this = core::mem::ManuallyDrop::new(self);
         this.0.as_ptr()
     }
@@ -391,8 +339,8 @@ pub struct StringList<'p>(
 );
 
 impl StringList<'_> {
-    /// `obs_property_list_add_string`. See [`ComboType`] for which of `name`
-    /// and `value` the frontend stores.
+    /// `obs_property_list_add_string`. The frontend stores `value` and
+    /// displays `name`.
     pub fn add(&self, name: &CStr, value: &CStr) {
         // SAFETY: the property is alive for `'p` (owned by the Properties this
         // borrows); libobs copies both strings.

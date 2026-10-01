@@ -15,7 +15,7 @@ pub enum Level {
 
 /// Emit one log line through libobs. `msg` is passed as the `%s` argument, so
 /// it may contain anything (including `%`).
-pub fn blog(level: Level, msg: &str) {
+pub(crate) fn blog(level: Level, msg: &str) {
     // An interior NUL would truncate the line at best and, via CString's
     // error path, drop it entirely. Replacing keeps the message readable and
     // keeps this function infallible, which matters because it is the last

@@ -2,10 +2,11 @@
 //!
 //! This crate is the unsafe boundary for everything libobs: every raw pointer,
 //! every `extern "C"` shim and every `catch_unwind` lives here. It knows
-//! nothing about IRL streaming; the API is shaped by what an async-video +
-//! audio input source needs (registration, settings, properties, output,
-//! proc handlers, scene transforms, the obs-websocket vendor API), and can be
-//! reused by other plugins as is.
+//! nothing about IRL streaming, but it is not a general libobs binding either:
+//! it carries exactly what this plugin's async-video + audio input source uses
+//! (registration, settings, properties, output, proc handlers, scene
+//! transforms, the obs-websocket vendor API), and an API the plugin stops
+//! calling is removed rather than kept for a hypothetical other caller.
 //!
 //! Conventions:
 //! - Every `extern "C"` function exported or handed to libobs is wrapped in
@@ -32,13 +33,11 @@ pub use audio::{AudioFormat, AudioFrame, SpeakerLayout};
 pub use data::{Data, DataArray, OwnedData};
 pub use proc::{CallData, ProcCallback, ProcHandler};
 pub use properties::{
-    ClickAction, ComboFormat, ComboType, IntList, IntProperty, ModifiedAction, Properties,
-    PropertiesRef, Property, StringList, TextType,
+    ClickAction, IntList, IntProperty, ModifiedAction, Properties, PropertiesRef, Property,
+    StringList, TextType,
 };
 pub use scene::{BoundsType, Scene, SceneItem, TransformInfo, VideoInfo};
-pub use source::{
-    IconType, MediaState, OwnedSource, Source, SourceHandle, SourceType, register_source,
-};
+pub use source::{MediaState, OwnedSource, Source, SourceHandle, register_source};
 pub use video::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
 /// Re-exported so plugins can name raw types in the rare place they need to

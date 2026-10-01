@@ -11,11 +11,11 @@ pub struct Data<'a>(NonNull<obs_sys::obs_data_t>, PhantomData<&'a ()>);
 impl Data<'_> {
     /// # Safety
     /// `ptr` must be a live `obs_data_t` for `'a`.
-    pub unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::obs_data_t>) -> Data<'a> {
+    pub(crate) unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::obs_data_t>) -> Data<'a> {
         Data(ptr, PhantomData)
     }
 
-    pub fn as_ptr(&self) -> *mut obs_sys::obs_data_t {
+    pub(crate) fn as_ptr(&self) -> *mut obs_sys::obs_data_t {
         self.0.as_ptr()
     }
 
@@ -45,11 +45,6 @@ impl Data<'_> {
     pub fn get_bool(&self, key: &CStr) -> bool {
         // SAFETY: live handle, NUL-terminated key.
         unsafe { obs_sys::obs_data_get_bool(self.as_ptr(), key.as_ptr()) }
-    }
-
-    pub fn get_f64(&self, key: &CStr) -> f64 {
-        // SAFETY: live handle, NUL-terminated key.
-        unsafe { obs_sys::obs_data_get_double(self.as_ptr(), key.as_ptr()) }
     }
 
     pub fn set_str(&self, key: &CStr, value: &CStr) {
@@ -114,7 +109,7 @@ impl OwnedData {
 
     /// # Safety
     /// `ptr` must be an `obs_data_t` whose reference this value now owns.
-    pub unsafe fn from_raw(ptr: NonNull<obs_sys::obs_data_t>) -> Self {
+    pub(crate) unsafe fn from_raw(ptr: NonNull<obs_sys::obs_data_t>) -> Self {
         Self(ptr)
     }
 }
@@ -149,7 +144,7 @@ impl DataArray {
         unsafe { obs_sys::obs_data_array_push_back(self.as_ptr(), item.0.as_ptr()) };
     }
 
-    pub fn as_ptr(&self) -> *mut obs_sys::obs_data_array_t {
+    pub(crate) fn as_ptr(&self) -> *mut obs_sys::obs_data_array_t {
         self.0.as_ptr()
     }
 }

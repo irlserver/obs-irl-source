@@ -24,7 +24,7 @@ pub struct ProcHandler<'a>(NonNull<obs_sys::proc_handler_t>, PhantomData<&'a ()>
 impl ProcHandler<'_> {
     /// # Safety
     /// `ptr` must be a live proc handler for `'a`.
-    pub unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::proc_handler_t>) -> ProcHandler<'a> {
+    pub(crate) unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::proc_handler_t>) -> ProcHandler<'a> {
         ProcHandler(ptr, PhantomData)
     }
 
@@ -119,7 +119,7 @@ impl CallData {
 
     /// # Safety
     /// `ptr` must be a live `calldata_t` for the returned borrow.
-    pub unsafe fn from_raw_mut<'a>(ptr: *mut obs_sys::calldata_t) -> &'a mut Self {
+    pub(crate) unsafe fn from_raw_mut<'a>(ptr: *mut obs_sys::calldata_t) -> &'a mut Self {
         // CallData is #[repr(transparent)]-equivalent over calldata_t.
         unsafe { &mut *(ptr as *mut Self) }
     }
@@ -207,7 +207,7 @@ impl CallData {
             .then_some(v)
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut obs_sys::calldata_t {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut obs_sys::calldata_t {
         &mut self.0
     }
 }

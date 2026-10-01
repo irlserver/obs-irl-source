@@ -8,8 +8,7 @@ pub enum AudioFormat {
 }
 
 impl AudioFormat {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::audio_format {
+    fn to_sys(self) -> obs_sys::audio_format {
         match self {
             // Interleaved 32-bit float: the only format the plugin submits,
             // because swresample always converts to it first.

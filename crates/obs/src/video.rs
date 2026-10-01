@@ -40,23 +40,18 @@ impl VideoFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorSpace {
-    Default,
     Bt601,
     Bt709,
-    Srgb,
     Pq2100,
     Hlg2100,
 }
 
 impl ColorSpace {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::video_colorspace {
+    fn to_sys(self) -> obs_sys::video_colorspace {
         use obs_sys::video_colorspace as C;
         match self {
-            Self::Default => C::VIDEO_CS_DEFAULT,
             Self::Bt601 => C::VIDEO_CS_601,
             Self::Bt709 => C::VIDEO_CS_709,
-            Self::Srgb => C::VIDEO_CS_SRGB,
             Self::Pq2100 => C::VIDEO_CS_2100_PQ,
             Self::Hlg2100 => C::VIDEO_CS_2100_HLG,
         }
@@ -65,17 +60,14 @@ impl ColorSpace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorRange {
-    Default,
     Partial,
     Full,
 }
 
 impl ColorRange {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::video_range_type {
+    fn to_sys(self) -> obs_sys::video_range_type {
         use obs_sys::video_range_type as R;
         match self {
-            Self::Default => R::VIDEO_RANGE_DEFAULT,
             Self::Partial => R::VIDEO_RANGE_PARTIAL,
             Self::Full => R::VIDEO_RANGE_FULL,
         }
