@@ -8,9 +8,6 @@ use irl_core::{LastSample, PtsAction, PtsRepair, consts, dsp, timing};
 use crate::receiver::ReceiverFlags;
 use crate::shared::Shared;
 
-/// Bytes one interleaved float sample occupies (`sizeof(float)`).
-const BYTES_PER_SAMPLE: i32 = 4;
-
 /// Nanosecond time base.
 const NS_TB: Rational = Rational::new(1, 1_000_000_000);
 
@@ -23,10 +20,8 @@ pub struct AudioIntake {
     scratch: Vec<u8>,
     pts: Option<PtsRepair>,
     last_sample: LastSample,
-    /// Byte ⇄ float view for the silence shaping and the post-silence fade;
-    /// see the note on `audio::pump::FloatEdit` (this crate forbids the
-    /// unsafe cast, and both edits are off the steady-state path).
-    float: Vec<f32>,
+    /// Byte ⇄ float view for the silence shaping and the post-silence fade.
+    float: dsp::FloatEdit,
 }
 
 impl AudioIntake {
@@ -166,14 +161,14 @@ impl AudioIntake {
             in_scratch = true;
         }
 
-        let data_bytes = out_samples as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
+        let data_bytes = out_samples as usize * out_channels as usize * dsp::SAMPLE_BYTES;
         if data_bytes == 0 {
             return;
         }
 
         if inserted_silence {
             let channels = out_channels as usize;
-            edit_floats(&mut self.float, &mut self.scratch[..data_bytes], |pcm| {
+            self.float.edit(&mut self.scratch[..data_bytes], |pcm| {
                 dsp::apply_fade_in(pcm, channels, out_rate)
             });
         }
@@ -198,7 +193,7 @@ impl AudioIntake {
         if let Some(buf) = shared.audio_buf().as_mut() {
             buf.write_pts(data, frame_pts_ns);
         }
-        remember_last_sample(&mut self.last_sample, data, out_channels as usize);
+        self.last_sample.remember_bytes(data, out_channels as usize);
 
         let mut state = shared.audio_state();
         state.latest_audio_stream_pts_ns = frame_pts_ns;
@@ -257,12 +252,12 @@ impl AudioIntake {
         let reconfigured = {
             let mut guard = shared.audio_buf();
             match guard.as_mut() {
-                Some(buf) => buf.reconfigure(out_rate, out_channels, BYTES_PER_SAMPLE),
+                Some(buf) => buf.reconfigure(out_rate, out_channels, dsp::SAMPLE_BYTES as i32),
                 None => {
                     let buf = irl_core::AudioBuffer::new(
                         out_rate,
                         out_channels,
-                        BYTES_PER_SAMPLE,
+                        dsp::SAMPLE_BYTES as i32,
                         watermarks.target_ms,
                         watermarks.min_ms,
                         watermarks.max_ms,
@@ -313,7 +308,7 @@ impl AudioIntake {
             self.scratch.resize(silence_bytes, 0);
         }
         let last = self.last_sample;
-        edit_floats(&mut self.float, &mut self.scratch[..silence_bytes], |pcm| {
+        self.float.edit(&mut self.scratch[..silence_bytes], |pcm| {
             dsp::shape_silence_from_last(pcm, channels, rate, &last)
         });
 
@@ -360,7 +355,7 @@ impl AudioIntake {
         }
 
         let max_out = swr.out_samples(frame.nb_samples()) + soft_comp_samples.abs() + 32;
-        let need = max_out as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
+        let need = max_out as usize * out_channels as usize * dsp::SAMPLE_BYTES;
         if self.scratch.len() < need {
             self.scratch.resize(need, 0);
         }
@@ -383,39 +378,4 @@ fn audio_frame_duration_ms(samples: i32, sample_rate: i32) -> i32 {
     }
     let ms = samples as i64 * 1000 / sample_rate as i64;
     if ms <= 0 { 1 } else { ms as i32 }
-}
-
-/// `remember_last_sample` over an interleaved-float byte buffer.
-fn remember_last_sample(last: &mut LastSample, samples: &[u8], channels: usize) {
-    let mut values = [0.0f32; consts::AUDIO_MAX_CHANNELS];
-    let take = channels.min(consts::AUDIO_MAX_CHANNELS);
-    let frame_bytes = channels * BYTES_PER_SAMPLE as usize;
-    if channels == 0 || samples.len() < frame_bytes {
-        last.remember(&[], channels);
-        return;
-    }
-
-    let start = samples.len() - samples.len() % frame_bytes - frame_bytes;
-    for (ch, value) in values[..take].iter_mut().enumerate() {
-        let off = start + ch * BYTES_PER_SAMPLE as usize;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&samples[off..off + 4]);
-        *value = f32::from_le_bytes(raw);
-    }
-    last.remember(&values[..take], channels);
-}
-
-/// Run an `irl_core::dsp` edit over an interleaved-float byte buffer through a
-/// reusable float scratch (this crate forbids the unsafe view cast).
-fn edit_floats(scratch: &mut Vec<f32>, bytes: &mut [u8], edit: impl FnOnce(&mut [f32])) {
-    scratch.clear();
-    scratch.extend(bytes.chunks_exact(4).map(|chunk| {
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(chunk);
-        f32::from_le_bytes(raw)
-    }));
-    edit(scratch);
-    for (dst, value) in bytes.chunks_exact_mut(4).zip(scratch.iter()) {
-        dst.copy_from_slice(&value.to_le_bytes());
-    }
 }

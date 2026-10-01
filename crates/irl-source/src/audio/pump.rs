@@ -34,9 +34,6 @@ use irl_core::{SpeedCarry, SpeedController, SpeedInputs, consts, dsp, timing};
 use crate::audio::AudioSink;
 use crate::shared::{AudioState, LifetimeStats, Shared};
 
-/// Bytes one interleaved float sample occupies.
-const SAMPLE_BYTES: usize = 4;
-
 /// Audio-thread-owned state: the speed resampler, scratch buffers and the
 /// speed controller.
 pub struct AudioPump {
@@ -46,8 +43,8 @@ pub struct AudioPump {
     speed_scratch: Vec<u8>,
     pump_scratch: Vec<u8>,
     speed: SpeedController,
-    /// Byte ⇄ float view for the rare in-place edits (see [`FloatEdit`]).
-    float: FloatEdit,
+    /// Byte ⇄ float view for the rare in-place edits.
+    float: dsp::FloatEdit,
     /// The OBS clock. Injectable so tests can drive the output clock without
     /// a running libobs; production always reads `os_gettime_ns`.
     now_ns: Box<dyn Fn() -> u64 + Send>,
@@ -78,7 +75,7 @@ impl AudioPump {
             speed_scratch: Vec::new(),
             pump_scratch: Vec::new(),
             speed: SpeedController::new(),
-            float: FloatEdit::default(),
+            float: dsp::FloatEdit::default(),
             now_ns: Box::new(obs::time::gettime_ns),
             now_us: Box::new(|| ffmpeg::gettime_us() as u64),
             idle_sleep_ms: consts::AUDIO_PUMP_SLEEP_MS,
@@ -445,7 +442,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
             timestamp,
         ));
 
-        remember_last_sample(&mut state.out_last, emitted, channels);
+        state.out_last.remember_bytes(emitted, channels);
         super::hold::credit_build(
             state,
             timing::frames_to_ns(u64::from(frames_out), fmt.rate as u32),
@@ -564,7 +561,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
         }
         max_out += 32;
 
-        let need = max_out as usize * channels as usize * SAMPLE_BYTES;
+        let need = max_out as usize * channels as usize * dsp::SAMPLE_BYTES;
         ensure_scratch(scratch, need);
 
         let got = swr
@@ -842,65 +839,9 @@ fn finalize_audio_output(
     shared.conn.total_audio_frames.fetch_add(1, Relaxed);
 }
 
-/// `remember_last_sample` over an interleaved-float byte buffer: only the last
-/// frame is needed, so no whole-chunk decode happens here.
-fn remember_last_sample(last: &mut irl_core::LastSample, samples: &[u8], channels: usize) {
-    let mut values = [0.0f32; consts::AUDIO_MAX_CHANNELS];
-    let take = channels.min(consts::AUDIO_MAX_CHANNELS);
-    let frame_bytes = channels * SAMPLE_BYTES;
-    if channels == 0 || frame_bytes == 0 || samples.len() < frame_bytes {
-        // No frame to remember (or a nonsensical layout): clear, as C did.
-        last.remember(&[], channels);
-        return;
-    }
-
-    let at = samples.len() - samples.len() % frame_bytes;
-    let start = at - frame_bytes;
-    for (ch, value) in values[..take].iter_mut().enumerate() {
-        let off = start + ch * SAMPLE_BYTES;
-        *value = read_f32(&samples[off..off + SAMPLE_BYTES]);
-    }
-    // `channels > 8` reaches `remember` with a short slice, which is exactly
-    // the case the C rejected (`*dst_valid = false`).
-    last.remember(&values[..take], channels);
-}
-
-fn read_f32(bytes: &[u8]) -> f32 {
-    let mut raw = [0u8; SAMPLE_BYTES];
-    raw.copy_from_slice(bytes);
-    f32::from_le_bytes(raw)
-}
-
 /// Grow a scratch buffer to at least `need` bytes (`ensure_scratch`).
 fn ensure_scratch(buf: &mut Vec<u8>, need: usize) {
     if buf.len() < need {
         buf.resize(need, 0);
-    }
-}
-
-/// `irl_core::dsp` edits interleaved float in place, while the audio path
-/// carries bytes (what swresample and libobs both take) and this crate forbids
-/// the unsafe cast between the two views. The rare in-place edits —
-/// concealment shaping and the two splice fades — therefore decode into a
-/// reusable `f32` scratch, run the ported helper, and write the result back. A
-/// normal chunk is emitted untouched, so the steady-state copy count matches
-/// the C.
-#[derive(Default)]
-struct FloatEdit {
-    scratch: Vec<f32>,
-}
-
-impl FloatEdit {
-    fn edit(&mut self, bytes: &mut [u8], edit: impl FnOnce(&mut [f32])) {
-        self.scratch.clear();
-        self.scratch
-            .extend(bytes.chunks_exact(SAMPLE_BYTES).map(read_f32));
-        edit(&mut self.scratch);
-        for (dst, value) in bytes
-            .chunks_exact_mut(SAMPLE_BYTES)
-            .zip(self.scratch.iter())
-        {
-            dst.copy_from_slice(&value.to_le_bytes());
-        }
     }
 }
