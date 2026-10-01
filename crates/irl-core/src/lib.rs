@@ -32,7 +32,7 @@ pub use audio_buffer::{AudioBuffer, BufferState};
 pub use audio_hold::{AudioHold, HoldChange};
 pub use config::{HwDecode, Watermarks};
 pub use dsp::LastSample;
-pub use pacing::{DueVerdict, PacedFrame, PacingQueue};
+pub use pacing::{DueVerdict, PacingQueue};
 pub use pts_repair::{PtsAction, PtsRepair, Verdict};
 pub use speed::{
     DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,

@@ -17,7 +17,7 @@ use std::time::Duration;
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
 use irl_core::arrival::ArrivalFloor;
 use irl_core::consts;
-use irl_core::pacing::{DueVerdict, PacedFrame, PacingQueue};
+use irl_core::pacing::{DueVerdict, PacingQueue};
 use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
 
 use crate::shared::{Shared, VideoDecoder, VideoMsg};
@@ -25,31 +25,15 @@ use crate::video::VideoSink;
 use crate::video::decode;
 use crate::video::intake::DecodeState;
 
-/// A frame waiting for its due time. `pts_ns` and `bytes` are cached at
-/// intake: the pacing queue re-derives due times from the PTS every cycle, and
-/// the byte total bounds the queue. `received_ns` is when the packet it was
+/// A frame waiting for its due time. `received_ns` is when the packet it was
 /// decoded from reached this thread, which is what its arrival margin is
 /// measured from.
 pub struct Paced {
     frame: Frame,
-    pts_ns: i64,
-    bytes: usize,
     received_ns: u64,
 }
 
 impl Paced {
-    fn new(frame: Frame, received_ns: u64) -> Self {
-        let pts_ns = frame.pts();
-        // `av_image_get_buffer_size(fmt, w, h, 1)`, as `pacing_frame_bytes`.
-        let bytes = frame.image_buffer_size().unwrap_or(0);
-        Self {
-            frame,
-            pts_ns,
-            bytes,
-            received_ns,
-        }
-    }
-
     /// The system-memory frame itself.
     pub fn frame(&self) -> &Frame {
         &self.frame
@@ -58,16 +42,6 @@ impl Paced {
     /// OBS clock at which the packet behind this frame arrived.
     pub fn received_ns(&self) -> u64 {
         self.received_ns
-    }
-}
-
-impl PacedFrame for Paced {
-    fn pts_ns(&self) -> i64 {
-        self.pts_ns
-    }
-
-    fn bytes(&self) -> usize {
-        self.bytes
     }
 }
 
@@ -341,8 +315,15 @@ impl VideoThread {
         // Releases the decoder's surface before the next packet is sent.
         drop(frame);
         if let Some(f) = sysmem {
-            self.arrival.note(received_ns, f.pts());
-            self.pacing.push(Paced::new(f, received_ns), due_ns);
+            let pts_ns = f.pts();
+            self.arrival.note(received_ns, pts_ns);
+            // `av_image_get_buffer_size(fmt, w, h, 1)`, as `pacing_frame_bytes`.
+            let bytes = f.image_buffer_size().unwrap_or(0);
+            let paced = Paced {
+                frame: f,
+                received_ns,
+            };
+            self.pacing.push(paced, pts_ns, bytes, due_ns);
         }
     }
 
