@@ -318,9 +318,8 @@ pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 /// without end. It has to clear every skew a phone can produce, though: a
 /// video pipeline running a stabiliser has sent video 1.6 s behind its audio
 /// (#33), and past the ceiling the stream plays unpaced (see
-/// `VideoThread::settle_anchor_candidate`). Raising Target Buffer past the
-/// skew, or OBS's own Sync Offset on the source, is what puts it back in
-/// sync.
+/// `VideoThread::settle_anchor_candidate`). The audio hold
+/// (`irl_core::audio_hold`) is what puts a sender's skew back in sync.
 pub const VIDEO_DELAY_MAX_MS: u64 = 5000;
 /// After the play head is anchored, a raise of the video delay moves the
 /// picture, so late frames must recur across this window before one is made.
@@ -349,6 +348,36 @@ pub const VIDEO_DELAY_RELAX_WINDOW_MS: u64 = 10_000;
 /// Surplus delay below this is left alone: a ramp is not worth starting for
 /// a couple of canvas ticks.
 pub const VIDEO_DELAY_RELAX_MIN_MS: u64 = 50;
+/// How early, against its due time, video stamped exactly the measured skew
+/// behind its audio should be in hand once the audio hold
+/// (`irl_core::audio_hold`) is in force. Covers the chunk the buffer level
+/// dithers by, the frame-and-chunk granularity of the mux-order skew reading,
+/// frame reordering, and a canvas tick to decode in.
+pub const AUDIO_HOLD_MARGIN_MS: i32 = 100;
+/// Ceiling on the audio hold. The same as the video delay ceiling: past it
+/// the video delay paces the rest, as a lip-sync error, rather than the
+/// buffer chasing a sender whose skew has no bound.
+pub const AUDIO_HOLD_MAX_MS: i32 = 5000;
+/// Once audio plays, how long a skew must last, unbroken, before the hold is
+/// raised for it. Shorter bursts of late video are the video delay's to
+/// cover: paying for a hiccup in latency for the rest of the connection is
+/// the wrong trade.
+pub const AUDIO_HOLD_RAISE_WINDOW_MS: u64 = 2000;
+/// Raises smaller than this are not made once audio plays. The margin already
+/// covers a skew that creeps by a few milliseconds.
+pub const AUDIO_HOLD_RAISE_MIN_MS: i32 = 20;
+/// How long every skew reading must have needed less than the hold in force
+/// before the hold is released to what they needed. The same as the video
+/// delay's relax window, for the same reason.
+pub const AUDIO_HOLD_RELAX_WINDOW_MS: u64 = 10_000;
+/// Surplus hold below this is left alone.
+pub const AUDIO_HOLD_RELAX_MIN_MS: i32 = 50;
+/// How long audio that is ready to prime waits for the first skew reading,
+/// when the connection carries video, so the hold is in force from the first
+/// sample instead of being built at -2 % afterwards. Video counts as live
+/// within `VIDEO_LIVE_MAX_WAIT_MS` of its first packet, so this only runs out
+/// for a video stream that delivers nothing.
+pub const AUDIO_HOLD_PRIME_WAIT_MS: u64 = 2000;
 /// How long the last audio playout offset is reused after it goes away.
 pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 /// Video-only fallback: clamp on drift between stream and system clock.
@@ -493,6 +522,15 @@ mod tests {
         assert_eq!(VIDEO_LIVE_MAX_WAIT_MS, 2000);
         assert_eq!(VIDEO_DELAY_RELAX_WINDOW_MS, 10_000);
         assert_eq!(VIDEO_DELAY_RELAX_MIN_MS, 50);
+        // No C ancestor: the C played audio the moment its buffer held the
+        // target, whatever its video was doing.
+        assert_eq!(AUDIO_HOLD_MARGIN_MS, 100);
+        assert_eq!(AUDIO_HOLD_MAX_MS, 5000);
+        assert_eq!(AUDIO_HOLD_RAISE_WINDOW_MS, 2000);
+        assert_eq!(AUDIO_HOLD_RAISE_MIN_MS, 20);
+        assert_eq!(AUDIO_HOLD_RELAX_WINDOW_MS, 10_000);
+        assert_eq!(AUDIO_HOLD_RELAX_MIN_MS, 50);
+        assert_eq!(AUDIO_HOLD_PRIME_WAIT_MS, 2000);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
         assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667); // IRL_VIDEO_CANVAS_TICK_DEFAULT_NS
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS

@@ -261,6 +261,31 @@ impl VideoDelay {
         })
     }
 
+    /// The audio playout moved every due time `grown_ns` later because the
+    /// audio hold ([`crate::audio_hold`]) is building its cushion. Take as
+    /// much of that back out of the delay as there is, so due times stay
+    /// where they were and the lip-sync error the delay stands for shrinks by
+    /// the same amount; nothing on screen moves. Returns how much the delay
+    /// came down.
+    ///
+    /// Readings already taken were measured against the playout as it was,
+    /// so what they called for is `grown_ns` less now.
+    pub fn absorb(&mut self, grown_ns: u64) -> u64 {
+        let moved_ns = grown_ns.min(self.delay_ns);
+        self.delay_ns -= moved_ns;
+        if let Some(window) = self.window.as_mut() {
+            window.worst_ns = window.worst_ns.saturating_sub(grown_ns);
+        }
+        if let Some(surplus) = self.surplus.as_mut() {
+            surplus.worst_need_ns = surplus.worst_need_ns.saturating_sub(grown_ns);
+        }
+        if let Some(to_ns) = self.ramp_to_ns {
+            let to_ns = to_ns.saturating_sub(grown_ns);
+            self.ramp_to_ns = (to_ns < self.delay_ns).then_some(to_ns);
+        }
+        moved_ns
+    }
+
     /// A frame considered for anchoring the play head, `margin_ns` being its
     /// due time minus its packet's arrival. Nothing has been shown yet, so a
     /// shortfall against `want_ns` raises the delay at once.
@@ -610,6 +635,46 @@ mod tests {
         let after = d.delay_ns();
         assert_eq!(d.ramp(20_000_000_000, 0.05), None);
         assert_eq!(d.delay_ns(), after);
+    }
+
+    #[test]
+    fn audio_hold_growth_is_taken_out_of_the_delay() {
+        let mut d = delay();
+        d.before_anchor(-300_000_000, TICK, TICK).expect("raised");
+        let set = d.delay_ns();
+        assert_eq!(d.absorb(100_000_000), 100_000_000);
+        assert_eq!(d.delay_ns(), set - 100_000_000);
+        // Never below zero, and only what there was is reported.
+        assert_eq!(d.absorb(set), set - 100_000_000);
+        assert_eq!(d.delay_ns(), 0);
+        assert_eq!(d.absorb(TICK), 0);
+    }
+
+    #[test]
+    fn late_frames_seen_before_the_growth_need_that_much_less() {
+        let mut d = delay();
+        // Three frames 400 ms late across the window...
+        for i in 0..3u64 {
+            d.note(i * 400_000_000, -400_000_000, 0, TICK);
+        }
+        // ...then the audio playout grows by 300 ms before the verdict.
+        d.absorb(300_000_000);
+        let raise = d.expire(WINDOW + 1).expect("still short");
+        // What is left of the 400 ms the frames needed.
+        assert_eq!(raise.to_ns, 24 * TICK - 300_000_000);
+    }
+
+    #[test]
+    fn growth_moves_a_ramp_target_with_it() {
+        let mut d = relaxing();
+        d.before_anchor(-1_300_000_000, TICK, TICK).expect("raised");
+        run(&mut d, 1_000_000_000, 11, 100_000_000);
+        let ramping = d.delay_ns();
+        assert!(ramping > TICK, "a ramp is under way");
+        // Growth past the ramp's target ends it where the growth left it.
+        d.absorb(ramping);
+        assert_eq!(d.delay_ns(), 0);
+        assert_eq!(d.ramp(30_000_000_000, 0.05), None);
     }
 
     #[test]

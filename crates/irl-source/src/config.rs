@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use irl_core::{HwDecode, Watermarks, consts};
 use obs::Data;
 
-use crate::shared::{HotValues, Shared, StreamConfig};
+use crate::shared::{AudioState, HotValues, Shared, StreamConfig};
 
 /// NVDEC is only offered (and only compiled into the bundled FFmpeg) on
 /// Windows and Linux. A scene collection saved there can still carry the
@@ -96,29 +96,37 @@ impl Config {
     /// Lock order is the documented one: `audio_state`, then the jitter
     /// buffer, then the watermark mutex. Nothing below takes any of them.
     ///
-    /// The ring grows before the new watermarks are published, and they are
-    /// published only if that succeeded: the receiver's backpressure ceiling
-    /// is 3x `max_ms` and must never exceed ring capacity, or a burst between
-    /// fill checks would push writes past the end and drop audio. On failure
-    /// the old target stays in force — including in the caller's copy of the
-    /// config, which is why the effective watermarks are returned.
+    /// The published target is Target Buffer plus the connection's audio hold
+    /// (`audio::hold`), so a new Target Buffer is composed with the hold in
+    /// force before it is compared and published. On failure the old target
+    /// stays in force, including in the caller's copy of the config, which is
+    /// why the effective Target Buffer watermarks are returned.
     pub fn apply_hot(&self, shared: &Shared) -> Watermarks {
-        let _state = shared.audio_state();
+        let mut state = shared.audio_state();
 
+        let folded_ms = if shared.cfg.low_latency_audio {
+            0
+        } else {
+            state.hold_ms
+        };
         let current = shared.hot.watermarks();
-        let next = self.hot.watermarks;
-        let mut effective = current;
+        let user_current = Watermarks::derive(current.target_ms - folded_ms);
+        let user_next = self.hot.watermarks;
+        let mut effective = user_current;
 
-        if current.target_ms != next.target_ms {
-            let resized = match shared.audio_buf().as_mut() {
-                Some(buf) => buf.resize(next.target_ms, next.min_ms, next.max_ms),
-                // No audio frame has configured the ring yet; the first one
-                // sizes it from the watermarks published below.
-                None => true,
-            };
-            if resized {
-                *shared.hot.watermarks.lock() = next;
-                effective = next;
+        if user_current.target_ms != user_next.target_ms {
+            let next = Watermarks::derive(user_next.target_ms + folded_ms);
+            if publish_watermarks(shared, &state, next) {
+                effective = user_next;
+                // `derive` clamps to BUFFER_TARGET_MAX_MS, which a deeper
+                // Target Buffer can leave less room under for the hold.
+                let hold_ms = next.target_ms - user_next.target_ms;
+                if hold_ms < folded_ms {
+                    let cut_ns = u64::from(folded_ms.abs_diff(hold_ms)) * 1_000_000;
+                    state.hold_unbuilt_ns = state.hold_unbuilt_ns.saturating_sub(cut_ns);
+                    state.hold_ms = hold_ms;
+                    shared.conn.audio_hold_ms.store(hold_ms, Relaxed);
+                }
             } else {
                 irl_warn!(
                     "Could not resize jitter buffer to {}ms; keeping {}ms",
@@ -127,6 +135,7 @@ impl Config {
                 );
             }
         }
+        drop(state);
 
         shared
             .hot
@@ -151,4 +160,30 @@ impl Config {
 
         effective
     }
+}
+
+/// Grow the ring to `next` and publish it, in the documented lock order: the
+/// caller holds `audio_state` (the unused reference is the proof), this takes
+/// the jitter buffer and then the watermark mutex.
+///
+/// The ring grows before the new watermarks are published, and they are
+/// published only if that succeeded: the receiver's backpressure ceiling is
+/// 3x `max_ms` and must never exceed ring capacity, or a burst between fill
+/// checks would push writes past the end and drop audio. Returns whether the
+/// watermarks are now in force.
+pub(crate) fn publish_watermarks(
+    shared: &Shared,
+    _audio_state: &AudioState,
+    next: Watermarks,
+) -> bool {
+    let resized = match shared.audio_buf().as_mut() {
+        Some(buf) => buf.resize(next.target_ms, next.min_ms, next.max_ms),
+        // No audio frame has configured the ring yet; the first one sizes it
+        // from the watermarks published below.
+        None => true,
+    };
+    if resized {
+        *shared.hot.watermarks.lock() = next;
+    }
+    resized
 }

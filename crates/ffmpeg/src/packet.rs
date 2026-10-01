@@ -52,6 +52,19 @@ impl Packet {
             .find(|&v| v != ffmpeg_sys_next::AV_NOPTS_VALUE)
     }
 
+    /// Decode timestamp, falling back to the presentation timestamp, `None`
+    /// when neither is set. With frame reordering a packet carries a frame
+    /// that is shown later than the decoder can output what it completes, so
+    /// the decode timestamp is the one that says which moment of the stream
+    /// this packet's arrival makes available.
+    pub fn dts_or_pts(&self) -> Option<i64> {
+        // SAFETY: as above.
+        let (pts, dts) = unsafe { ((*self.0).pts, (*self.0).dts) };
+        [dts, pts]
+            .into_iter()
+            .find(|&v| v != ffmpeg_sys_next::AV_NOPTS_VALUE)
+    }
+
     /// A new packet sharing this one's buffer (`av_packet_ref`).
     ///
     /// The receiver reads every packet into one reusable `Packet` and unrefs

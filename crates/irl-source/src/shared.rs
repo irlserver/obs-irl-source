@@ -32,7 +32,10 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, MutexGuard};
 
-use irl_core::{AudioBuffer, DrainWatch, HwDecode, LastSample, SpeedCarry, SpeedTrim, Watermarks};
+use irl_core::arrival::ArrivalFloor;
+use irl_core::{
+    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, SpeedCarry, SpeedTrim, Watermarks,
+};
 
 /// Settings latched when the stream opens; changing any of them forces a
 /// restart (`config_requires_restart`).
@@ -99,6 +102,9 @@ pub struct RunFlags {
     /// `audio_stream_present`: "this connection carries audio", mirrored for
     /// the video thread, which must not touch `audio_stream_idx`.
     pub audio_present: AtomicBool,
+    /// "This connection carries video", for the audio pump, which waits for a
+    /// skew reading before it primes (`audio::hold::prime_may_wait`).
+    pub video_present: AtomicBool,
 }
 
 /// Everything the C guarded with `audio_state_lock` that is not a counter.
@@ -148,6 +154,31 @@ pub struct AudioState {
     /// buffer's residual grid instead of leaving the loop to straddle it. See
     /// [`irl_core::timing::aligning_read_frames`].
     pub align_read_pending: bool,
+
+    /// The audio hold (`irl_core::audio_hold`, wired in by `audio::hold`):
+    /// the skew readings, taken by the receiver as it reads each video packet.
+    pub hold: AudioHold,
+    /// Whether video read now is live rather than a relay's replay catching
+    /// up, which would read as skew.
+    pub hold_live: ArrivalFloor,
+    /// The hold in force, in ms. Outside low-latency mode it is folded into
+    /// the published watermarks: their target is Target Buffer plus this.
+    pub hold_ms: i32,
+    /// How much of the raises made since priming the buffer has yet to build.
+    pub hold_unbuilt_ns: u64,
+    /// Running total of what it has built, which is how far the playout
+    /// offset grew for the hold. The video thread takes the growth out of its
+    /// standing delay.
+    pub hold_built_ns: u64,
+    /// The hold when `offset_baseline_ns` was taken, so a re-anchor does not
+    /// read the hold building as concealment drift.
+    pub offset_baseline_hold_ms: i32,
+    /// When the pump first waited on a skew reading to prime; zero while it
+    /// has not.
+    pub hold_wait_since_ns: u64,
+    /// The pump may prime as far as the hold is concerned: a reading was
+    /// taken, or the wait for one ran out.
+    pub hold_wait_done: bool,
 }
 
 impl AudioState {
@@ -173,6 +204,18 @@ impl AudioState {
             speed_trim: SpeedTrim::new(),
             speed_carry: SpeedCarry::new(),
             align_read_pending: false,
+            hold: AudioHold::default(),
+            hold_live: ArrivalFloor::new(
+                irl_core::consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000,
+                irl_core::consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
+                irl_core::consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
+            ),
+            hold_ms: 0,
+            hold_unbuilt_ns: 0,
+            hold_built_ns: 0,
+            offset_baseline_hold_ms: 0,
+            hold_wait_since_ns: 0,
+            hold_wait_done: false,
         }
     }
 }
@@ -207,6 +250,8 @@ pub struct ConnStats {
     pub video_lead_ns: AtomicI64,
     /// Mirror of the video thread's standing delay, for the stats.
     pub video_delay_ns: AtomicU64,
+    /// Mirror of `AudioState::hold_ms`, for the stats and the video thread.
+    pub audio_hold_ms: AtomicI32,
     /// PTS of the newest video packet the receiver pushed, for `av_skew_ms`.
     /// Taken at arrival: the decoded-frame PTS trails it by however long the
     /// packet waited for its due time, which is not the sender's doing.
@@ -550,6 +595,7 @@ impl Shared {
                 thread_active,
                 reconnecting: AtomicBool::new(false),
                 audio_present: AtomicBool::new(false),
+                video_present: AtomicBool::new(false),
             },
             cfg,
         })

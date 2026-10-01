@@ -982,8 +982,9 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
 
-    // warm-up 150 + target 120 + lead 80 + margin 1000.
-    let give_up = now + 1_350_000_000;
+    // warm-up 150 + target 120 + lead 80 + the audio hold's wait for a skew
+    // reading 2000 + margin 1000.
+    let give_up = now + 3_350_000_000;
     thread.run_once(give_up - 1_000_000);
     assert!(recorder.emitted().is_empty(), "still inside the wait");
 
@@ -1458,6 +1459,80 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
         assert!(
             (FRAME * 9 / 10..=FRAME + 1).contains(&step),
             "frames {step}ns apart"
+        );
+    }
+}
+
+/// Once the audio hold rises for video that trails its audio, the speed
+/// controller builds it by playing slower, and the audio playout offset (with
+/// every due time mapped through it) grows until video is on time again. The
+/// standing delay covered that same lateness in the meantime, so each
+/// millisecond of growth is one it no longer needs: it hands it back as the
+/// hold builds. Due times stay exactly where they were, so the picture
+/// neither jumps nor changes speed while the lip-sync error the delay stood
+/// for drains to nothing.
+#[test]
+fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder) = thread_with(shared.clone());
+
+    // Every frame maps 300 ms into the past.
+    let t0 = obs::time::gettime_ns();
+    let late = 300_000_000;
+    publish_mapping(&shared, t0 - late, 10_000_000_000);
+    live_history(&mut thread, t0, 10_000_000_000);
+    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    first.set_pts(10_000_000_000);
+    thread.pace_decoded(first, t0);
+    thread.run_once(t0);
+    let set = shared.conn.video_delay_ns.load(Relaxed);
+    assert_eq!(set, (late + TICK).div_ceil(TICK) * TICK);
+
+    // The hold builds at -2 %: the offset grows by 2 % of each frame, and the
+    // pump credits the same growth as built.
+    let growth_per_frame = FRAME / 50;
+    let frames = 30 * 30u64;
+    let mut delays = Vec::new();
+    for i in 1..=frames {
+        let grown = i * growth_per_frame;
+        publish_mapping(&shared, t0 - late + grown, 10_000_000_000);
+        shared.audio_state().hold_built_ns = grown;
+        let arrival = t0 + i * FRAME;
+        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
+        thread.pace_decoded(frame, arrival);
+        thread.run_once(arrival);
+        delays.push(shared.conn.video_delay_ns.load(Relaxed));
+    }
+    // By now video is in hand early; let what is queued go out.
+    for k in 1..=30u64 {
+        thread.run_once(t0 + (frames + k) * FRAME);
+    }
+
+    assert!(
+        delays.windows(2).all(|w| w[1] <= w[0]),
+        "the delay only ever comes down"
+    );
+    assert_eq!(*delays.last().unwrap(), 0, "the hold took all of it");
+
+    // Every frame shown. While the delay hands itself back the frames go out
+    // exactly a frame apart: nothing on screen moves. After that they follow
+    // the playout as it keeps growing, a frame plus the growth apart, give or
+    // take the cycle a frame queued early happens to go out on.
+    let emitted = recorder.emitted();
+    assert_eq!(emitted.len() as u64, frames + 1, "no frame dropped");
+    for (n, pair) in emitted.windows(2).enumerate() {
+        let step = pair[1].timestamp - pair[0].timestamp;
+        let handing_back = delays[n] > 0;
+        let max_step = if handing_back {
+            FRAME + 1
+        } else {
+            FRAME + 2 * growth_per_frame + 1
+        };
+        assert!(
+            (FRAME - 1..=max_step).contains(&step),
+            "frames {n} and {} are {step}ns apart",
+            n + 1
         );
     }
 }

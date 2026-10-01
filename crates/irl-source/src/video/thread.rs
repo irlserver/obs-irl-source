@@ -132,6 +132,10 @@ pub struct VideoThread {
     /// Whether video arriving now is live or still catching up to live, which
     /// decides whether a frame may size the delay before the anchor.
     arrival: ArrivalFloor,
+    /// The audio pump's running total of hold built (`AudioState::
+    /// hold_built_ns`) as of the last cycle; `None` until the first read after
+    /// a reset. See [`Self::absorb_audio_hold`].
+    hold_built_seen_ns: Option<u64>,
     /// The OBS canvas tick. Injectable so tests can drive pacing without a
     /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
     /// video state and faults when `obs_startup` never ran.
@@ -187,6 +191,7 @@ impl VideoThread {
                 consts::VIDEO_LIVE_TOLERANCE_MS * 1_000_000,
                 consts::VIDEO_LIVE_MAX_WAIT_MS * 1_000_000,
             ),
+            hold_built_seen_ns: None,
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
         }
@@ -245,6 +250,7 @@ impl VideoThread {
         let slack_ns = self.emit_slack_ns();
 
         self.decode_intake();
+        self.absorb_audio_hold();
         // Before both the emit and the sleep below, so each cycle schedules
         // against the offset as it is now rather than as it was when the
         // frames were decoded.
@@ -466,9 +472,18 @@ impl VideoThread {
                 now_ns
             }
         };
+        // Outside low-latency mode the target carries the audio hold; in it,
+        // the hold is queued on its own.
+        let low_latency_hold_ms = if self.shared.cfg.low_latency_audio {
+            self.shared.conn.audio_hold_ms.load(Relaxed)
+        } else {
+            0
+        };
         let expected_ms = i64::from(consts::STARTUP_AUDIO_WARMUP_MS)
             + i64::from(self.shared.hot.watermarks().target_ms)
+            + i64::from(low_latency_hold_ms)
             + i64::from(consts::AUDIO_OUT_LEAD_MS)
+            + consts::AUDIO_HOLD_PRIME_WAIT_MS as i64
             + consts::VIDEO_ANCHOR_WAIT_MARGIN_MS;
         let waited_ms = (now_ns.saturating_sub(since_ns) / 1_000_000) as i64;
         if waited_ms < expected_ms {
@@ -602,13 +617,28 @@ impl VideoThread {
         let to_ms = raise.to_ns / 1_000_000;
         let by_ms = (raise.to_ns - raise.from_ns) / 1_000_000;
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
+        // Whether the audio hold can still move to cover this: it follows a
+        // sender that keeps its video behind its audio, by playing slower
+        // until the buffer holds the skew. A Sync Offset on top of that would
+        // correct the same skew twice, so it is only suggested where the hold
+        // cannot move.
+        let hold_follows =
+            !self.shared.cfg.low_latency_audio && self.shared.hot.adaptive_speed.load(Relaxed);
         match (at_anchor, audio_present) {
+            (true, true) if hold_follows => irl_warn!(
+                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. Audio is held back to match if the sender keeps its video this far behind; if the video delay stays, raise Target Buffer by at least {to_ms}ms"
+            ),
             (true, true) => irl_warn!(
                 "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms"
             ),
             (true, false) => {
                 irl_info!("Video reaches the plugin as it falls due; delaying video by {to_ms}ms")
             }
+            (false, true) if hold_follows => irl_warn!(
+                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. Audio is held back to match if the sender keeps its video this far behind; if the video delay stays, raise Target Buffer by at least {to_ms}ms",
+                raise.frames,
+                consts::VIDEO_DELAY_WINDOW_MS
+            ),
             (false, true) => irl_warn!(
                 "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms",
                 raise.frames,
@@ -664,10 +694,38 @@ impl VideoThread {
         }
     }
 
+    /// Take what the audio hold built since the last cycle out of the
+    /// standing delay.
+    ///
+    /// The hold grows the audio playout offset, and with it every video due
+    /// time, by playing audio slower until the buffer holds the raise. Video
+    /// that was late enough to need a delay was late against the old offset,
+    /// so each millisecond the offset grows is a millisecond of delay it no
+    /// longer needs. Taking it back here keeps due times exactly where they
+    /// were: the picture neither jumps nor changes speed, and the lip-sync
+    /// error the delay stands for drains as the sound slows into step with
+    /// it.
+    fn absorb_audio_hold(&mut self) {
+        let built_ns = self.shared.audio_state().hold_built_ns;
+        let Some(seen_ns) = self.hold_built_seen_ns.replace(built_ns) else {
+            return;
+        };
+        let grown_ns = built_ns.saturating_sub(seen_ns);
+        if grown_ns == 0 || self.delay.absorb(grown_ns) == 0 {
+            return;
+        }
+        let delay_ns = self.delay.delay_ns();
+        self.shared.conn.video_delay_ns.store(delay_ns, Relaxed);
+        if delay_ns == 0 {
+            irl_info!("Audio is held back far enough for its video; video delay back to 0ms");
+        }
+    }
+
     /// Forget the delay: a new connection or a cleared source sizes its own.
     fn reset_delay(&mut self) {
         self.arrival.reset();
         self.delay.reset();
+        self.hold_built_seen_ns = None;
         self.shared.conn.video_delay_ns.store(0, Relaxed);
     }
 

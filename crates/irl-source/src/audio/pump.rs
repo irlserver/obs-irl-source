@@ -229,12 +229,24 @@ impl AudioPump {
         }
 
         if !state.primed {
-            let prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
+            let mut prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
+            // Elsewhere the hold is part of the target already; low-latency
+            // mode has none, and keeps the hold queued instead.
+            if low_latency {
+                prime_ms += state.hold_ms;
+            }
             if !has_audio || fill_ms < prime_ms {
+                return false;
+            }
+            // Enough audio, but video that trails its audio needs the hold
+            // in force before the clock anchors, and the first skew reading
+            // is what says how much.
+            if super::hold::prime_may_wait(shared, state, now) {
                 return false;
             }
 
             state.primed = true;
+            state.hold_unbuilt_ns = 0;
             state.anchor_ns = now + chunk_ns;
             state.samples = 0;
             // Reads and writes are both whole decoded chunks, so the residual
@@ -273,9 +285,10 @@ impl AudioPump {
 
         // Low-latency mode has no speed control; cap runaway backlog by
         // skipping old chunks (latency wins over continuity here).
-        if low_latency && fill_ms > consts::AUDIO_LL_MAX_FILL_MS {
+        // The audio hold is kept queued on top.
+        if low_latency && fill_ms > consts::AUDIO_LL_MAX_FILL_MS + state.hold_ms {
             let chunk_ms = (chunk_ns / 1_000_000) as i32;
-            let keep_ms = if chunk_ms * 2 > 0 { chunk_ms * 2 } else { 42 };
+            let keep_ms = (if chunk_ms * 2 > 0 { chunk_ms * 2 } else { 42 }) + state.hold_ms;
             let (trimmed, post) = {
                 let mut guard = shared.audio_buf();
                 match guard.as_mut() {
@@ -433,6 +446,11 @@ Video stays in sync with it; check the sender's frame rate and clock",
         ));
 
         remember_last_sample(&mut state.out_last, emitted, channels);
+        super::hold::credit_build(
+            state,
+            timing::frames_to_ns(u64::from(frames_out), fmt.rate as u32),
+            stream_duration_ns,
+        );
         let first_mapping = state.latest_obs_end_ts_ns == 0;
         finalize_audio_output(
             shared,
@@ -654,12 +672,16 @@ fn maybe_reanchor_offset(
     // priming.
     if !state.offset_baseline_set {
         state.offset_baseline_ns = offset_ns;
+        state.offset_baseline_hold_ms = state.hold_ms;
         state.offset_baseline_set = true;
         return;
     }
 
+    // A raised audio hold grows the offset on purpose, by playing slower
+    // until the buffer holds it; that is latency asked for, not drift.
     let margin_ns = consts::AUDIO_OFFSET_REANCHOR_MARGIN_MS * 1_000_000;
-    let excess_ns = offset_ns - state.offset_baseline_ns;
+    let excess_ns =
+        offset_ns - state.offset_baseline_ns - super::hold::moved_since_baseline_ns(state);
     if excess_ns <= margin_ns {
         return;
     }

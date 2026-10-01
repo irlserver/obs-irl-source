@@ -194,6 +194,14 @@ impl Receiver {
             .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
         let bytes = self.pkt.size().max(0) as usize;
         self.shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
+        let received_ns = obs::time::gettime_ns();
+
+        // Where the audio hold reads the sender's skew: this packet against
+        // the newest audio decoded before it, in mux order.
+        if let Some(dts) = self.pkt.dts_or_pts() {
+            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, NS_TIME_BASE);
+            crate::audio::hold::observe_video_packet(&self.shared, received_ns, dts_ns);
+        }
 
         match self.pkt.new_ref() {
             Ok(packet) => self.shared.video.push_packet(
@@ -201,7 +209,7 @@ impl Receiver {
                     packet,
                     pts_ns,
                     bytes,
-                    received_ns: obs::time::gettime_ns(),
+                    received_ns,
                 },
                 &self.shared.lifetime,
             ),

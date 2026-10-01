@@ -132,6 +132,10 @@ Video uses a rebasing approach: the first frame's stream PTS is anchored to `os_
 
 Instead of a fixed audio offset, video is delayed by the current buffered-audio age when audio exists. That tracks the real state of the audio path better than always adding the configured target buffer.
 
+That mapping assumes the sender delivers the audio and the video of an instant together. Many do not. A hardware encoder runs a few frames behind the microphone, pocketSRT queues its audio about 300ms ahead of its deadline, and a phone with video stabilization on sends each frame a second or more after its sound. Mapped through the audio playout, such video is past due when it arrives, and no video schedule can fix that, because a frame cannot be shown before it arrives. So the audio waits for the picture. The receiver reads the skew as each video packet arrives: the packet's timestamp against the newest audio decoded before it, in mux order, so a network stall (which delays both streams together) does not move the reading. The part of the skew that Target Buffer and the output lead do not cover, plus a 100ms margin, becomes the audio hold, and the jitter buffer's target is raised by it.
+
+The hold is sized before playback primes, so a sender that always sends its video late starts in sync. After that it rises only for a skew that lasts two seconds, and the speed controller builds it by playing at -2%. The standing video delay covers the gap meanwhile and hands itself back as the audio playout grows, so the picture neither jumps nor changes speed. A shorter burst of late video stays the video delay's to cover, since paying for a hiccup in latency for the rest of the stream is the wrong trade. The hold falls back once ten seconds of video needed less. The hold is reported as `audio_hold_ms`, the raw stamp difference as `av_skew_ms`.
+
 When there is no audio playout mapping yet (audio-less start), video falls back to the rebased timestamp, and if that drifts too far from wall clock (over 500ms) it is clamped rather than fully re-anchored. That avoids visible jumps while still preventing long freezes if the stream sends a bad future timestamp.
 
 ## What this means in practice
@@ -145,6 +149,7 @@ When there is no audio playout mapping yet (audio-less start), video falls back 
 | RTMP congestion with a buffering encoder | Stream skips ahead or dies | Stream pauses, resumes exactly where it stopped, and bleeds the extra delay off at up to the Catch-Up Speed (+5% by default) |
 | Connection drops and reconnects | Loud click on disconnect, possibly corrupted frames on reconnect | Fade out, clean reconnect, keyframe gate, fade in |
 | Decoder corruption | Gray/corrupt flicker until manual restart | H.264: timestamped concealed frames are passed through to preserve cadence. HEVC: frames predicted from a missing reference (rendered gray by FFmpeg) are held back until the next keyframe. The video decoder is never flushed; only the audio decoder is, on repeated hard errors |
+| Sender sends video later than its audio | Paces both streams on their timestamps | Holds audio back by the part of the skew that Target Buffer does not cover, sized before playback starts and followed afterwards |
 | Long stream (hours) | Timestamp epoch causes OBS sync issues | Timestamps are repaired and anchored to system clock |
 
 The tradeoff: buffered mode is more resilient to short stalls, but adds intentional latency. Low-latency mode reacts faster and works better with OBS async unbuffered audio, but it gives up most of that jitter cushion. For rough SRTLA field conditions, buffered mode should still be the default. Low-latency mode is there when absolute latency matters more than smoothing over short network wobble.

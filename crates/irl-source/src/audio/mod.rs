@@ -2,6 +2,7 @@
 //! W2-B owns this module. The functions here are the ones the other threads
 //! call; their signatures are frozen.
 
+pub mod hold;
 pub mod pump;
 
 use std::sync::Arc;
@@ -84,6 +85,9 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
     state.recovery_until_us = 0;
     state.speed_carry.reset();
     state.align_read_pending = false;
+    // Priming waits for the whole target, hold included, so nothing is left
+    // to build once it re-primes.
+    state.hold_unbuilt_ns = 0;
     state.latest_audio_stream_pts_ns = 0;
     state.latest_buffered_end_pts_ns = 0;
     state.latest_obs_end_ts_ns = 0;
@@ -116,6 +120,9 @@ pub fn reset_stream_timing_state(shared: &Shared, state: &mut AudioState) {
     // Relearning costs nothing worse than the behaviour before the trim
     // existed.
     state.speed_trim.reset();
+    // The skew readings straddle the break; the hold they sized stays, and a
+    // release window takes it back if the sender no longer needs it.
+    hold::forget_readings(state);
 
     state.latest_video_stream_pts_ns = 0;
 
