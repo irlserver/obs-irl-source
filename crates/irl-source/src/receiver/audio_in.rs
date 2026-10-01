@@ -1,5 +1,4 @@
-//! Decoded audio intake on the receiver thread (port of
-//! `irl_handle_audio_frame`, `receiver-audio.c:906-1127`). W2-B.
+//! Decoded audio intake on the receiver thread.
 
 use std::sync::atomic::Ordering::Relaxed;
 

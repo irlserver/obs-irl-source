@@ -404,7 +404,7 @@ fn stop_receiver(state: &mut ObsState, source: SourceHandle, clear_video: bool) 
         let _ = running.video.join();
         let _ = running.audio.join();
         let _ = running.receiver.join();
-        // Whatever the video thread never got to; frees the pinned surfaces.
+        // Whatever the video thread never got to.
         running.shared.video.drain();
         // The joins block the calling thread, which for the media controls
         // and show/hide is OBS's graphics thread: this is how long the whole
@@ -461,12 +461,6 @@ fn fit_to_canvas(source: SourceHandle) {
 
 // ── Stats ─────────────────────────────────────────────────────
 
-/// Snapshot every stat, consistently: the audio state (and, under it, the
-/// jitter buffer) is locked once, exactly as the C did.
-///
-/// With no run in progress the per-connection counters read zero — the C read
-/// the same fields after `reset_runtime_state` had zeroed them — while the
-/// lifetime counters and the settings-derived flags still report.
 /// `av_skew_ms`: video PTS minus audio PTS of what last reached the plugin,
 /// in ms. Both values are stamped by the receiver at arrival (audio as it
 /// writes the jitter buffer, video as it pushes the packet), so the
@@ -483,6 +477,11 @@ pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     (video_pts_ns - audio.latest_audio_stream_pts_ns) / 1_000_000
 }
 
+/// Snapshot every stat, consistently: the audio state (and, under it, the
+/// jitter buffer) is locked once.
+///
+/// With no run in progress the per-connection counters read zero, while the
+/// lifetime counters and the settings-derived flags still report.
 fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     let mut snap = StatsSnapshot {
         current_speed: 1.0,

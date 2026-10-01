@@ -1,5 +1,4 @@
-//! Video path (port of `receiver-video.c` + `video-handler.c`). W2-C owns
-//! this module; the signatures here are frozen.
+//! Video path: the video thread, its decoder and the hand-over to libobs.
 
 pub mod decode;
 pub mod intake;

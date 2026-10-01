@@ -54,10 +54,6 @@ impl<F: PacedFrame> PacingQueue<F> {
     /// `max_frames` / `max_bytes` are the *hard* bound: memory that must not be
     /// exceeded whatever the stream does, and reaching one means pacing has
     /// failed and frames go out early ([`DueVerdict::EmitEarly`], counted).
-    ///
-    /// Before the delay moved into the packet queue these were the same bound,
-    /// so a Target Buffer that needed more decoded frames than the byte ceiling
-    /// allowed silently degraded into permanent early emission.
     pub fn new(lead_ns: i64, max_frames: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),

@@ -1,9 +1,10 @@
-//! Video thread loop and pacing (port of `src/receiver-video.c:13-287`). W2-C.
+//! Video thread loop and pacing.
 //!
-//! The thread pops decoded frames off [`VideoChannel`](crate::shared::VideoChannel),
-//! copies them out of the hardware pool immediately (which returns the
-//! decoder's surface), then holds them in a thread-private pacing queue until
-//! their mapped timestamp is due — the way OBS's own media source paces in
+//! The thread pops compressed packets off [`VideoChannel`](crate::shared::VideoChannel),
+//! decodes each one as it approaches its due time, copies the frame out of the
+//! hardware pool immediately (which returns the decoder's surface), then holds
+//! it in a thread-private pacing queue until its mapped timestamp is due, the
+//! way OBS's own media source paces in
 //! `mp_media_sleep`. Handing libobs a frame early makes libobs hold it, and
 //! past `MAX_ASYNC_FRAMES` (30) held frames `cache_video` silently discards the
 //! whole queue, so this queue is what keeps libobs's async queue about one

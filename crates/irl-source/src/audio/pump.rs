@@ -1,7 +1,7 @@
-//! `irl_pump_audio_once` and helpers (port of `src/receiver-audio.c`). W2-B.
+//! The audio pump: drains the jitter buffer into OBS.
 //!
 //! Design contract with libobs (verified against `obs-source.c` /
-//! `obs-audio.c`), unchanged from the C:
+//! `obs-audio.c`):
 //!
 //!   1. OBS timestamps must be contiguous: `ts[n+1] = ts[n] + frames/rate`.
 //!      Deviations under 70 ms are smoothed; 70 ms..2 s gaps are zero-filled

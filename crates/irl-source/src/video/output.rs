@@ -1,8 +1,8 @@
-//! HW transfer, format mapping, OBS output (port of `src/video-handler.c`). W2-C.
+//! HW transfer, format mapping, OBS output.
 //!
 //! Everything here belongs to the video thread, so it is written as methods on
-//! [`VideoThread`] (whose state the C kept on `struct irl_source`), plus the
-//! pure mapping helpers, which stay free functions so tests can table them.
+//! [`VideoThread`], plus the pure mapping helpers, which stay free functions so
+//! tests can table them.
 
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering::Relaxed;
@@ -194,9 +194,9 @@ impl VideoThread {
     /// speed changes. Without that mapping it falls back to the video-only
     /// wall-clock anchor.
     pub fn due_time(&mut self, frame: &Frame) -> u64 {
-        // `frame.pts()` is already in nanoseconds: the receiver thread
-        // rescaled it before queueing, because the video thread must not touch
-        // the format context (it can be freed mid-reconnect).
+        // `frame.pts()` is already in nanoseconds: intake rescales it with the
+        // time base captured at stream open, because the video thread must not
+        // touch the format context (it can be freed mid-reconnect).
         let pts_ns = frame.pts();
         let now = obs::time::gettime_ns();
 

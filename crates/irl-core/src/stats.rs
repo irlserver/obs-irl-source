@@ -24,7 +24,7 @@ pub enum StatValue {
     Bool(bool),
 }
 
-/// The 28 stat fields in proc-declaration order.
+/// The stat fields in proc-declaration order.
 pub const FIELDS: &[(&str, StatKind)] = &[
     ("buffer_fill_ms", StatKind::Int),
     ("current_speed", StatKind::Float),

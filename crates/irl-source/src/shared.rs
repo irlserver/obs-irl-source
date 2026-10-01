@@ -1,24 +1,19 @@
 //! State shared between the OBS thread and the three worker threads for one
 //! run of the receiver (`start_receiver` … `stop_receiver`).
 //!
-//! This file is the decomposition of the C `struct irl_source` into owners.
-//! It is written by the orchestrator and frozen: agents that need a change
-//! request it rather than editing here.
-//!
-//! Ownership map (C field → Rust home):
+//! Ownership map:
 //! - OBS thread only (`source.rs`): `fit_pending`, `media_stopped`,
 //!   `close_when_inactive`, the authoritative `Config`, the thread handles.
-//! - [`Shared`]: built fresh at every `start_receiver` (this replaces the C
-//!   `reset_runtime_state()`: everything it zeroed is a field here and starts
-//!   zeroed; everything it deliberately kept lives in [`LifetimeStats`]).
-//! - [`AudioState`] under `Shared::audio_state` (the C `audio_state_lock`).
-//!   The audio pump locks it **once** per `pump_once` and passes `&mut` down;
-//!   nothing below may lock it again.
+//! - [`Shared`]: built fresh at every `start_receiver`, so per-run state
+//!   starts zeroed; what has to survive a restart lives in [`LifetimeStats`].
+//! - [`AudioState`] under `Shared::audio_state`. The audio pump locks it
+//!   **once** per `pump_once` and passes `&mut` down; nothing below may lock
+//!   it again.
 //! - `Shared::audio_buf`: the jitter buffer under its own lock. Lock order:
-//!   `audio_state` → `audio_buf`. `video.q` is never held together with
-//!   either.
+//!   `audio_state` → `audio_buf` → `hot.watermarks`. `video.q` is never held
+//!   together with any of them.
 //! - [`ConnStats`] / [`LifetimeStats`]: counters as relaxed atomics, readable
-//!   from any thread without a lock (the C read them unsynchronised).
+//!   from any thread without a lock.
 //! - Receiver-thread-owned, video-thread-owned and audio-thread-owned state
 //!   are plain structs inside those threads (`receiver/mod.rs`,
 //!   `video/thread.rs`, `audio/pump.rs`); they are not in this file.

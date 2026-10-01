@@ -1,4 +1,5 @@
-//! Packet → decoder plumbing (port of `src/receiver-decode.c`). W2-A.
+//! Packet routing: audio packets into the audio decoder, video packets onto
+//! the video channel.
 
 use std::sync::atomic::Ordering::Relaxed;
 

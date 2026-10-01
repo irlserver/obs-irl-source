@@ -1,6 +1,5 @@
-//! Audio output side (port of the audio-thread half of `receiver-audio.c`).
-//! W2-B owns this module. The functions here are the ones the other threads
-//! call; their signatures are frozen.
+//! Audio output side: the audio thread and the functions the other threads
+//! call into it.
 
 pub mod hold;
 pub mod pump;

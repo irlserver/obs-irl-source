@@ -26,14 +26,12 @@ pub const DEFAULT_BUFFER_TARGET_MS: i64 = 120;
 pub const BUFFER_TARGET_MIN_MS: i32 = 20;
 /// Target buffer property ceiling.
 ///
-/// Not a limit of the controller — it is where holding the cushion stops
+/// Not a limit of the controller: it is where holding the cushion stops
 /// being free. Every millisecond of audio buffer is also a millisecond of
-/// decoded video held in the pacing queue (see [`VIDEO_PACING_MAX_FRAMES`] /
-/// [`VIDEO_PACING_MAX_BYTES`]), and the whole target is paid as startup delay
-/// before playback primes. High-bitrate uplinks with deep sender-side
-/// buffering do stall for several seconds, though, and 2s could not ride
-/// those out, so the ceiling is set by what the video side can still pace
-/// rather than by what the audio side needs.
+/// compressed video held in the packet queue, and the whole target is paid as
+/// startup delay before playback primes. High-bitrate uplinks with deep
+/// sender-side buffering do stall for several seconds, though, and 2s could
+/// not ride those out.
 pub const BUFFER_TARGET_MAX_MS: i32 = 8000;
 /// Target buffer property step.
 pub const BUFFER_TARGET_STEP_MS: i32 = 10;
