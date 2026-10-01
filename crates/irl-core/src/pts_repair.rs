@@ -230,11 +230,6 @@ impl PtsRepair {
         Some((self.last_pts, self.last_duration))
     }
 
-    /// Whether a reference PTS has been seen (`pts_repair.initialised`).
-    pub fn is_initialised(&self) -> bool {
-        self.initialised
-    }
-
     /// The stream time base the repair state was built with.
     pub fn time_base(&self) -> (i32, i32) {
         (self.tb_num, self.tb_den)
@@ -542,7 +537,6 @@ mod tests {
         let mut r = repair();
         r.evaluate(500, DUR);
         r.reset();
-        assert!(!r.is_initialised());
         assert_eq!(r.last(), None);
         let v = r.evaluate(9_000, DUR);
         assert_eq!(v.action, PtsAction::Pass);

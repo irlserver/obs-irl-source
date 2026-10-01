@@ -5,7 +5,7 @@
 //! through [`guard`], which converts a panic into one `LOG_ERROR` line and a
 //! caller-supplied default.
 
-use std::panic::{AssertUnwindSafe, UnwindSafe, catch_unwind};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::log::{Level, blog_prefixed};
 
@@ -43,11 +43,3 @@ pub fn payload_message(payload: &(dyn std::any::Any + Send)) -> String {
         "<non-string panic payload>".to_string()
     }
 }
-
-#[doc(hidden)]
-pub fn _assert_unwind_safe<T>(t: T) -> AssertUnwindSafe<T> {
-    AssertUnwindSafe(t)
-}
-
-#[doc(hidden)]
-pub fn _is_unwind_safe<T: UnwindSafe>(_: &T) {}

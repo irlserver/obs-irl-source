@@ -76,11 +76,6 @@ impl InterruptWatch {
             .store(crate::gettime_us() as u64, Ordering::Relaxed);
     }
 
-    pub fn disarm(&self) {
-        self.io_start_us
-            .store(0, core::sync::atomic::Ordering::Relaxed);
-    }
-
     /// The interrupt decision. Touches only atomics, `av_gettime` and two
     /// plain field reads, so it is safe to run inside FFmpeg's callback
     /// without `catch_unwind`.
@@ -389,8 +384,6 @@ mod tests {
         // av_gettime has microsecond resolution; give it something to measure.
         crate::usleep(2_000);
         assert!(watch.should_abort());
-        watch.disarm();
-        assert!(!watch.should_abort());
     }
 
     /// A listener that waited longer than the timeout for its caller must

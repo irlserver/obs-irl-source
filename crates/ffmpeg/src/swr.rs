@@ -15,7 +15,6 @@ pub struct Resampler {
     in_rate: i32,
     in_channels: i32,
     in_format: AVSampleFormat,
-    out_rate: i32,
     out_channels: i32,
 }
 
@@ -77,15 +76,7 @@ impl Resampler {
                 core::ptr::null_mut(),
             )
         };
-        let this = Self::adopt(
-            ptr,
-            ret,
-            in_rate,
-            in_channels,
-            in_format,
-            out_rate,
-            out_channels,
-        )?;
+        let this = Self::adopt(ptr, ret, in_rate, in_channels, in_format, out_channels)?;
         this.init()
     }
 
@@ -115,7 +106,6 @@ impl Resampler {
             rate,
             channels,
             AVSampleFormat::AV_SAMPLE_FMT_FLT,
-            rate,
             channels,
         )?;
 
@@ -135,14 +125,12 @@ impl Resampler {
     }
 
     /// Wrap the result of `swr_alloc_set_opts2`, freeing on failure.
-    #[allow(clippy::too_many_arguments)]
     fn adopt(
         ptr: *mut ffmpeg_sys_next::SwrContext,
         ret: core::ffi::c_int,
         in_rate: i32,
         in_channels: i32,
         in_format: AVSampleFormat,
-        out_rate: i32,
         out_channels: i32,
     ) -> Result<Self> {
         if ptr.is_null() {
@@ -153,7 +141,6 @@ impl Resampler {
             in_rate,
             in_channels,
             in_format,
-            out_rate,
             out_channels,
         };
         // `this` frees the context in Drop if the option set failed.
@@ -176,16 +163,6 @@ impl Resampler {
 
     pub fn matches_params(&self, rate: i32, channels: i32) -> bool {
         self.in_rate == rate && self.in_channels == channels
-    }
-
-    /// Channels on the output side (always interleaved float).
-    pub fn out_channels(&self) -> i32 {
-        self.out_channels
-    }
-
-    /// Sample rate on the output side.
-    pub fn out_rate(&self) -> i32 {
-        self.out_rate
     }
 
     /// `swr_set_compensation(delta, distance)`.
@@ -301,8 +278,6 @@ mod tests {
         let mut swr = Resampler::passthrough_f32(48_000, 2).unwrap();
         assert!(swr.matches_params(48_000, 2));
         assert!(!swr.matches_params(44_100, 2));
-        assert_eq!(swr.out_channels(), 2);
-        assert_eq!(swr.out_rate(), 48_000);
 
         let input = silent_stereo(1024);
         let max_out = swr.out_samples(1024).max(1024) + 32;

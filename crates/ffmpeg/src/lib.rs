@@ -136,18 +136,6 @@ pub fn rescale_q(value: i64, from: Rational, to: Rational) -> i64 {
     unsafe { sys::av_rescale_q(value, from.into(), to.into()) }
 }
 
-/// `av_rescale_q_rnd(..., AV_ROUND_UP)`.
-pub fn rescale_q_round_up(value: i64, from: Rational, to: Rational) -> i64 {
-    // SAFETY: as above; AV_ROUND_UP is a valid AVRounding value.
-    unsafe { sys::av_rescale_q_rnd(value, from.into(), to.into(), sys::AVRounding::AV_ROUND_UP) }
-}
-
-/// `av_rescale`.
-pub fn rescale(value: i64, mul: i64, div: i64) -> i64 {
-    // SAFETY: pure arithmetic over scalars.
-    unsafe { sys::av_rescale(value, mul, div) }
-}
-
 /// The endpoint identity of a URL, split by `av_url_split`. Userinfo, path,
 /// query and fragment are never copied out: they can all carry credentials,
 /// which is the point of using this for log lines.
@@ -231,12 +219,6 @@ pub fn hwdevice_type_name(kind: AVHWDeviceType) -> &'static str {
     static_str(unsafe { sys::av_hwdevice_get_type_name(kind) }, "none")
 }
 
-/// `av_get_pix_fmt_name` (for log lines).
-pub fn pix_fmt_name(fmt: AVPixelFormat) -> &'static str {
-    // SAFETY: accepts any AVPixelFormat; returns a static string or NULL.
-    static_str(unsafe { sys::av_get_pix_fmt_name(fmt) }, "unknown")
-}
-
 /// `av_image_get_buffer_size(fmt, w, h, align)`.
 pub fn image_buffer_size(fmt: AVPixelFormat, width: i32, height: i32, align: i32) -> Result<usize> {
     // SAFETY: pure computation over scalars and the static pixel format table.
@@ -249,21 +231,6 @@ pub fn image_buffer_size(fmt: AVPixelFormat, width: i32, height: i32, align: i32
         });
     }
     Ok(size as usize)
-}
-
-/// Decompose an `LIBAV*_VERSION_INT`-shaped version number.
-fn version_triple(v: u32) -> (u32, u32, u32) {
-    (v >> 16, (v >> 8) & 0xff, v & 0xff)
-}
-
-/// The library versions the crate was built against (`LIBAVCODEC_VERSION_*`),
-/// for the connection log line.
-pub fn version_string() -> String {
-    // SAFETY: these take no arguments and only read compiled-in constants.
-    let (ac_maj, ac_min, ac_mic) = version_triple(unsafe { sys::avcodec_version() });
-    // SAFETY: as above.
-    let (af_maj, af_min, af_mic) = version_triple(unsafe { sys::avformat_version() });
-    format!("libavcodec {ac_maj}.{ac_min}.{ac_mic}, libavformat {af_maj}.{af_min}.{af_mic}")
 }
 
 /// `FFALIGN(x, a)` for power-of-two `a`.
@@ -325,29 +292,15 @@ mod tests {
             rescale_q(1, Rational::new(1, 1000), Rational::new(1, 1_000_000_000)),
             1_000_000
         );
-        assert_eq!(rescale(3, 1_000_000_000, 1000), 3_000_000);
     }
 
     #[test]
-    fn rescale_rounds_up() {
-        // 1 tick of 1/3 s into milliseconds: 333.33… rounds up to 334.
-        let up = rescale_q_round_up(1, Rational::new(1, 3), Rational::new(1, 1000));
-        assert_eq!(up, 334);
-        assert_eq!(
-            rescale_q(1, Rational::new(1, 3), Rational::new(1, 1000)),
-            333
-        );
-    }
-
-    #[test]
-    fn names_and_versions() {
+    fn names() {
         assert_eq!(codec_name(AVCodecID::AV_CODEC_ID_H264), "h264");
-        assert_eq!(pix_fmt_name(AVPixelFormat::AV_PIX_FMT_NV12), "nv12");
         assert_eq!(
             hwdevice_type_name(AVHWDeviceType::AV_HWDEVICE_TYPE_NONE),
             "none"
         );
-        assert!(version_string().starts_with("libavcodec "));
     }
 
     #[test]

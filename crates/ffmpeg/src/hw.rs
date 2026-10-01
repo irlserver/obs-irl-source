@@ -85,7 +85,6 @@ pub struct FramePool {
     fmt: AVPixelFormat,
     width: i32,
     height: i32,
-    size: usize,
 }
 
 // SAFETY: an AVBufferPool is internally synchronised (it is designed to be
@@ -112,7 +111,6 @@ impl FramePool {
                 fmt,
                 width,
                 height,
-                size,
             },
             size,
         ))
@@ -151,8 +149,8 @@ impl FramePool {
             }
         };
 
-        // SAFETY: `frame` is a blank frame we own; `buf->data` points at
-        // `self.size` bytes, which is exactly what av_image_get_buffer_size
+        // SAFETY: `frame` is a blank frame we own; `buf->data` points at the
+        // pool's buffer size, which is exactly what av_image_get_buffer_size
         // reported for these format/dimensions/alignment in `new`.
         let ret = unsafe {
             let raw = frame.as_mut_ptr();
@@ -179,11 +177,6 @@ impl FramePool {
         // of the pool reference here; av_frame_unref returns it to the pool.
         unsafe { (*frame.as_mut_ptr()).buf[0] = buf };
         Ok(frame)
-    }
-
-    /// Bytes per pooled buffer.
-    pub fn buffer_size(&self) -> usize {
-        self.size
     }
 }
 
@@ -252,7 +245,6 @@ mod tests {
         );
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_YUV420P, 1920, 1080));
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1280, 720));
-        assert_eq!(size, pool.buffer_size());
         assert!(size >= 1920 * 1088 * 3 / 2);
 
         let first = pool.acquire().unwrap();

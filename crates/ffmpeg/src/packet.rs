@@ -35,11 +35,6 @@ impl Packet {
         unsafe { (*self.0).pts }
     }
 
-    pub fn dts(&self) -> i64 {
-        // SAFETY: as above.
-        unsafe { (*self.0).dts }
-    }
-
     /// Presentation timestamp, falling back to the decode timestamp, `None`
     /// when neither is set. Mirrors [`crate::Frame::best_effort_pts`]: live
     /// demuxers leave one or both unset often enough that the caller must not

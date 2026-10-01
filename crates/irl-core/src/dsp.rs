@@ -99,24 +99,6 @@ pub fn shape_silence_from_last(samples: &mut [f32], channels: usize, rate: i32, 
     }
 }
 
-/// Linear 1→0 gain across the whole buffer (disconnect fade-out).
-pub fn apply_linear_fade_out(samples: &mut [f32], channels: usize) {
-    if channels == 0 {
-        return;
-    }
-    let total_frames = samples.len() / channels;
-    if total_frames == 0 {
-        return;
-    }
-
-    for f in 0..total_frames {
-        let gain = 1.0 - f as f32 / total_frames as f32;
-        for ch in 0..channels {
-            samples[f * channels + ch] *= gain;
-        }
-    }
-}
-
 /// Continue a fade-in ramp of `total` frames with `remaining` frames left;
 /// returns the new `remaining`.
 ///
@@ -247,18 +229,6 @@ mod tests {
         let mut samples = vec![7.0f32; 64];
         shape_silence_from_last(&mut samples, 2, RATE, &last);
         assert!(samples.iter().all(|&s| s == 0.0));
-    }
-
-    #[test]
-    fn fade_out_ends_at_zero() {
-        let mut samples = vec![1.0f32; 4 * 2];
-        apply_linear_fade_out(&mut samples, 2);
-        assert_eq!(samples, vec![1.0, 1.0, 0.75, 0.75, 0.5, 0.5, 0.25, 0.25]);
-
-        // A one-frame read is a single unattenuated frame, as in C.
-        let mut samples = vec![1.0f32; 2];
-        apply_linear_fade_out(&mut samples, 2);
-        assert_eq!(samples, vec![1.0, 1.0]);
     }
 
     #[test]

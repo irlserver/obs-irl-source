@@ -280,30 +280,6 @@ impl AudioBuffer {
         })
     }
 
-    /// Discard the oldest chunk.
-    pub fn skip_chunk(&mut self) {
-        if self.data.is_empty() || self.chunk_count == 0 {
-            return;
-        }
-        self.skip_oldest_chunk();
-    }
-
-    /// Discard whole chunks until the oldest PTS is ≥ `min_pts_ns`. Returns chunks skipped.
-    pub fn skip_until_pts(&mut self, min_pts_ns: i64) -> usize {
-        if self.data.is_empty() {
-            return 0;
-        }
-        let mut skipped = 0;
-        while self.chunk_count > 0 {
-            if self.oldest_pts() >= min_pts_ns {
-                break;
-            }
-            self.skip_oldest_chunk();
-            skipped += 1;
-        }
-        skipped
-    }
-
     /// Discard oldest chunks until at most `keep_ms` remain, keeping at least
     /// `min_chunks`. Returns chunks trimmed and the resulting state.
     pub fn trim_to_keep_ms(
@@ -625,12 +601,6 @@ mod tests {
         assert_eq!(buf.chunk_count(), consts::AUDIO_PTS_MAX_CHUNKS);
         assert_eq!(buf.peek_pts(), 20_000_000);
         assert_eq!(buf.fill_bytes(), consts::AUDIO_PTS_MAX_CHUNKS * CHUNK_BYTES);
-
-        // ... and the newest chunk is the one just written.
-        let skipped = buf.skip_until_pts(256 * 20_000_000);
-        assert_eq!(skipped, consts::AUDIO_PTS_MAX_CHUNKS - 1);
-        assert_eq!(buf.chunk_count(), 1);
-        assert_eq!(buf.peek_pts(), 256 * 20_000_000);
     }
 
     #[test]
@@ -765,17 +735,6 @@ mod tests {
         // Nothing to do when already under the ceiling.
         let (trimmed, _) = buf.trim_to_keep_ms(1000, 1);
         assert_eq!(trimmed, 0);
-    }
-
-    #[test]
-    fn skip_chunk_drops_one() {
-        let mut buf = buffer(120);
-        buf.write_pts(&pcm(1.0, 960), 0);
-        buf.write_pts(&pcm(1.0, 960), 20_000_000);
-        buf.skip_chunk();
-        assert_eq!(buf.chunk_count(), 1);
-        assert_eq!(buf.fill_bytes(), CHUNK_BYTES);
-        assert_eq!(buf.peek_pts(), 20_000_000);
     }
 
     #[test]

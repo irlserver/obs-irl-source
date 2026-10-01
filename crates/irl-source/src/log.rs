@@ -20,7 +20,6 @@ macro_rules! irl_info {
     ($($arg:tt)*) => { irl_log!(::obs::log::Level::Info, $($arg)*) };
 }
 
-#[allow(unused_macros)]
 macro_rules! irl_debug {
     ($($arg:tt)*) => { irl_log!(::obs::log::Level::Debug, $($arg)*) };
 }

@@ -29,7 +29,7 @@ pub mod video_delay;
 pub mod video_time;
 
 pub use audio_buffer::{AudioBuffer, BufferState};
-pub use audio_hold::{AudioHold, HoldChange, HoldTuning};
+pub use audio_hold::{AudioHold, HoldChange};
 pub use config::{HwDecode, Watermarks};
 pub use dsp::LastSample;
 pub use pacing::{DueVerdict, PacedFrame, PacingQueue};
