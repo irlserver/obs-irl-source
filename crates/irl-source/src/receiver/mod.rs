@@ -86,7 +86,7 @@ impl Receiver {
     fn new(shared: Arc<Shared>) -> Option<Self> {
         let pkt = ffmpeg::Packet::new().ok()?;
         let frame = ffmpeg::Frame::new().ok()?;
-        let audio_in = AudioIntake::new(&shared.cfg);
+        let audio_in = AudioIntake::default();
         Some(Self {
             shared,
             fmt: None,

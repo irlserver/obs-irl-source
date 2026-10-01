@@ -156,8 +156,6 @@ impl Sim {
             ffmpeg_options: None,
             hw_decode: HwDecode::Off,
             low_latency_audio,
-            small_gap_ms: consts::SMALL_GAP_MS,
-            large_gap_ms: consts::LARGE_GAP_MS,
         };
         let shared = Shared::new(
             source,
@@ -190,8 +188,8 @@ impl Sim {
 
         // What the decode path does when the audio decoder opens; without it
         // the intake has no PTS-repair state and discards every frame.
-        let mut intake = AudioIntake::new(&cfg);
-        intake.init_pts_repair(&cfg, TB_NS);
+        let mut intake = AudioIntake::default();
+        intake.init_pts_repair(TB_NS);
 
         Self {
             intake,

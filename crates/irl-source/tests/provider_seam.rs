@@ -26,8 +26,6 @@ fn url_only(url: &str) -> Config {
             ffmpeg_options: None,
             hw_decode: HwDecode::Auto,
             low_latency_audio: false,
-            small_gap_ms: consts::SMALL_GAP_MS,
-            large_gap_ms: consts::LARGE_GAP_MS,
         },
         hot: HotValues {
             reconnect_delay_s: consts::DEFAULT_RECONNECT_DELAY_S as i32,

@@ -40,8 +40,6 @@ pub struct StreamConfig {
     pub ffmpeg_options: Option<String>,
     pub hw_decode: HwDecode,
     pub low_latency_audio: bool,
-    pub small_gap_ms: i32,
-    pub large_gap_ms: i32,
 }
 
 /// Settings swapped in place while the workers run (`config_apply_hot`).

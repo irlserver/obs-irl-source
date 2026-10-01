@@ -203,7 +203,6 @@ impl Receiver {
         for (key, value) in irl_core::url_opts::demuxer_options(
             &url_str,
             self.shared.cfg.ffmpeg_options.as_deref(),
-            consts::NETWORK_BUFFER_MB,
             fast_probe,
         ) {
             let (Ok(key), Ok(value)) = (CString::new(key.as_ref()), CString::new(value.as_ref()))
@@ -273,11 +272,7 @@ impl Receiver {
         );
 
         if self.audio_stream_idx >= 0 {
-            let tb = self.audio_tb;
-            let Self {
-                audio_in, shared, ..
-            } = self;
-            audio_in.init_pts_repair(&shared.cfg, tb);
+            self.audio_in.init_pts_repair(self.audio_tb);
         }
 
         true

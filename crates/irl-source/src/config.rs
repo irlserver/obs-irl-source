@@ -52,8 +52,6 @@ impl Config {
                 ffmpeg_options: settings.get_str(c"ffmpeg_options"),
                 hw_decode,
                 low_latency_audio: settings.get_bool(c"low_latency_audio"),
-                small_gap_ms: consts::SMALL_GAP_MS,
-                large_gap_ms: consts::LARGE_GAP_MS,
             },
             hot: HotValues {
                 reconnect_delay_s: settings.get_i64(c"reconnect_delay") as i32,

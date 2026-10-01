@@ -78,8 +78,6 @@ fn stream_config(low_latency: bool) -> StreamConfig {
         ffmpeg_options: None,
         hw_decode: HwDecode::Auto,
         low_latency_audio: low_latency,
-        small_gap_ms: consts::SMALL_GAP_MS,
-        large_gap_ms: consts::LARGE_GAP_MS,
     }
 }
 
@@ -170,8 +168,8 @@ fn planar_aac_samples_follow_the_video_playout_mapping() {
             .with_clock(Box::new(move || ns.load(Relaxed)))
             .with_us_clock(Box::new(move || us.load(Relaxed) / 1000));
         let tb = ffmpeg::Rational::new(1, 90_000);
-        let mut intake = AudioIntake::new(&shared.cfg);
-        intake.init_pts_repair(&shared.cfg, tb);
+        let mut intake = AudioIntake::default();
+        intake.init_pts_repair(tb);
         let mut flags = ReceiverFlags::default();
         let mut worst_ns = 0i64;
         let mut checked = 0;
@@ -699,11 +697,10 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
 #[test]
 fn intake_discards_warmup_then_buffers_decoded_audio() {
     let shared = make_shared(false, true);
-    let cfg = stream_config(false);
     let tb = ffmpeg::Rational::new(1, RATE);
 
-    let mut intake = AudioIntake::new(&cfg);
-    intake.init_pts_repair(&cfg, tb);
+    let mut intake = AudioIntake::default();
+    intake.init_pts_repair(tb);
     let mut flags = ReceiverFlags::default();
 
     let frames = 20;

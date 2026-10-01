@@ -31,7 +31,6 @@ fn borrowed(key: &'static str, value: &'static str) -> (Cow<'static, str>, Cow<'
 pub fn demuxer_options(
     url: &str,
     extra: Option<&str>,
-    network_buffer_mb: i64,
     fast_probe: bool,
 ) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
     let mut opts: Vec<(Cow<'static, str>, Cow<'static, str>)> = Vec::with_capacity(20);
@@ -75,26 +74,24 @@ pub fn demuxer_options(
     // keeps working setups working; `extra` can turn it back on.
     opts.push(borrowed("tls_verify", "0"));
 
-    if network_buffer_mb > 0 {
-        let bytes = (network_buffer_mb * 1024 * 1024).to_string();
-        // "buffer_size" is bytes for udp:// (and rtp/rtsp, which forward it),
-        // but librist reuses the name for its recovery window in
-        // milliseconds, declared with a max of 30000 — a byte count there
-        // fails avformat_open_input outright with ERANGE.
-        if !has_scheme(url, "rist") {
-            opts.push(owned("buffer_size", bytes.clone()));
-        }
-        // "recv_buffer_size" is bytes for tcp:// and libsrt, and is what
-        // gives the setting any effect on rtmp(s):// and http(s)://.
-        opts.push(owned("recv_buffer_size", bytes));
+    let bytes = (consts::NETWORK_BUFFER_MB * 1024 * 1024).to_string();
+    // "buffer_size" is bytes for udp:// (and rtp/rtsp, which forward it),
+    // but librist reuses the name for its recovery window in
+    // milliseconds, declared with a max of 30000 — a byte count there
+    // fails avformat_open_input outright with ERANGE.
+    if !has_scheme(url, "rist") {
+        opts.push(owned("buffer_size", bytes.clone()));
+    }
+    // "recv_buffer_size" is bytes for tcp:// and libsrt, and is what
+    // gives the setting any effect on rtmp(s):// and http(s)://.
+    opts.push(owned("recv_buffer_size", bytes));
 
-        // udp:// also has a userspace ring between its receive thread and the
-        // demuxer, sized in 188-byte TS packets (default 7*4096 ≈ 5.3 MB).
-        // Grow it with the setting, never shrink it.
-        let fifo_pkts = network_buffer_mb * 1024 * 1024 / 188;
-        if fifo_pkts > consts::UDP_FIFO_DEFAULT_PACKETS {
-            opts.push(owned("fifo_size", fifo_pkts.to_string()));
-        }
+    // udp:// also has a userspace ring between its receive thread and the
+    // demuxer, sized in 188-byte TS packets (default 7*4096 ≈ 5.3 MB).
+    // Grow it with the buffer, never shrink it.
+    let fifo_pkts = consts::NETWORK_BUFFER_MB * 1024 * 1024 / 188;
+    if fifo_pkts > consts::UDP_FIFO_DEFAULT_PACKETS {
+        opts.push(owned("fifo_size", fifo_pkts.to_string()));
     }
 
     if has_scheme(url, "srt") {
@@ -253,18 +250,18 @@ mod tests {
 
     #[test]
     fn fast_probe_selects_the_one_megabyte_probe() {
-        let opts = demuxer_options("srt://h:1", None, 2, true);
+        let opts = demuxer_options("srt://h:1", None, true);
         assert_eq!(find(&opts, "probesize"), Some("1000000"));
         assert_eq!(find(&opts, "analyzeduration"), Some("1000000"));
 
-        let opts = demuxer_options("srt://h:1", None, 2, false);
+        let opts = demuxer_options("srt://h:1", None, false);
         assert_eq!(find(&opts, "probesize"), Some("5000000"));
         assert_eq!(find(&opts, "analyzeduration"), Some("5000000"));
     }
 
     #[test]
     fn the_unconditional_options_are_always_present() {
-        let opts = demuxer_options("rtmp://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmp://h/live/key", None, false);
         assert_eq!(find(&opts, "fflags"), Some("+genpts"));
         assert_eq!(find(&opts, "merge_pmt_versions"), Some("1"));
         assert_eq!(find(&opts, "overrun_nonfatal"), Some("1"));
@@ -280,50 +277,38 @@ mod tests {
 
     #[test]
     fn tls_verify_is_off_by_default() {
-        let opts = demuxer_options("rtmps://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmps://h/live/key", None, false);
         assert_eq!(find(&opts, "tls_verify"), Some("0"));
     }
 
     #[test]
     fn srt_gets_the_latency_window() {
-        let opts = demuxer_options("srt://h:1234?streamid=x", None, 2, false);
+        let opts = demuxer_options("srt://h:1234?streamid=x", None, false);
         assert_eq!(find(&opts, "latency"), Some("200000"));
 
-        let opts = demuxer_options("rtmp://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmp://h/live/key", None, false);
         assert!(!has(&opts, "latency"));
     }
 
     #[test]
     fn rist_omits_buffer_size_but_keeps_recv_buffer_size() {
-        let opts = demuxer_options("rist://h:1234", None, 2, false);
+        let opts = demuxer_options("rist://h:1234", None, false);
         assert!(
             !has(&opts, "buffer_size"),
             "librist reads buffer_size as milliseconds and fails on a byte count"
         );
         assert_eq!(find(&opts, "recv_buffer_size"), Some("2097152"));
 
-        let opts = demuxer_options("udp://h:1234", None, 2, false);
+        let opts = demuxer_options("udp://h:1234", None, false);
         assert_eq!(find(&opts, "buffer_size"), Some("2097152"));
         assert_eq!(find(&opts, "recv_buffer_size"), Some("2097152"));
     }
 
     #[test]
-    fn no_buffer_options_without_a_buffer_size() {
-        let opts = demuxer_options("udp://h:1234", None, 0, false);
-        assert!(!has(&opts, "buffer_size"));
-        assert!(!has(&opts, "recv_buffer_size"));
-        assert!(!has(&opts, "fifo_size"));
-    }
-
-    #[test]
     fn fifo_size_is_only_set_above_ffmpegs_own_default() {
-        // The 2 MB default is ~11 154 packets, below FFmpeg's 7*4096.
-        let opts = demuxer_options("udp://h:1234", None, consts::NETWORK_BUFFER_MB, false);
+        // The 2 MB buffer is ~11 154 packets, below FFmpeg's 7*4096.
+        let opts = demuxer_options("udp://h:1234", None, false);
         assert!(!has(&opts, "fifo_size"));
-
-        // 8 MB is ~44 620 packets, above it.
-        let opts = demuxer_options("udp://h:1234", None, 8, false);
-        assert_eq!(find(&opts, "fifo_size"), Some("44620"));
     }
 
     #[test]
@@ -331,7 +316,6 @@ mod tests {
         let opts = demuxer_options(
             "srt://h:1234",
             Some("probesize=32 latency=500000 tls_verify=1 ca_file=/tmp/ca.pem"),
-            2,
             true,
         );
         assert_eq!(find(&opts, "probesize"), Some("32"));
@@ -361,13 +345,13 @@ mod tests {
         // A trailing '=' is an empty value, as av_dict_set would store it.
         assert_eq!(parse_extra("k="), vec![("k".into(), "".into())]);
 
-        let opts = demuxer_options("srt://h:1", Some("garbage more_garbage"), 2, false);
+        let opts = demuxer_options("srt://h:1", Some("garbage more_garbage"), false);
         assert_eq!(find(&opts, "probesize"), Some("5000000"));
     }
 
     #[test]
     fn option_order_matches_the_c_dictionary_writes() {
-        let opts = demuxer_options("srt://h:1", Some("x=1"), 2, true);
+        let opts = demuxer_options("srt://h:1", Some("x=1"), true);
         let keys: Vec<&str> = opts.iter().map(|(k, _)| k.as_ref()).collect();
         assert_eq!(
             keys,

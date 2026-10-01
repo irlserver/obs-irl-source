@@ -34,15 +34,6 @@ fn should_flush_decoder(last_flush_time_us: &mut u64, now_us: u64) -> bool {
     true
 }
 
-/// `reinit_audio_pts_repair`: the repair state machine restarts on the same
-/// time base after a decoder flush.
-fn reinit_audio_pts_repair(audio_in: &mut AudioIntake, shared: &Shared, audio_tb: Rational) {
-    if let Some(repair) = audio_in.pts_repair() {
-        repair.reset();
-    }
-    audio_in.init_pts_repair(&shared.cfg, audio_tb);
-}
-
 /// Drain everything the audio decoder has ready.
 fn drain_audio_frames(
     dec: &mut CodecContext,
@@ -91,7 +82,7 @@ fn drain_audio_frames(
                                 consts::AUDIO_RESET_RECOVERY_HOLD_US,
                             );
                         }
-                        reinit_audio_pts_repair(audio_in, shared, audio_tb);
+                        audio_in.init_pts_repair(audio_tb);
                     }
                     flags.audio_decode_errors = 0;
                 }

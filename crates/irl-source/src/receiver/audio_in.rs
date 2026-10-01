@@ -6,7 +6,7 @@ use ffmpeg::{AVSampleFormat, Rational, Resampler};
 use irl_core::{LastSample, PtsAction, PtsRepair, consts, dsp, timing};
 
 use crate::receiver::ReceiverFlags;
-use crate::shared::{Shared, StreamConfig};
+use crate::shared::Shared;
 
 /// Bytes one interleaved float sample occupies (`sizeof(float)`).
 const BYTES_PER_SAMPLE: i32 = 4;
@@ -17,13 +17,12 @@ const NS_TB: Rational = Rational::new(1, 1_000_000_000);
 /// Receiver-thread audio state: the input resampler, its scratch buffer, the
 /// PTS repair state machine and the last-sample memory used for silence
 /// shaping.
+#[derive(Default)]
 pub struct AudioIntake {
     swr: Option<Resampler>,
     scratch: Vec<u8>,
     pts: Option<PtsRepair>,
     last_sample: LastSample,
-    small_gap_ms: i32,
-    large_gap_ms: i32,
     /// Byte ⇄ float view for the silence shaping and the post-silence fade;
     /// see the note on `audio::pump::FloatEdit` (this crate forbids the
     /// unsafe cast, and both edits are off the steady-state path).
@@ -31,19 +30,6 @@ pub struct AudioIntake {
 }
 
 impl AudioIntake {
-    /// Fresh intake for a run; PTS-repair thresholds come from `cfg`.
-    pub fn new(cfg: &StreamConfig) -> Self {
-        Self {
-            swr: None,
-            scratch: Vec::new(),
-            pts: None,
-            last_sample: LastSample::default(),
-            small_gap_ms: cfg.small_gap_ms,
-            large_gap_ms: cfg.large_gap_ms,
-            float: Vec::new(),
-        }
-    }
-
     /// Per-connection reset (`irl_prepare_new_connection` for the audio
     /// fields): drops the resampler, resets PTS repair.
     pub fn reset(&mut self) {
@@ -56,21 +42,13 @@ impl AudioIntake {
 
     /// (Re)initialise PTS repair for the audio stream's time base
     /// (`pts_repair_init` at decoder open and after a decoder flush).
-    pub fn init_pts_repair(&mut self, cfg: &StreamConfig, tb: ffmpeg::Rational) {
-        self.small_gap_ms = cfg.small_gap_ms;
-        self.large_gap_ms = cfg.large_gap_ms;
+    pub fn init_pts_repair(&mut self, tb: ffmpeg::Rational) {
         self.pts = Some(PtsRepair::new(
-            cfg.small_gap_ms,
-            cfg.large_gap_ms,
+            consts::SMALL_GAP_MS,
+            consts::LARGE_GAP_MS,
             tb.num,
             tb.den,
         ));
-    }
-
-    /// The PTS repair state (the decode path calls `reset` on it after a
-    /// decoder flush).
-    pub fn pts_repair(&mut self) -> Option<&mut PtsRepair> {
-        self.pts.as_mut()
     }
 
     /// One decoded frame: format change handling, PTS repair, warm-up
