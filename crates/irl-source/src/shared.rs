@@ -56,6 +56,17 @@ pub struct HotConfig {
 }
 
 impl HotConfig {
+    /// Swap in the atomic hot values. The watermarks are not among them: they
+    /// publish only once the ring has grown (`config::publish_watermarks`).
+    pub fn store(&self, hot: &HotValues) {
+        self.reconnect_delay_s.store(hot.reconnect_delay_s, Relaxed);
+        self.adaptive_speed.store(hot.adaptive_speed, Relaxed);
+        self.catchup_percent.store(hot.catchup_percent, Relaxed);
+        self.wait_for_keyframe.store(hot.wait_for_keyframe, Relaxed);
+        self.clear_on_disconnect
+            .store(hot.clear_on_disconnect, Relaxed);
+    }
+
     pub fn watermarks(&self) -> Watermarks {
         *self.watermarks.lock()
     }

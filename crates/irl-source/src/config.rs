@@ -135,26 +135,7 @@ impl Config {
         }
         drop(state);
 
-        shared
-            .hot
-            .reconnect_delay_s
-            .store(self.hot.reconnect_delay_s, Relaxed);
-        shared
-            .hot
-            .adaptive_speed
-            .store(self.hot.adaptive_speed, Relaxed);
-        shared
-            .hot
-            .catchup_percent
-            .store(self.hot.catchup_percent, Relaxed);
-        shared
-            .hot
-            .wait_for_keyframe
-            .store(self.hot.wait_for_keyframe, Relaxed);
-        shared
-            .hot
-            .clear_on_disconnect
-            .store(self.hot.clear_on_disconnect, Relaxed);
+        shared.hot.store(&self.hot);
 
         effective
     }

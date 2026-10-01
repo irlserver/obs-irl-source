@@ -779,24 +779,9 @@ impl VideoThread {
         self
     }
 
-    /// Whether the pacing queue can take another frame (test seam; the thread
-    /// passes this to [`crate::shared::VideoChannel::wait`]).
-    pub fn pacing_has_room(&self) -> bool {
-        self.pacing.has_room()
-    }
-
-    /// Frames currently paced.
-    pub fn paced_len(&self) -> usize {
-        self.pacing.len()
-    }
-
-    /// Due time of the head frame.
-    pub fn next_due_ns(&self) -> Option<u64> {
-        self.pacing.next_due()
-    }
-
-    /// Frames emitted early because a pacing ceiling bound.
-    pub fn pacing_overflows(&self) -> u64 {
-        self.pacing.overflows()
+    /// The pacing queue, read-only (test seam).
+    #[doc(hidden)]
+    pub fn pacing(&self) -> &PacingQueue<Paced> {
+        &self.pacing
     }
 }

@@ -586,18 +586,18 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
     // Fill the pacing queue past its decode lead with frames due far ahead.
     let now = obs::time::gettime_ns();
     let mut pts = 0i64;
-    while thread.pacing_has_room() {
+    while thread.pacing().has_room() {
         let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
         frame.set_pts(now as i64 + 60_000_000_000 + pts);
         thread.pace_decoded(frame, now);
         pts += 33_333_333;
     }
-    assert!(!thread.pacing_has_room(), "queue should be at its lead");
+    assert!(!thread.pacing().has_room(), "queue should be at its lead");
 
     // Packets queued, no room, nothing due: there is nothing to do, so the
     // thread must sleep rather than spin.
     assert!(
-        !shared.video.has_work(thread.pacing_has_room()),
+        !shared.video.has_work(thread.pacing().has_room()),
         "the thread would spin: packets queued but no room to decode them"
     );
 
@@ -658,14 +658,14 @@ fn a_queued_frame_is_transferred_paced_and_emitted() {
 
     let emitted = recorder.only();
     assert_eq!(emitted.planes[0].0, source_plane, "still zero-copy");
-    assert_eq!(thread.paced_len(), 0);
+    assert_eq!(thread.pacing().len(), 0);
     assert!(
         !wait.is_zero(),
         "nothing left to pace: sleep the full slice"
     );
     assert_eq!(shared.lifetime.pacing_peak.load(Relaxed), 1);
     assert_eq!(shared.lifetime.pacing_now.load(Relaxed), 0);
-    assert_eq!(thread.pacing_overflows(), 0);
+    assert_eq!(thread.pacing().overflows(), 0);
 }
 
 #[test]
@@ -689,7 +689,7 @@ fn a_future_frame_waits_instead_of_being_emitted() {
     let wait = thread.run_once(now);
 
     assert_eq!(recorder.emitted().len(), 1, "not due yet");
-    assert_eq!(thread.paced_len(), 1);
+    assert_eq!(thread.pacing().len(), 1);
     assert_eq!(
         wait.as_millis() as u64,
         irl_core::consts::VIDEO_PACING_MAX_WAIT_MS,
@@ -715,7 +715,7 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
     pending.set_pts(10_000_000_000);
     thread.pace_decoded(pending, now);
     thread.run_once(now);
-    assert_eq!(thread.paced_len(), 1, "parked until its due time");
+    assert_eq!(thread.pacing().len(), 1, "parked until its due time");
 
     shared.video.request_clear();
     let wait = thread.run_once(now);
@@ -725,7 +725,7 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
         wait.is_zero(),
         "the clear cycle goes round again immediately"
     );
-    assert_eq!(thread.paced_len(), 0, "paced frames go with the clear");
+    assert_eq!(thread.pacing().len(), 0, "paced frames go with the clear");
     assert_eq!(shared.video.len(), 0);
     assert_eq!(
         recorder.emitted().len(),
@@ -754,7 +754,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     thread.run_once(now);
 
     assert!(recorder.emitted().is_empty(), "due a second from now");
-    let due = thread.next_due_ns().expect("paced");
+    let due = thread.pacing().next_due().expect("paced");
     assert_eq!(due, now + 1_000_000_000);
 
     // The audio side reclaims half of that latency; the queued frame must move
@@ -764,7 +764,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
         state.latest_obs_end_ts_ns = now + 500_000_000;
     }
     thread.run_once(now);
-    assert_eq!(thread.next_due_ns(), Some(now + 500_000_000));
+    assert_eq!(thread.pacing().next_due(), Some(now + 500_000_000));
 
     // Once the offset says "now", the frame has no margin left at all: a
     // tick's allowance is added as the standing delay, and it goes out at the
@@ -775,7 +775,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     }
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
-    assert_eq!(thread.next_due_ns(), Some(now + TICK));
+    assert_eq!(thread.pacing().next_due(), Some(now + TICK));
     thread.run_once(now + TICK);
     assert_eq!(recorder.only().timestamp, now + TICK);
 }
@@ -928,7 +928,7 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
     }
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
-    assert_eq!(thread.paced_len(), 4);
+    assert_eq!(thread.pacing().len(), 4);
 
     // Audio primes so that the first three frames map 100, 60 and 20 ms into
     // the past — all past a canvas tick — and the fourth lands 20 ms out.
@@ -938,7 +938,7 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
         recorder.emitted().is_empty(),
         "the stale frames must not go out in place of the on-time one"
     );
-    assert_eq!(thread.paced_len(), 1, "three stale frames dropped");
+    assert_eq!(thread.pacing().len(), 1, "three stale frames dropped");
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
     thread.run_once(now + 20_000_000);
@@ -991,7 +991,7 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     thread.run_once(give_up + 1_000_000);
     assert!(recorder.emitted().is_empty());
     assert_eq!(
-        thread.paced_len(),
+        thread.pacing().len(),
         0,
         "the stale frame was dropped, not anchored"
     );
@@ -1004,7 +1004,7 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     let mut fresh = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     fresh.set_pts(10_000_000_000 + 1_400_000_000);
     thread.pace_decoded(fresh, obs::time::gettime_ns());
-    let due = thread.next_due_ns().expect("paced on the fallback");
+    let due = thread.pacing().next_due().expect("paced on the fallback");
     thread.run_once(due);
     assert_eq!(recorder.only().timestamp, due);
 }
@@ -1031,7 +1031,7 @@ fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), TICK);
     // The fallback anchors on the clock as `due_time` read it, a hair after
     // `t0`, so the due time is a tick past that rather than past `t0`.
-    let due = thread.next_due_ns().expect("paced");
+    let due = thread.pacing().next_due().expect("paced");
     assert!(
         due >= t0 + TICK && due < t0 + TICK + 1_000_000,
         "due {due} vs t0 {t0}"
@@ -1117,7 +1117,7 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
                 "canvas {canvas_fps}fps, frame {i}"
             );
         }
-        assert_eq!(thread.paced_len(), 0);
+        assert_eq!(thread.pacing().len(), 0);
     }
 }
 
@@ -1146,7 +1146,7 @@ fn a_stale_startup_burst_does_not_raise_the_delay() {
     }
     thread.run_once(t0);
 
-    assert_eq!(thread.paced_len(), 2, "eighteen stale frames dropped");
+    assert_eq!(thread.pacing().len(), 2, "eighteen stale frames dropped");
     assert_eq!(
         shared.conn.video_delay_ns.load(Relaxed),
         0,
@@ -1185,7 +1185,7 @@ fn a_late_stream_is_measured_on_its_newest_frame() {
     // were stale even after that and went.
     let delay = 10 * TICK;
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), delay);
-    assert_eq!(thread.paced_len(), 1);
+    assert_eq!(thread.pacing().len(), 1);
     thread.run_once(t0 - late + delay);
     assert_eq!(recorder.only().timestamp, t0 - late + delay);
 }
@@ -1371,7 +1371,11 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
         frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
         thread.pace_decoded(frame, arrival);
         thread.run_once(arrival);
-        assert_eq!(thread.paced_len(), 0, "frame {i} neither held nor dropped");
+        assert_eq!(
+            thread.pacing().len(),
+            0,
+            "frame {i} neither held nor dropped"
+        );
     }
 
     assert_eq!(
