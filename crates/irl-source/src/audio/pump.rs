@@ -213,7 +213,7 @@ impl AudioPump {
                 // thread: that mode emits no concealment, so nothing there can
                 // advance the sample counter. Stand the clock down instead.
                 if low_latency && !has_audio {
-                    suspend_low_latency_clock(shared, state, now - next_ts);
+                    suspend_low_latency_clock(shared, state, now - next_ts, (self.now_us)());
                     return false;
                 }
                 shared.conn.audio_output_restarts.fetch_add(1, Relaxed);
@@ -614,7 +614,7 @@ impl BufferFormat {
 /// new clock when a real chunk arrives. Counted as an underrun, which is what
 /// it is. Buffered mode is untouched: its concealment keeps the counter moving,
 /// so a late clock there really is an output-side stall.
-fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64) {
+fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64, now_us: u64) {
     state.primed = false;
     state.anchor_ns = 0;
     state.samples = 0;
@@ -626,11 +626,7 @@ fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u6
 
     shared.conn.audio_underruns.fetch_add(1, Relaxed);
     shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-    super::mark_audio_recovery(
-        state,
-        ffmpeg::gettime_us() as u64,
-        consts::AUDIO_RECOVERY_HOLD_US,
-    );
+    super::mark_audio_recovery(state, now_us, consts::AUDIO_RECOVERY_HOLD_US);
     irl_warn!(
         "Low-latency audio input empty for {}ms; suspending output clock until audio resumes",
         lag_ns / 1_000_000

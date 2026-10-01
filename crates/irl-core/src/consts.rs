@@ -99,6 +99,12 @@ pub const BLEED_PACE_FILL_MS: i32 = 1000;
 pub const AUDIO_OFFSET_REANCHOR_MARGIN_MS: i64 = 400;
 /// Recovery hold after an underrun (microseconds).
 pub const AUDIO_RECOVERY_HOLD_US: u64 = 1_500_000;
+/// Recovery hold after the audio decoder was flushed or the stream timeline
+/// was reset (microseconds).
+pub const AUDIO_RESET_RECOVERY_HOLD_US: u64 = 2_500_000;
+/// How long the packet-level keyframe gate waits before giving up and feeding
+/// the decoder whatever arrives (microseconds).
+pub const VIDEO_PKT_GATE_TIMEOUT_US: u64 = 5_000_000;
 /// Hidden backlog trim trigger above target.
 pub const AUDIO_TRIM_TRIGGER_MS: i32 = 90;
 /// Fade applied when resuming from concealment.
@@ -464,6 +470,8 @@ mod tests {
         assert_eq!(BLEED_PACE_FILL_MS, 1000); // IRL_BLEED_PACE_FILL_MS
         assert_eq!(AUDIO_OFFSET_REANCHOR_MARGIN_MS, 400); // AUDIO_OFFSET_REANCHOR_MARGIN_MS
         assert_eq!(AUDIO_RECOVERY_HOLD_US, 1_500_000); // receiver-audio.c
+        assert_eq!(AUDIO_RESET_RECOVERY_HOLD_US, 2_500_000);
+        assert_eq!(VIDEO_PKT_GATE_TIMEOUT_US, 5_000_000);
         assert_eq!(AUDIO_TRIM_TRIGGER_MS, 90); // receiver-audio.c
         assert_eq!(AUDIO_CONCEAL_FADE_MS, 8); // receiver-audio.c
         assert_eq!(AUDIO_OUT_LEAD_MS, 80); // receiver-audio.c

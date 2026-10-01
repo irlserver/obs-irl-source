@@ -15,10 +15,6 @@ use irl_core::consts;
 use crate::shared::{Shared, VideoDecoder};
 use crate::video::intake::{self, DecodeState};
 
-/// How long the packet-level keyframe gate waits before giving up and feeding
-/// the decoder whatever arrives (`receiver-decode.c`).
-const VIDEO_PKT_GATE_TIMEOUT_US: u64 = 5_000_000;
-
 fn should_log_warning(last_warning_us: &mut u64, now_us: u64) -> bool {
     if *last_warning_us != 0 && now_us - *last_warning_us < consts::DECODER_WARNING_INTERVAL_US {
         return false;
@@ -63,7 +59,7 @@ fn gate_open(shared: &Shared, state: &mut DecodeState, is_key: bool) -> bool {
     if state.pkt_gate_start_us == 0 {
         state.pkt_gate_start_us = now_us;
     }
-    if now_us - state.pkt_gate_start_us < VIDEO_PKT_GATE_TIMEOUT_US {
+    if now_us - state.pkt_gate_start_us < consts::VIDEO_PKT_GATE_TIMEOUT_US {
         return false;
     }
     state.pkt_gate_open = true;

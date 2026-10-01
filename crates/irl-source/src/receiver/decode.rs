@@ -85,7 +85,11 @@ fn drain_audio_frames(
                                 buf.flush();
                             }
                             audio::reset_audio_timing_state(shared, &mut state);
-                            audio::mark_audio_recovery(&mut state, now_us, 2_500_000);
+                            audio::mark_audio_recovery(
+                                &mut state,
+                                now_us,
+                                consts::AUDIO_RESET_RECOVERY_HOLD_US,
+                            );
                         }
                         reinit_audio_pts_repair(audio_in, shared, audio_tb);
                     }

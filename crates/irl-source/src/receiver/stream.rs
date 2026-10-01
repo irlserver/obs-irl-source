@@ -491,7 +491,11 @@ impl Receiver {
                 buf.flush();
             }
             audio::reset_stream_timing_state(&shared, &mut state);
-            audio::mark_audio_recovery(&mut state, ffmpeg::gettime_us() as u64, 2_500_000);
+            audio::mark_audio_recovery(
+                &mut state,
+                ffmpeg::gettime_us() as u64,
+                consts::AUDIO_RESET_RECOVERY_HOLD_US,
+            );
             state.fade_in_pending = true;
             shared.conn.video_corrupt_frames.store(0, Relaxed);
             shared.conn.video_corrupt_held.store(0, Relaxed);
