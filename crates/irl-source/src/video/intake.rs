@@ -11,12 +11,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use irl_core::video_time;
 
 use crate::shared::Shared;
-use crate::video::output;
-
-/// Nanosecond time base every queued PTS is rescaled into: the video thread
-/// must not touch the format context, which the receiver frees on reconnect
-/// while decoded frames may still be in flight.
-const NS_TIME_BASE: ffmpeg::Rational = ffmpeg::Rational::new(1, 1_000_000_000);
 
 /// Video-thread-owned decode and intake state.
 ///
@@ -89,7 +83,7 @@ pub fn handle_frame(
     };
 
     let (width, height) = (frame.width(), frame.height());
-    let is_key = output::is_keyframe(frame);
+    let is_key = frame.is_key();
     let first_keyframe = shared.video_flags.first_keyframe.load(Relaxed);
 
     // The frame-level backstop only gates when Wait For Keyframe is on
@@ -197,7 +191,7 @@ pub fn handle_frame(
     // Convert PTS to nanoseconds against the time base the decoder was opened
     // with, which travels with it rather than being read off a format context
     // this thread does not own.
-    let pts_ns = ffmpeg::rescale_q(pts, tb, NS_TIME_BASE);
+    let pts_ns = ffmpeg::rescale_q(pts, tb, ffmpeg::NS_TIME_BASE);
 
     // Frame interval EMA, for the estimate of how many frames a given output
     // lead parks in the libobs async queue. Measured rather than taken from

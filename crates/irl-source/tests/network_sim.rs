@@ -41,7 +41,6 @@ const CHANNELS: i32 = 2;
 /// One Opus frame: 20 ms at 48 kHz.
 const CHUNK_FRAMES: i32 = 960;
 const CHUNK_NS: u64 = 20_000_000;
-const TB_NS: ffmpeg::Rational = ffmpeg::Rational::new(1, 1_000_000_000);
 
 // ── Recording sink ────────────────────────────────────────────
 
@@ -189,7 +188,7 @@ impl Sim {
         // What the decode path does when the audio decoder opens; without it
         // the intake has no PTS-repair state and discards every frame.
         let mut intake = AudioIntake::default();
-        intake.init_pts_repair(TB_NS);
+        intake.init_pts_repair(ffmpeg::NS_TIME_BASE);
 
         Self {
             intake,
@@ -318,8 +317,12 @@ impl Sim {
             self.since_delivery = 0;
             for pts in std::mem::take(&mut self.pending) {
                 let frame = Self::decoded_chunk(pts, 0.25);
-                self.intake
-                    .handle_frame(&self.shared, &mut self.flags, &frame, TB_NS);
+                self.intake.handle_frame(
+                    &self.shared,
+                    &mut self.flags,
+                    &frame,
+                    ffmpeg::NS_TIME_BASE,
+                );
                 self.delivered.push(pts);
                 if let Some(skew) = self.video_skew_ns {
                     hold::observe_video_packet(&self.shared, self.now_ns(), pts - skew);

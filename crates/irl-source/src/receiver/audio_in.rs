@@ -8,9 +8,6 @@ use irl_core::{LastSample, PtsAction, PtsRepair, consts, dsp, timing};
 use crate::receiver::ReceiverFlags;
 use crate::shared::Shared;
 
-/// Nanosecond time base.
-const NS_TB: Rational = Rational::new(1, 1_000_000_000);
-
 /// Receiver-thread audio state: the input resampler, its scratch buffer, the
 /// PTS repair state machine and the last-sample memory used for silence
 /// shaping.
@@ -189,7 +186,7 @@ impl AudioIntake {
             }
         };
 
-        let frame_pts_ns = ffmpeg::rescale_q(verdict.corrected_pts, pts_tb, NS_TB);
+        let frame_pts_ns = ffmpeg::rescale_q(verdict.corrected_pts, pts_tb, ffmpeg::NS_TIME_BASE);
         if let Some(buf) = shared.audio_buf().as_mut() {
             buf.write_pts(data, frame_pts_ns);
         }
@@ -312,8 +309,8 @@ impl AudioIntake {
             dsp::shape_silence_from_last(pcm, channels, rate, &last)
         });
 
-        let mut silence_pts_ns =
-            ffmpeg::rescale_q(corrected_pts, pts_tb, NS_TB) - silence_ms as i64 * 1_000_000;
+        let mut silence_pts_ns = ffmpeg::rescale_q(corrected_pts, pts_tb, ffmpeg::NS_TIME_BASE)
+            - silence_ms as i64 * 1_000_000;
         if silence_pts_ns < 0 {
             silence_pts_ns = 0;
         }

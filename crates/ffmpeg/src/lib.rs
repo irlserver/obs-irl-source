@@ -112,6 +112,9 @@ impl Rational {
     }
 }
 
+/// The nanosecond time base every stream timestamp is rescaled into.
+pub const NS_TIME_BASE: Rational = Rational::new(1, 1_000_000_000);
+
 impl From<Rational> for sys::AVRational {
     fn from(r: Rational) -> Self {
         sys::AVRational {

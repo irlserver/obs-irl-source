@@ -96,11 +96,6 @@ pub fn convert_color_range(range: AVColorRange) -> ColorRange {
     }
 }
 
-/// `irl_video_is_keyframe` (`video-handler.c:203-206`).
-pub fn is_keyframe(frame: &Frame) -> bool {
-    frame.is_key()
-}
-
 impl VideoThread {
     /* ── Transfer to system memory ────────────────────────── */
 
@@ -165,7 +160,7 @@ impl VideoThread {
             // This backend refuses a caller-allocated destination; stop
             // offering one.
             self.xfer_pool_broken = true;
-            self.xfer_pool_release();
+            self.xfer_pool = None;
             irl_warn!("Pooled hw frame transfer rejected; falling back to per-frame allocation");
             return None;
         }
@@ -173,13 +168,6 @@ impl VideoThread {
         // the surface size.
         dst.set_display_size(width, height);
         Some(dst)
-    }
-
-    /// `irl_video_xfer_pool_release`. Safe with pooled buffers still alive in
-    /// the pacing queue: the pool lingers internally until its last buffer is
-    /// returned.
-    pub fn xfer_pool_release(&mut self) {
-        self.xfer_pool = None;
     }
 
     /* ── Timestamp mapping ────────────────────────────────── */
@@ -268,8 +256,7 @@ impl VideoThread {
     /// a held offset belongs to audio that has stopped, and anchoring on it
     /// would be anchoring on a guess.
     pub fn mapping_published(&self) -> bool {
-        let state = self.shared.audio_state();
-        state.latest_obs_end_ts_ns != 0 && state.latest_buffered_end_pts_ns > 0
+        self.shared.audio_state().playout_mapping().is_some()
     }
 
     /// `irl_video_playout_offset` (`video-handler.c:431-453`): the current
@@ -285,13 +272,10 @@ impl VideoThread {
     /// keeps the due times the frames arrived with. The standing video delay
     /// rides on the offset, so a reschedule keeps it.
     pub fn playout_offset(&mut self) -> Option<i64> {
-        let (obs_end, buffered_end) = {
-            let state = self.shared.audio_state();
-            (state.latest_obs_end_ts_ns, state.latest_buffered_end_pts_ns)
-        };
+        let mapping = self.shared.audio_state().playout_mapping();
         let now = obs::time::gettime_ns();
 
-        if obs_end != 0 && buffered_end > 0 {
+        if let Some((obs_end, buffered_end)) = mapping {
             self.playout_offset_ns = video_time::playout_offset_ns(obs_end, buffered_end);
             self.playout_offset_time_ns = now;
         } else if self.playout_offset_time_ns == 0
@@ -329,13 +313,10 @@ impl VideoThread {
             .lifetime
             .video_lead_peak_ns
             .fetch_max(lead_ns, Relaxed);
-        if lead_ns > queue_safe_ns {
-            self.shared.lifetime.video_lead_excess.fetch_add(1, Relaxed);
-        }
-
         if lead_ns <= queue_safe_ns {
             return;
         }
+        self.shared.lifetime.video_lead_excess.fetch_add(1, Relaxed);
 
         // Only a risk while the lead is still climbing — a steady lead of any
         // size is free — so this is a "watch this" line, not a fault.
@@ -443,25 +424,21 @@ impl VideoThread {
             self.nv12_scratch.resize(need, 0);
         }
 
-        if self.scaler.is_none() {
-            match Scaler::new(sws_unstable()) {
-                Ok(scaler) => self.scaler = Some(scaler),
-                Err(err) => {
-                    irl_warn!("swscale conversion failed: {err}");
-                    return false;
-                }
-            }
-        }
-
+        let scaler = match self
+            .scaler
+            .take()
+            .map_or_else(|| Scaler::new(sws_unstable()), Ok)
         {
-            let (y, uv) = self.nv12_scratch.split_at_mut(y_size);
-            let Some(scaler) = self.scaler.as_mut() else {
-                return false;
-            };
-            if let Err(err) = scaler.scale_into_nv12(frame, y, uv, width) {
+            Ok(scaler) => self.scaler.insert(scaler),
+            Err(err) => {
                 irl_warn!("swscale conversion failed: {err}");
                 return false;
             }
+        };
+        let (y, uv) = self.nv12_scratch.split_at_mut(y_size);
+        if let Err(err) = scaler.scale_into_nv12(frame, y, uv, width) {
+            irl_warn!("swscale conversion failed: {err}");
+            return false;
         }
 
         let obs_frame = VideoFrame::new(width as u32, height as u32, VideoFormat::Nv12)

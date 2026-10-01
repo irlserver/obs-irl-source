@@ -174,6 +174,15 @@ pub struct AudioState {
     pub hold_wait_done: bool,
 }
 
+impl AudioState {
+    /// The audio → OBS playout mapping, `(latest_obs_end_ts_ns,
+    /// latest_buffered_end_pts_ns)`, once the pump has published one.
+    pub fn playout_mapping(&self) -> Option<(u64, i64)> {
+        (self.latest_obs_end_ts_ns != 0 && self.latest_buffered_end_pts_ns > 0)
+            .then_some((self.latest_obs_end_ts_ns, self.latest_buffered_end_pts_ns))
+    }
+}
+
 /// Per-connection counters: zeroed with every new `Shared`.
 #[derive(Default)]
 pub struct ConnStats {

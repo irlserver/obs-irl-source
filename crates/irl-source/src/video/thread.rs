@@ -77,7 +77,9 @@ pub struct VideoThread {
     /// Last known stream-PTS → OBS-clock offset and when it was taken.
     pub(crate) playout_offset_ns: i64,
     pub(crate) playout_offset_time_ns: u64,
-    /// Recycled destinations for `av_hwframe_transfer_data`.
+    /// Recycled destinations for `av_hwframe_transfer_data`. Safe to drop
+    /// with pooled buffers still alive in the pacing queue: the pool lingers
+    /// internally until its last buffer is returned.
     pub(crate) xfer_pool: Option<FramePool>,
     /// Latched when a backend rejects a caller-allocated destination.
     pub(crate) xfer_pool_broken: bool,
@@ -193,7 +195,7 @@ impl VideoThread {
             // A cleared source is showing nothing; no reason to keep a lead's
             // worth of recycled buffers resident while it does. The next frame
             // rebuilds the pool.
-            self.xfer_pool_release();
+            self.xfer_pool = None;
             // The offset belongs to the connection that just ended; the next
             // one brings its own PTS epoch.
             self.playout_offset_ns = 0;
@@ -236,7 +238,7 @@ impl VideoThread {
     fn finish(&mut self) {
         self.pacing.drain();
         self.decoded.clear();
-        self.xfer_pool_release();
+        self.xfer_pool = None;
         self.shared.video.drain();
         self.decoder = None;
     }
@@ -261,9 +263,7 @@ impl VideoThread {
         // until the old connection's frames drained.
         while shared.video.next_is_decoder() {
             if let Some(VideoMsg::Decoder(decoder)) = shared.video.pop() {
-                self.decoder = Some(*decoder);
-                self.state.reset();
-                self.reset_delay();
+                self.adopt_decoder(*decoder);
             }
         }
         while self.pacing.has_room() {
@@ -271,13 +271,7 @@ impl VideoThread {
                 return;
             };
             match msg {
-                VideoMsg::Decoder(decoder) => {
-                    // A new connection. Anything the old decoder produced is
-                    // already paced or was cleared with the disconnect.
-                    self.decoder = Some(*decoder);
-                    self.state.reset();
-                    self.reset_delay();
-                }
+                VideoMsg::Decoder(decoder) => self.adopt_decoder(*decoder),
                 VideoMsg::Packet(packet) => {
                     let received_ns = packet.received_ns;
                     let mut produced = std::mem::take(&mut self.decoded);
@@ -298,6 +292,14 @@ impl VideoThread {
                 }
             }
         }
+    }
+
+    /// A new connection's decoder. Anything the old one produced is already
+    /// paced or was cleared with the disconnect.
+    fn adopt_decoder(&mut self, decoder: VideoDecoder) {
+        self.decoder = Some(decoder);
+        self.state.reset();
+        self.reset_delay();
     }
 
     /// Copy one decoded frame out of the hardware pool and schedule it.

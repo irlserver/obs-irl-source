@@ -11,10 +11,6 @@ use crate::receiver::audio_in::AudioIntake;
 use crate::receiver::{Receiver, ReceiverFlags};
 use crate::shared::{Shared, TimedPacket};
 
-/// Nanosecond time base packet PTS is rescaled into for the video queue's
-/// duration bound.
-const NS_TIME_BASE: Rational = Rational::new(1, 1_000_000_000);
-
 /// Count one audio decode error. At a burst, log it (rate limited) and flush
 /// the decoder unless a flush is cooling down; returns when it flushed.
 fn audio_error_burst(
@@ -171,10 +167,9 @@ impl Receiver {
     pub(super) fn push_video_packet(&mut self) {
         // Only used to bound the queue by media duration; output timing comes
         // from the decoded frame's own PTS, after repair.
-        let pts_ns = self
-            .pkt
-            .pts_or_dts()
-            .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
+        let pts_ns = self.pkt.pts_or_dts().map_or(0, |pts| {
+            ffmpeg::rescale_q(pts, self.video_tb, ffmpeg::NS_TIME_BASE)
+        });
         let bytes = self.pkt.size().max(0) as usize;
         self.shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
         let received_ns = obs::time::gettime_ns();
@@ -182,7 +177,7 @@ impl Receiver {
         // Where the audio hold reads the sender's skew: this packet against
         // the newest audio decoded before it, in mux order.
         if let Some(dts) = self.pkt.dts_or_pts() {
-            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, NS_TIME_BASE);
+            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, ffmpeg::NS_TIME_BASE);
             crate::audio::hold::observe_video_packet(&self.shared, received_ns, dts_ns);
         }
 
