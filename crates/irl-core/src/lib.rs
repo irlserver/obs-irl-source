@@ -27,6 +27,7 @@ pub mod timing;
 pub mod url_opts;
 pub mod video_delay;
 pub mod video_time;
+mod window;
 
 pub use audio_buffer::{AudioBuffer, BufferState};
 pub use audio_hold::{AudioHold, HoldChange};
