@@ -172,7 +172,16 @@ impl AudioPump {
             .audio_fill_peak_ms
             .fetch_max(fill_ms, Relaxed);
 
-        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
+        if has_audio
+            && maybe_trim_hidden_backlog(
+                shared,
+                state,
+                fill_ms,
+                chunk_count,
+                low_latency,
+                chunk_ns,
+                lead_ns,
+            )
         {
             return true;
         }
@@ -673,12 +682,17 @@ fn maybe_reanchor_offset(
 /// live, content is never skipped: the read loop stops ingesting above a fill
 /// ceiling (transport backpressure) and playback bleeds the backlog off at up
 /// to the Catch-Up Speed.
+///
+/// `chunk_ns` and `lead_ns` are the pump's for this cycle: one output chunk
+/// and the lead kept ahead of wall clock.
 fn maybe_trim_hidden_backlog(
     shared: &Shared,
     state: &AudioState,
     fill_ms: i32,
     chunk_count: usize,
     low_latency: bool,
+    chunk_ns: u64,
+    lead_ns: u64,
 ) -> bool {
     if !shared.hot.adaptive_speed.load(Relaxed) {
         return false;
@@ -690,28 +704,10 @@ fn maybe_trim_hidden_backlog(
         return false;
     }
 
-    let out_rate = shared.audio_buf().as_ref().map_or(0, |b| b.sample_rate());
-    let mut chunk_ms = 0;
-    if out_rate > 0 && state.decoded_frame_samples > 0 {
-        chunk_ms = (state.decoded_frame_samples as i64 * 1000 / out_rate as i64) as i32;
-    }
-    if chunk_ms <= 0 {
-        chunk_ms = 21;
-    }
-
     // Keep enough to satisfy the prime threshold, which includes the OBS-side
     // lead.
-    let chunk_samples = if state.decoded_frame_samples > 0 {
-        state.decoded_frame_samples
-    } else {
-        consts::AUDIO_DEFAULT_FRAME_SAMPLES
-    };
     let target_ms = shared.hot.watermarks().target_ms;
-    let mut keep_ms = target_ms + chunk_ms;
-    if out_rate > 0 {
-        keep_ms +=
-            (timing::output_lead_ns(chunk_samples, out_rate, low_latency) / 1_000_000) as i32;
-    }
+    let keep_ms = target_ms + (chunk_ns / 1_000_000) as i32 + (lead_ns / 1_000_000) as i32;
     if fill_ms <= keep_ms + consts::AUDIO_TRIM_TRIGGER_MS {
         return false;
     }
