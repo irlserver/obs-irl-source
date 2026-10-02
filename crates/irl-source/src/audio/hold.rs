@@ -2,9 +2,10 @@
 //!
 //! The receiver reads the skew as it pushes each video packet and moves the
 //! hold ([`observe_video_packet`]). The pump waits a bounded time for the
-//! first reading before it primes ([`prime_may_wait`]) and credits what it
-//! builds afterwards ([`credit_build`]), which the video thread takes out of
-//! its standing delay. A new connection forgets the hold
+//! first reading before it primes ([`prime_may_wait`]). A hold raised after
+//! that is built by the speed controller, and the audio playout offset grows
+//! with it; the video delay is derived from that offset, so it shrinks as the
+//! hold builds without being told. A new connection forgets the hold
 //! ([`reset_connection`]).
 //!
 //! Outside low-latency mode the hold is folded into the published watermarks,
@@ -39,7 +40,7 @@ pub fn observe_video_packet(shared: &Shared, received_ns: u64, dts_ns: i64) {
     state.hold.observe(received_ns, audio_pts_ns - dts_ns);
 
     let covered_ms = covered_ms(shared, &state);
-    let change = if !state.primed {
+    let change = if !state.clock.is_primed() {
         state.hold.before_prime(state.hold_ms, covered_ms)
     } else if regulates(shared) {
         state.hold.regulate(received_ns, state.hold_ms, covered_ms)
@@ -84,27 +85,6 @@ pub fn prime_may_wait(shared: &Shared, state: &mut AudioState, now_ns: u64) -> b
     false
 }
 
-/// The pump played `played_ns` of OBS time for `consumed_ns` of stream: the
-/// playout offset grew by the difference. While a raise made after priming is
-/// still being built, that growth is the hold building, and is credited to
-/// [`AudioState::hold_built_ns`] for the video thread.
-///
-/// Caller holds `audio_state`.
-pub fn credit_build(state: &mut AudioState, played_ns: u64, consumed_ns: u64) {
-    if state.hold_unbuilt_ns == 0 || played_ns <= consumed_ns {
-        return;
-    }
-    let built_ns = (played_ns - consumed_ns).min(state.hold_unbuilt_ns);
-    state.hold_unbuilt_ns -= built_ns;
-    state.hold_built_ns += built_ns;
-}
-
-/// How far the hold has moved since the playout offset baseline was taken,
-/// which the offset is expected to follow rather than read as drift.
-pub fn moved_since_baseline_ns(state: &AudioState) -> i64 {
-    i64::from(state.hold_ms - state.offset_baseline_hold_ms) * 1_000_000
-}
-
 /// Forget the readings, keeping the hold in force: the audio timeline broke,
 /// so readings from before it no longer compare with readings after it, but
 /// the sender is the same one.
@@ -113,7 +93,6 @@ pub fn moved_since_baseline_ns(state: &AudioState) -> i64 {
 pub fn forget_readings(state: &mut AudioState) {
     state.hold.reset();
     state.hold_live.reset();
-    state.hold_unbuilt_ns = 0;
 }
 
 /// Back to no hold: a new connection measures its own. Restores Target
@@ -190,14 +169,6 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
         }
     }
 
-    if state.primed {
-        let moved_ns = u64::from(to_ms.abs_diff(from_ms)) * 1_000_000;
-        state.hold_unbuilt_ns = if to_ms > from_ms {
-            state.hold_unbuilt_ns + moved_ns
-        } else {
-            state.hold_unbuilt_ns.saturating_sub(moved_ns)
-        };
-    }
     state.hold_ms = to_ms;
     shared.conn.audio_hold_ms.store(to_ms, Relaxed);
 
@@ -215,7 +186,7 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
             "Video has arrived at most {skew_ms}ms behind its audio for {}s; releasing the audio hold from {from_ms}ms to {to_ms}ms{in_effect}",
             consts::AUDIO_HOLD_RELAX_WINDOW_MS / 1000
         );
-    } else if state.primed {
+    } else if state.clock.is_primed() {
         irl_info!(
             "Video has arrived {skew_ms}ms behind its audio for {}s; holding audio back {to_ms}ms instead of {from_ms}ms to keep lip sync, built up by playing up to 2% slow{in_effect}",
             consts::AUDIO_HOLD_RAISE_WINDOW_MS / 1000

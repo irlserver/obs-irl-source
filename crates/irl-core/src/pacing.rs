@@ -91,15 +91,16 @@ impl<F> PacingQueue<F> {
         }
     }
 
-    /// Re-derive every due time: `due = map(pts)`.
+    /// Re-derive every due time: `due = map(pts, frame)`. The frame is
+    /// passed so the caller can keep its own scheduling state on it.
     ///
     /// Rescheduling against one offset per cycle preserves the spacing
     /// between frames and moves the whole queue with the audio it is mapped
     /// to, so video follows a latency change instead of trailing it for the
     /// depth of the queue.
-    pub fn reschedule(&mut self, map: impl Fn(i64) -> u64) {
+    pub fn reschedule(&mut self, mut map: impl FnMut(i64, &mut F) -> u64) {
         for entry in &mut self.entries {
-            entry.due_ns = map(entry.pts_ns);
+            entry.due_ns = map(entry.pts_ns, &mut entry.frame);
         }
     }
 
@@ -142,23 +143,6 @@ impl<F> PacingQueue<F> {
     /// it decides whether to pop it.
     pub fn head(&self) -> Option<&F> {
         self.entries.front().map(|e| &e.frame)
-    }
-
-    /// Move every due time later by `delta_ns`: the video delay was raised.
-    /// Unlike [`Self::reschedule`] this needs no mapping, so it also serves a
-    /// queue scheduled on the video-only fallback.
-    pub fn shift(&mut self, delta_ns: u64) {
-        for entry in &mut self.entries {
-            entry.due_ns = entry.due_ns.saturating_add(delta_ns);
-        }
-    }
-
-    /// Move every due time earlier by `delta_ns`: the video delay is ramping
-    /// back down.
-    pub fn shift_earlier(&mut self, delta_ns: u64) {
-        for entry in &mut self.entries {
-            entry.due_ns = entry.due_ns.saturating_sub(delta_ns);
-        }
     }
 
     /// Pop the head.
@@ -281,7 +265,7 @@ mod tests {
         }
 
         // The offset the audio side publishes moves by +250 ms.
-        q.reschedule(|pts| (pts + 250_000_000) as u64);
+        q.reschedule(|pts, _| (pts + 250_000_000) as u64);
         let dues: Vec<u64> = q.entries.iter().map(|e| e.due_ns).collect();
         assert_eq!(dues[0], 250_000_000);
         for w in dues.windows(2) {
@@ -289,34 +273,8 @@ mod tests {
         }
 
         // And back the other way: every due time is re-derived, not adjusted.
-        q.reschedule(|pts| (pts + 100_000_000) as u64);
+        q.reschedule(|pts, _| (pts + 100_000_000) as u64);
         assert_eq!(q.next_due(), Some(100_000_000));
-    }
-
-    #[test]
-    fn shift_moves_every_due_time_and_keeps_the_head() {
-        let mut q = queue();
-        push(
-            &mut q,
-            TestFrame {
-                pts_ns: 0,
-                bytes: 1,
-            },
-            1_000,
-        );
-        push(
-            &mut q,
-            TestFrame {
-                pts_ns: 40,
-                bytes: 1,
-            },
-            1_040,
-        );
-        q.shift(500);
-        assert_eq!(q.next_due(), Some(1_500));
-        assert_eq!(q.head().map(|f| f.pts_ns), Some(0));
-        q.pop();
-        assert_eq!(q.next_due(), Some(1_540));
     }
 
     #[test]

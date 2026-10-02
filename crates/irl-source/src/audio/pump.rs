@@ -146,7 +146,7 @@ impl AudioPump {
         let lead_ns = timing::output_lead_ns(base_samples, fmt.rate, low_latency);
         let now = (self.now_ns)();
 
-        if !state.primed {
+        if !state.clock.is_primed() {
             // The speed is only computed after priming, so the controller
             // re-arms from 1.0 for as long as playback is unprimed, which is
             // the window every connection prep and runtime reset opens.
@@ -172,12 +172,21 @@ impl AudioPump {
             .audio_fill_peak_ms
             .fetch_max(fill_ms, Relaxed);
 
-        if has_audio && maybe_trim_hidden_backlog(shared, state, fill_ms, chunk_count, low_latency)
+        if has_audio
+            && maybe_trim_hidden_backlog(
+                shared,
+                state,
+                fill_ms,
+                chunk_count,
+                low_latency,
+                chunk_ns,
+                lead_ns,
+            )
         {
             return true;
         }
 
-        if state.primed {
+        if state.clock.is_primed() {
             // Cap runaway concealment latency before it desyncs A/V. Runs
             // even on a healthy-lead cycle: the offset inflates from past
             // outages, not from the current queue depth.
@@ -185,7 +194,7 @@ impl AudioPump {
                 maybe_reanchor_offset(shared, state, now, chunk_ns, fmt.target_ms);
             }
 
-            let next_ts = timing::output_next_ts(state.anchor_ns, state.samples, fmt.rate as u32);
+            let next_ts = state.clock.next_ts(fmt.rate as u32);
 
             // Enough queued ahead of wall clock — nothing to do until the
             // lead runs down, and the output clock says exactly when that is.
@@ -215,13 +224,12 @@ impl AudioPump {
                     "Audio output stalled {}ms; restarting output clock",
                     (now - next_ts) / 1_000_000
                 );
-                state.anchor_ns = now + chunk_ns;
-                state.samples = 0;
+                state.clock.restart(now + chunk_ns);
                 state.conceal_fade_pending = true;
             }
         }
 
-        if !state.primed {
+        if !state.clock.is_primed() {
             let mut prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
             // Elsewhere the hold is part of the target already; low-latency
             // mode has none, and keeps the hold queued instead.
@@ -238,10 +246,7 @@ impl AudioPump {
                 return false;
             }
 
-            state.primed = true;
-            state.hold_unbuilt_ns = 0;
-            state.anchor_ns = now + chunk_ns;
-            state.samples = 0;
+            state.clock.restart(now + chunk_ns);
             // Reads and writes are both whole decoded chunks, so the residual
             // can only ever be a multiple of one: a 120ms target is not a
             // level the buffer can hold, and the loop straddles it at 106 or
@@ -421,7 +426,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
             }
         }
 
-        let timestamp = super::output_claim(state, frames_out, fmt.rate as u32);
+        let timestamp = state.clock.claim(frames_out, fmt.rate as u32);
         let emitted: &[u8] = if use_speed_buf {
             &self.speed_scratch[..emit_bytes]
         } else {
@@ -437,20 +442,14 @@ Video stays in sync with it; check the sender's frame rate and clock",
         ));
 
         state.out_last.remember_bytes(emitted, channels);
-        super::hold::credit_build(
-            state,
-            timing::frames_to_ns(u64::from(frames_out), fmt.rate as u32),
-            stream_duration_ns,
-        );
-        let first_mapping = state.latest_obs_end_ts_ns == 0;
+        let first_mapping = !state.mapping.has_output();
         finalize_audio_output(
             shared,
             state,
             timestamp,
             frames_out,
             fmt.rate as u32,
-            chunk_pts_ns,
-            stream_duration_ns,
+            chunk_pts_ns + stream_duration_ns as i64,
         );
         if first_mapping {
             // Video holds its first frame until this mapping exists and then
@@ -484,7 +483,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
         // subsequent ones are pure silence.
         state.out_last.forget();
 
-        let timestamp = super::output_claim(state, frames as u32, fmt.rate as u32);
+        let timestamp = state.clock.claim(frames as u32, fmt.rate as u32);
         self.sink.output_audio(&obs::AudioFrame::interleaved(
             &self.pump_scratch[..silence_bytes],
             frames as u32,
@@ -497,14 +496,14 @@ Video stays in sync with it; check the sender's frame rate and clock",
         // Stream PTS does not advance during concealment: the video mapping
         // offset grows by the outage length, which matches the real playout
         // delay until the hidden trim pulls it back.
+        let pts_end_ns = state.mapping.pts_end_ns();
         finalize_audio_output(
             shared,
             state,
             timestamp,
             frames as u32,
             fmt.rate as u32,
-            state.latest_buffered_end_pts_ns,
-            0,
+            pts_end_ns,
         );
         true
     }
@@ -599,12 +598,8 @@ impl BufferFormat {
 /// never gets here: its concealment keeps the counter moving, so a late clock
 /// there really is an output-side stall.
 fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64, now_us: u64) {
-    state.primed = false;
-    state.anchor_ns = 0;
-    state.samples = 0;
-    state.latest_obs_end_ts_ns = 0;
-    state.latest_buffered_end_pts_ns = 0;
-    state.offset_baseline_set = false;
+    state.clock.stand_down();
+    state.mapping.clear();
     state.conceal_fade_pending = true;
 
     shared.conn.audio_underruns.fetch_add(1, Relaxed);
@@ -636,28 +631,16 @@ fn maybe_reanchor_offset(
     chunk_ns: u64,
     buffer_target_ms: i32,
 ) {
-    if state.latest_obs_end_ts_ns == 0 || state.latest_buffered_end_pts_ns <= 0 {
+    // The baseline is the first offset seen after priming.
+    if state.mapping.take_baseline(state.hold_ms) {
         return;
     }
-
-    let offset_ns = state.latest_obs_end_ts_ns as i64 - state.latest_buffered_end_pts_ns;
-
-    // The offset's absolute value is arbitrary (it carries the stream's PTS
-    // epoch); only its drift from the primed baseline is meaningful, so
-    // anchor the comparison the first time a valid offset is seen after
-    // priming.
-    if !state.offset_baseline_set {
-        state.offset_baseline_ns = offset_ns;
-        state.offset_baseline_hold_ms = state.hold_ms;
-        state.offset_baseline_set = true;
-        return;
-    }
-
     // A raised audio hold grows the offset on purpose, by playing slower
     // until the buffer holds it; that is latency asked for, not drift.
+    let Some(excess_ns) = state.mapping.drift_ns(state.hold_ms) else {
+        return;
+    };
     let margin_ns = consts::AUDIO_OFFSET_REANCHOR_MARGIN_MS * 1_000_000;
-    let excess_ns =
-        offset_ns - state.offset_baseline_ns - super::hold::moved_since_baseline_ns(state);
     if excess_ns <= margin_ns {
         return;
     }
@@ -676,11 +659,8 @@ fn maybe_reanchor_offset(
         return;
     }
 
-    state.anchor_ns = now + chunk_ns;
-    state.samples = 0;
-    state.latest_obs_end_ts_ns = 0;
-    state.latest_buffered_end_pts_ns = 0;
-    state.offset_baseline_set = false;
+    state.clock.restart(now + chunk_ns);
+    state.mapping.clear();
     state.conceal_fade_pending = true;
 
     shared.lifetime.audio_offset_reanchors.fetch_add(1, Relaxed);
@@ -696,45 +676,32 @@ fn maybe_reanchor_offset(
 /// live, content is never skipped: the read loop stops ingesting above a fill
 /// ceiling (transport backpressure) and playback bleeds the backlog off at up
 /// to the Catch-Up Speed.
+///
+/// `chunk_ns` and `lead_ns` are the pump's for this cycle: one output chunk
+/// and the lead kept ahead of wall clock.
 fn maybe_trim_hidden_backlog(
     shared: &Shared,
     state: &AudioState,
     fill_ms: i32,
     chunk_count: usize,
     low_latency: bool,
+    chunk_ns: u64,
+    lead_ns: u64,
 ) -> bool {
     if !shared.hot.adaptive_speed.load(Relaxed) {
         return false;
     }
-    if low_latency || state.primed {
+    if low_latency || state.clock.is_primed() {
         return false;
     }
     if chunk_count <= 1 {
         return false;
     }
 
-    let out_rate = shared.audio_buf().as_ref().map_or(0, |b| b.sample_rate());
-    let mut chunk_ms = 0;
-    if out_rate > 0 && state.decoded_frame_samples > 0 {
-        chunk_ms = (state.decoded_frame_samples as i64 * 1000 / out_rate as i64) as i32;
-    }
-    if chunk_ms <= 0 {
-        chunk_ms = 21;
-    }
-
     // Keep enough to satisfy the prime threshold, which includes the OBS-side
     // lead.
-    let chunk_samples = if state.decoded_frame_samples > 0 {
-        state.decoded_frame_samples
-    } else {
-        consts::AUDIO_DEFAULT_FRAME_SAMPLES
-    };
     let target_ms = shared.hot.watermarks().target_ms;
-    let mut keep_ms = target_ms + chunk_ms;
-    if out_rate > 0 {
-        keep_ms +=
-            (timing::output_lead_ns(chunk_samples, out_rate, low_latency) / 1_000_000) as i32;
-    }
+    let keep_ms = target_ms + (chunk_ns / 1_000_000) as i32 + (lead_ns / 1_000_000) as i32;
     if fill_ms <= keep_ms + consts::AUDIO_TRIM_TRIGGER_MS {
         return false;
     }
@@ -760,22 +727,18 @@ fn maybe_trim_hidden_backlog(
     true
 }
 
-/// Publish the playout mapping and count the chunk.
+/// Publish the playout mapping for a chunk of `frames` submitted at
+/// `timestamp` whose content ends at stream PTS `pts_end_ns`, and count it.
 fn finalize_audio_output(
     shared: &Shared,
     state: &mut AudioState,
     timestamp: u64,
     frames: u32,
-    samples_per_sec: u32,
-    chunk_pts_ns: i64,
-    stream_duration_ns: u64,
+    rate: u32,
+    pts_end_ns: i64,
 ) {
-    state.latest_buffered_end_pts_ns = chunk_pts_ns + stream_duration_ns as i64;
-    state.latest_obs_end_ts_ns = if samples_per_sec > 0 {
-        timestamp + frames as u64 * 1_000_000_000 / samples_per_sec as u64
-    } else {
-        timestamp
-    };
+    let obs_end_ns = timestamp + timing::frames_to_ns(u64::from(frames), rate);
+    state.mapping.publish(obs_end_ns, pts_end_ns);
     shared.conn.total_audio_frames.fetch_add(1, Relaxed);
 }
 

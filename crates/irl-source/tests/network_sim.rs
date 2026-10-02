@@ -31,7 +31,7 @@ use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
 use obs_irl_source::shared::Shared;
 
-use common::{CHANNELS, CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
+use common::{CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
 
 // ── The simulated plugin ──────────────────────────────────────
 
@@ -175,12 +175,8 @@ impl Sim {
         let skew = self.video_skew_ns.expect("a sender with video");
         let pts = self.delivered.last().expect("audio delivered") - skew;
         let state = self.shared.audio_state();
-        assert!(state.latest_obs_end_ts_ns != 0, "audio has not primed");
-        let due = irl_core::video_time::map_through_playout(
-            pts,
-            state.latest_obs_end_ts_ns,
-            state.latest_buffered_end_pts_ns,
-        );
+        assert!(state.mapping.has_output(), "audio has not primed");
+        let due = state.mapping.map(pts).expect("a published mapping");
         (due as i64 - self.now_ns() as i64) / 1_000_000
     }
 
@@ -193,35 +189,6 @@ impl Sim {
             .audio_buf()
             .as_ref()
             .map_or(0, irl_core::AudioBuffer::fill_ms)
-    }
-
-    /// One decoded audio chunk of constant-valued PCM, as the decoder would
-    /// hand it to the intake.
-    fn decoded_chunk(pts_ns: i64, value: f32) -> ffmpeg::Frame {
-        let mut frame = ffmpeg::Frame::new().unwrap();
-        // SAFETY: setting the audio parameters before av_frame_get_buffer is
-        // the documented allocation sequence; the buffer is then written
-        // through its own data pointer for exactly nb_samples * channels
-        // samples.
-        unsafe {
-            let raw = frame.as_mut_ptr();
-            (*raw).format = ffmpeg::AVSampleFormat::AV_SAMPLE_FMT_FLT as core::ffi::c_int;
-            (*raw).nb_samples = CHUNK_FRAMES;
-            (*raw).sample_rate = RATE;
-            ffmpeg::sys::av_channel_layout_default(&raw mut (*raw).ch_layout, CHANNELS);
-            assert_eq!(ffmpeg::sys::av_frame_get_buffer(raw, 0), 0);
-            (*raw).pts = pts_ns;
-            // In the frame's time base, which here is nanoseconds — not a
-            // sample count. PTS repair sizes its expected gap from this.
-            (*raw).duration = CHUNK_NS as i64;
-
-            let dst = (*raw).data[0];
-            for i in 0..(CHUNK_FRAMES * CHANNELS) as usize {
-                let bytes = value.to_le_bytes();
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(i * 4), 4);
-            }
-        }
-        frame
     }
 
     /// Advance one chunk of wall clock. `link` says whether the sender's output
@@ -240,7 +207,7 @@ impl Sim {
         if link == Link::Up && self.since_delivery >= self.burst_ticks {
             self.since_delivery = 0;
             for pts in std::mem::take(&mut self.pending) {
-                let frame = Self::decoded_chunk(pts, 0.25);
+                let frame = common::decoded_audio(pts, CHUNK_NS as i64, CHUNK_FRAMES, |_, _| 0.25);
                 self.intake.handle_frame(
                     &self.shared,
                     &mut self.flags,
@@ -675,7 +642,10 @@ fn audio_starts_without_a_skew_reading_once_the_wait_runs_out() {
 /// covers it; after the raise window the hold rises to match, and the speed
 /// controller builds it by playing slower until video is back on time. The
 /// growth is the hold the user did not have to ask for, so it must not be
-/// mistaken for concealment drift and thrown away by a re-anchor.
+/// mistaken for concealment drift and thrown away by a re-anchor. Built, the
+/// playout leaves video a canvas tick in hand on top of the tick it needs to
+/// decode: the floor any delay was sized to sits under the offset, and the
+/// delay it implies is zero.
 #[test]
 fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     let mut sim = Sim::new(120).with_video_trailing_by(50);
@@ -694,10 +664,16 @@ fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     // target: about a minute for 600 ms.
     sim.run(70.0, Link::Up);
     sim.assert_in_lip_sync();
-    let built_ms = sim.shared.audio_state().hold_built_ns / 1_000_000;
+    let built_ms = sim.mean_fill_ms(10.0);
     assert!(
-        (590..=600).contains(&built_ms),
-        "credited {built_ms}ms of a 600ms raise to the video thread"
+        (built_ms - f64::from(120 + 600)).abs() <= 25.0,
+        "the buffer holds {built_ms:.1}ms against a 720ms target"
+    );
+    let tick_ms = (consts::VIDEO_CANVAS_TICK_DEFAULT_NS / 1_000_000) as i64;
+    assert!(
+        sim.video_margin_now_ms() >= 2 * tick_ms,
+        "video arriving now is {}ms early: a floor sized from this skew would still delay it",
+        sim.video_margin_now_ms()
     );
     assert_eq!(sim.reanchors(), 0, "the hold building was read as drift");
     sim.assert_healthy();

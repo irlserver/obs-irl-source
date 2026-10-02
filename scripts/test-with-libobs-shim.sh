@@ -21,7 +21,7 @@ fi
 
 # The tests whose libobs imports the shim covers. shell_stats is not one of
 # them: calldata is real libobs bookkeeping and needs the real library.
-TESTS=(audio_core network_sim video_pipeline)
+TESTS=(audio_core av_sync_sim network_sim video_pipeline)
 
 SHIM_SRC=scripts/libobs-shim/libobs_shim.c
 SHIM_DIR=target/libobs-shim

@@ -17,6 +17,55 @@ pub fn output_next_ts(anchor_ns: u64, samples: u64, rate: u32) -> u64 {
     anchor_ns.wrapping_add(offset as u64)
 }
 
+/// The audio output clock: [`output_next_ts`] over an anchor set when playback
+/// primes and a count of the samples claimed since.
+///
+/// The anchor only moves through [`Self::restart`] and [`Self::stand_down`],
+/// which are the declared restarts; every other timestamp is a claim on the
+/// counter, so consecutive submissions stay contiguous.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OutputClock {
+    primed: bool,
+    anchor_ns: u64,
+    samples: u64,
+}
+
+impl OutputClock {
+    /// Whether a clock line is running.
+    pub fn is_primed(&self) -> bool {
+        self.primed
+    }
+
+    /// Samples claimed since the clock line started.
+    pub fn samples(&self) -> u64 {
+        self.samples
+    }
+
+    /// Start a new clock line whose first sample plays at `at_ns`.
+    pub fn restart(&mut self, at_ns: u64) {
+        self.primed = true;
+        self.anchor_ns = at_ns;
+        self.samples = 0;
+    }
+
+    /// Stop the clock line until the next [`Self::restart`].
+    pub fn stand_down(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The timestamp the next claimed sample will carry.
+    pub fn next_ts(&self, rate: u32) -> u64 {
+        output_next_ts(self.anchor_ns, self.samples, rate)
+    }
+
+    /// Reserve `frames` and return the timestamp of the first of them.
+    pub fn claim(&mut self, frames: u32, rate: u32) -> u64 {
+        let ts = self.next_ts(rate);
+        self.samples += u64::from(frames);
+        ts
+    }
+}
+
 /// Lead kept ahead of wall clock: `max(AUDIO_OUT_LEAD_MS, 3 chunks)`, or one
 /// chunk in low-latency mode.
 ///
@@ -338,6 +387,55 @@ mod tests {
         // 10 000 chunks in, the clock is still anchored, not drifting.
         let total_ns = (samples * 1_000_000_000 + 24_000) / 48_000;
         assert_eq!(prev, anchor + total_ns);
+    }
+
+    #[test]
+    fn a_clock_starts_unprimed_and_a_restart_primes_it() {
+        let mut clock = OutputClock::default();
+        assert!(!clock.is_primed());
+        clock.restart(1_000);
+        assert!(clock.is_primed());
+        assert_eq!(clock.samples(), 0);
+        assert_eq!(clock.next_ts(RATE as u32), 1_000);
+    }
+
+    #[test]
+    fn claims_are_contiguous_on_the_counter() {
+        let anchor = 5_000_000_000;
+        let mut clock = OutputClock::default();
+        clock.restart(anchor);
+        let mut samples = 0u64;
+        for frames in [1024u32, 1000, 1031, 1024] {
+            let ts = clock.claim(frames, RATE as u32);
+            assert_eq!(ts, output_next_ts(anchor, samples, RATE as u32));
+            samples += u64::from(frames);
+        }
+        assert_eq!(clock.samples(), samples);
+        assert_eq!(
+            clock.next_ts(RATE as u32),
+            output_next_ts(anchor, samples, RATE as u32)
+        );
+    }
+
+    #[test]
+    fn a_restart_drops_the_claimed_samples_and_moves_the_anchor() {
+        let mut clock = OutputClock::default();
+        clock.restart(1_000_000_000);
+        clock.claim(4800, RATE as u32);
+        clock.restart(3_000_000_000);
+        assert!(clock.is_primed());
+        assert_eq!(clock.samples(), 0);
+        assert_eq!(clock.claim(1024, RATE as u32), 3_000_000_000);
+    }
+
+    #[test]
+    fn standing_down_unprimes_and_forgets_the_line() {
+        let mut clock = OutputClock::default();
+        clock.restart(1_000_000_000);
+        clock.claim(1024, RATE as u32);
+        clock.stand_down();
+        assert_eq!(clock, OutputClock::default());
+        assert!(!clock.is_primed());
     }
 
     #[test]

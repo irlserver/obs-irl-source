@@ -16,7 +16,8 @@ mod common;
 use obs_irl_source::{shared, video};
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::time::Duration;
 
 use ffmpeg::AVPixelFormat as Pix;
 use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
@@ -97,13 +98,38 @@ fn shared() -> Arc<Shared> {
     )
 }
 
-fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>) {
+/// The OBS clock the video thread reads, stepped by the test.
+#[derive(Clone)]
+struct Clock(Arc<AtomicU64>);
+
+impl Clock {
+    fn now(&self) -> u64 {
+        self.0.load(Relaxed)
+    }
+
+    fn set(&self, now_ns: u64) {
+        self.0.store(now_ns, Relaxed);
+    }
+}
+
+fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>, Clock) {
     let recorder = Arc::new(Recorder::default());
+    // Far enough from zero that the tests can stamp arrivals seconds in the
+    // past.
+    let clock = Clock(Arc::new(AtomicU64::new(100_000_000_000)));
+    let reads = clock.clone();
     // No libobs is running, so the real canvas tick would fault; 60fps is
     // what a default OBS install reports.
     let thread = VideoThread::with_sink(shared, Box::new(RecorderSink(recorder.clone())))
-        .with_canvas_tick(Box::new(|| Some(16_666_667)));
-    (thread, recorder)
+        .with_canvas_tick(Box::new(|| Some(16_666_667)))
+        .with_clock(Box::new(move || reads.now()));
+    (thread, recorder, clock)
+}
+
+/// One pass of the video thread's loop with the clock at `now_ns`.
+fn run_at(thread: &mut VideoThread, clock: &Clock, now_ns: u64) -> Duration {
+    clock.set(now_ns);
+    thread.run_once()
 }
 
 /// A software frame with real buffers.
@@ -208,7 +234,7 @@ fn colour_spaces_map_the_way_the_c_did() {
 
 #[test]
 fn sysmem_frames_are_referenced_not_copied() {
-    let (mut thread, _recorder) = thread_with(shared());
+    let (mut thread, _recorder, _) = thread_with(shared());
     let frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
 
     let out = thread.to_sysmem(&frame).expect("system-memory passthrough");
@@ -229,7 +255,7 @@ fn sysmem_frames_are_referenced_not_copied() {
 
 #[test]
 fn a_mappable_frame_lends_its_planes_to_libobs() {
-    let (mut thread, recorder) = thread_with(shared());
+    let (mut thread, recorder, _) = thread_with(shared());
     let frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
 
     thread.output_frame(&frame, 1_234_567_890);
@@ -252,7 +278,7 @@ fn a_mappable_frame_lends_its_planes_to_libobs() {
 
 #[test]
 fn an_unmappable_frame_arrives_as_nv12_from_the_scaler() {
-    let (mut thread, recorder) = thread_with(shared());
+    let (mut thread, recorder, _) = thread_with(shared());
     // 10-bit 4:4:4 is not in the OBS table, so it has to be converted.
     let frame = sw_frame(Pix::AV_PIX_FMT_YUV444P10LE, 64, 32);
     assert_eq!(output::avpixfmt_to_obs(frame.pix_fmt()), VideoFormat::None);
@@ -456,16 +482,16 @@ fn a_resolution_change_re_anchors_the_video_clock() {
 #[test]
 fn a_frame_is_handed_over_a_lead_before_it_is_due() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // Anchor the play head first: the very first frame out deliberately gets
     // no lead, so a second frame is needed to see one. The video-only fallback
     // schedules it at its arrival, so it is delayed by a tick first (see
     // `video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback`).
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     feed(&mut thread, t0 as i64, t0);
     let now = t0 + TICK;
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(recorder.emitted().len(), 1, "anchor frame emitted");
 
     // A frame due 25ms out: inside two 60fps ticks (33.3ms) of the lead, so
@@ -473,7 +499,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
     // time is its PTS on the fallback epoch plus the delay: `t0 + 25 ms +
     // 1 tick`, 25 ms from `now`.)
     feed(&mut thread, t0 as i64 + 25_000_000, t0);
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(
         recorder.emitted().len(),
         2,
@@ -482,7 +508,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
 
     // One due far out still waits.
     feed(&mut thread, t0 as i64 + 500_000_000, now);
-    let wait = thread.run_once(now);
+    let wait = run_at(&mut thread, &clock, now);
     assert_eq!(recorder.emitted().len(), 2, "not due, not delivered");
     assert!(!wait.is_zero(), "should sleep toward the lead");
 }
@@ -498,7 +524,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
 #[test]
 fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
     let shared = shared();
-    let (mut thread, _recorder) = thread_with(shared.clone());
+    let (mut thread, _recorder, clock) = thread_with(shared.clone());
 
     // A backlog of packets, as any target above the decode lead produces.
     for i in 0..200 {
@@ -507,7 +533,7 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
     assert!(!shared.video.is_empty());
 
     // Fill the pacing queue past its decode lead with frames due far ahead.
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     let mut pts = 0i64;
     while thread.pacing().has_room() {
         feed(&mut thread, now as i64 + 60_000_000_000 + pts, now);
@@ -547,19 +573,19 @@ fn a_decoder_handover_is_taken_even_with_no_pacing_room() {
 #[test]
 fn a_queued_frame_is_transferred_paced_and_emitted() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     // The receiver hands the queue nanosecond PTS.
     queued.set_pts(5_000_000_000);
     let source_plane = queued.plane(0).unwrap().as_ptr() as usize;
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     thread.pace_decoded(queued, now);
 
     // With no audio mapping the video-only anchor puts the first frame at its
     // arrival, and a tick's allowance is added as the standing delay: one
     // cycle at that due time takes it all the way out.
-    let wait = thread.run_once(now + TICK);
+    let wait = run_at(&mut thread, &clock, now + TICK);
 
     let emitted = recorder.only();
     assert_eq!(emitted.planes[0].0, source_plane, "still zero-copy");
@@ -576,20 +602,20 @@ fn a_queued_frame_is_transferred_paced_and_emitted() {
 #[test]
 fn a_future_frame_waits_instead_of_being_emitted() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
     // 200 ms into the future on the video-only anchor: the fallback anchors on
     // the first frame, so pace the *second* one forward.
     queued.set_pts(0);
     thread.pace_decoded(queued, now);
     let now = now + TICK;
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(recorder.emitted().len(), 1, "the anchor frame goes out");
 
     feed(&mut thread, 200_000_000, now);
-    let wait = thread.run_once(now);
+    let wait = run_at(&mut thread, &clock, now);
 
     assert_eq!(recorder.emitted().len(), 1, "not due yet");
     assert_eq!(thread.pacing().len(), 1);
@@ -604,20 +630,20 @@ fn a_future_frame_waits_instead_of_being_emitted() {
 #[test]
 fn a_clear_request_drops_the_queue_and_blanks_the_source() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     feed(&mut thread, 0, now);
     let now = now + TICK;
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(recorder.emitted().len(), 1);
 
     feed(&mut thread, 10_000_000_000, now);
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(thread.pacing().len(), 1, "parked until its due time");
 
     shared.video.request_clear();
-    let wait = thread.run_once(now);
+    let wait = run_at(&mut thread, &clock, now);
 
     assert_eq!(recorder.cleared.load(Relaxed), 1);
     assert!(
@@ -636,19 +662,18 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
 #[test]
 fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // Audio that ends at stream PTS 10 s plays out at OBS time `now + 1 s`:
     // everything maps 1 s into the future minus 10 s of stream time.
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now + 1_000_000_000;
-        state.latest_buffered_end_pts_ns = 10_000_000_000;
+        state.mapping.publish(now + 1_000_000_000, 10_000_000_000);
     }
 
     feed(&mut thread, 10_000_000_000, now);
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
 
     assert!(recorder.emitted().is_empty(), "due a second from now");
     let due = thread.pacing().next_due().expect("paced");
@@ -658,9 +683,9 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     // with it rather than trailing by the depth of the queue.
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now + 500_000_000;
+        state.mapping.publish(now + 500_000_000, 10_000_000_000);
     }
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert_eq!(thread.pacing().next_due(), Some(now + 500_000_000));
 
     // Once the offset says "now", the frame has no margin left at all: a
@@ -668,19 +693,19 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     // end of it.
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now;
+        state.mapping.publish(now, 10_000_000_000);
     }
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert!(recorder.emitted().is_empty());
     assert_eq!(thread.pacing().next_due(), Some(now + TICK));
-    thread.run_once(now + TICK);
+    run_at(&mut thread, &clock, now + TICK);
     assert_eq!(recorder.only().timestamp, now + TICK);
 }
 
 #[test]
 fn clearing_the_ts_init_mirror_re_anchors_the_fallback_clock() {
     let shared = shared();
-    let (mut thread, _recorder) = thread_with(shared.clone());
+    let (mut thread, _recorder, _) = thread_with(shared.clone());
 
     // No audio mapping, so the video-only anchor runs: the first frame anchors
     // the epoch at `now`.
@@ -710,14 +735,13 @@ fn clearing_the_ts_init_mirror_re_anchors_the_fallback_clock() {
 #[test]
 fn a_frame_is_due_where_the_audio_mapping_puts_it() {
     let shared = shared();
-    let (mut thread, _recorder) = thread_with(shared.clone());
+    let (mut thread, _recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     {
         let mut state = shared.audio_state();
         // A frame at stream PTS 0 maps two seconds into the future.
-        state.latest_obs_end_ts_ns = now + 2_000_000_000;
-        state.latest_buffered_end_pts_ns = 1;
+        state.mapping.publish(now + 2_000_000_000, 1);
     }
 
     let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
@@ -758,17 +782,16 @@ fn a_disabled_keyframe_gate_passes_non_key_frames() {
 /// `buffered_end_pts_ns` plays out at OBS time `obs_end_ts_ns`.
 fn publish_mapping(shared: &Shared, obs_end_ts_ns: u64, buffered_end_pts_ns: i64) {
     let mut state = shared.audio_state();
-    state.latest_obs_end_ts_ns = obs_end_ts_ns;
-    state.latest_buffered_end_pts_ns = buffered_end_pts_ns;
+    state.mapping.publish(obs_end_ts_ns, buffered_end_pts_ns);
 }
 
 /// Anchor the play head on a frame at stream PTS 10 s that arrives at the
 /// returned OBS time and maps 100 ms out: a comfortable margin.
-fn anchor_with_margin(shared: &Shared, thread: &mut VideoThread) -> u64 {
-    let t0 = obs::time::gettime_ns();
+fn anchor_with_margin(shared: &Shared, thread: &mut VideoThread, clock: &Clock) -> u64 {
+    let t0 = clock.now();
     publish_mapping(shared, t0 + 100_000_000, 10_000_000_000);
     feed(thread, 10_000_000_000, t0);
-    thread.run_once(t0 + 100_000_000);
+    run_at(thread, clock, t0 + 100_000_000);
     t0
 }
 
@@ -789,13 +812,13 @@ fn shared_with_audio() -> Arc<Shared> {
 #[test]
 fn video_waits_for_the_audio_mapping_before_anchoring_the_play_head() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     feed(&mut thread, 10_000_000_000, now);
 
     // Well past the fallback due time (+120 ms): still held.
-    let wait = thread.run_once(now + 300_000_000);
+    let wait = run_at(&mut thread, &clock, now + 300_000_000);
     assert!(
         recorder.emitted().is_empty(),
         "no mapping yet, nothing may anchor"
@@ -804,9 +827,9 @@ fn video_waits_for_the_audio_mapping_before_anchoring_the_play_head() {
 
     // Audio primes: the chunk ending at stream PTS 10 s plays at +400 ms.
     publish_mapping(&shared, now + 400_000_000, 10_000_000_000);
-    thread.run_once(now + 350_000_000);
+    run_at(&mut thread, &clock, now + 350_000_000);
     assert!(recorder.emitted().is_empty(), "due at +400 ms, not before");
-    thread.run_once(now + 400_000_000);
+    run_at(&mut thread, &clock, now + 400_000_000);
     assert_eq!(recorder.only().timestamp, now + 400_000_000);
 }
 
@@ -819,11 +842,11 @@ fn video_waits_for_the_audio_mapping_before_anchoring_the_play_head() {
 #[test]
 fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // 25 fps: 40 ms apart, so no two frames fall inside one 60fps tick,
     // arriving in real time over the 160 ms before the mapping.
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     for i in 0..4 {
         feed(
             &mut thread,
@@ -831,14 +854,14 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
             now - 160_000_000 + i as u64 * 40_000_000,
         );
     }
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert!(recorder.emitted().is_empty());
     assert_eq!(thread.pacing().len(), 4);
 
     // Audio primes so that the first three frames map 100, 60 and 20 ms into
     // the past — all past a canvas tick — and the fourth lands 20 ms out.
     publish_mapping(&shared, now - 100_000_000, 10_000_000_000);
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert!(
         recorder.emitted().is_empty(),
         "the stale frames must not go out in place of the on-time one"
@@ -846,7 +869,7 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
     assert_eq!(thread.pacing().len(), 1, "three stale frames dropped");
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
-    thread.run_once(now + 20_000_000);
+    run_at(&mut thread, &clock, now + 20_000_000);
     assert_eq!(recorder.only().timestamp, now + 20_000_000);
 }
 
@@ -855,13 +878,13 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
 #[test]
 fn a_frame_late_by_under_a_canvas_tick_still_anchors() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     feed(&mut thread, 10_000_000_000, now - 50_000_000);
     publish_mapping(&shared, now, 10_000_000_000);
 
-    thread.run_once(now + 10_000_000);
+    run_at(&mut thread, &clock, now + 10_000_000);
     assert_eq!(
         recorder.only().timestamp,
         now,
@@ -874,22 +897,22 @@ fn a_frame_late_by_under_a_canvas_tick_still_anchors() {
 #[test]
 fn video_stops_waiting_for_audio_that_never_primes() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let now = obs::time::gettime_ns();
+    let now = clock.now();
     feed(&mut thread, 10_000_000_000, now);
-    thread.run_once(now);
+    run_at(&mut thread, &clock, now);
     assert!(recorder.emitted().is_empty());
 
     // warm-up 150 + target 120 + lead 80 + the audio hold's wait for a skew
     // reading 2000 + margin 1000.
     let give_up = now + 3_350_000_000;
-    thread.run_once(give_up - 1_000_000);
+    run_at(&mut thread, &clock, give_up - 1_000_000);
     assert!(recorder.emitted().is_empty(), "still inside the wait");
 
     // Past it: the held frame is stale by more than a tick and is dropped,
     // and a fresh frame goes out on the fallback at its own due time.
-    thread.run_once(give_up + 1_000_000);
+    run_at(&mut thread, &clock, give_up + 1_000_000);
     assert!(recorder.emitted().is_empty());
     assert_eq!(
         thread.pacing().len(),
@@ -897,18 +920,9 @@ fn video_stops_waiting_for_audio_that_never_primes() {
         "the stale frame was dropped, not anchored"
     );
 
-    // The fallback schedules against the real clock (`due_time` reads it),
-    // so the frame's arrival has to be on that clock too: stamped with the
-    // test's 1.35 s of pretend time it would look a second late, which in
-    // production cannot happen (a packet never arrives after a due time the
-    // fallback capped at now + 200 ms).
-    feed(
-        &mut thread,
-        10_000_000_000 + 1_400_000_000,
-        obs::time::gettime_ns(),
-    );
+    feed(&mut thread, 10_000_000_000 + 1_400_000_000, clock.now());
     let due = thread.pacing().next_due().expect("paced on the fallback");
-    thread.run_once(due);
+    run_at(&mut thread, &clock, due);
     assert_eq!(recorder.only().timestamp, due);
 }
 
@@ -920,25 +934,20 @@ fn video_stops_waiting_for_audio_that_never_primes() {
 #[test]
 fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
     let shared = shared();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     feed(&mut thread, t0 as i64, t0);
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
     assert!(
         recorder.emitted().is_empty(),
         "no audio to wait for, but not decodable in time either"
     );
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), TICK);
-    // The fallback anchors on the clock as `due_time` read it, a hair after
-    // `t0`, so the due time is a tick past that rather than past `t0`.
     let due = thread.pacing().next_due().expect("paced");
-    assert!(
-        due >= t0 + TICK && due < t0 + TICK + 1_000_000,
-        "due {due} vs t0 {t0}"
-    );
+    assert_eq!(due, t0 + TICK);
 
-    thread.run_once(due);
+    run_at(&mut thread, &clock, due);
     assert_eq!(recorder.only().timestamp, due);
 }
 
@@ -978,19 +987,19 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
     for canvas_fps in [30u64, 60] {
         let tick = 1_000_000_000 / canvas_fps;
         let shared = shared_with_audio();
-        let (thread, recorder) = thread_with(shared.clone());
+        let (thread, recorder, clock) = thread_with(shared.clone());
         let mut thread = thread.with_canvas_tick(Box::new(move || Some(tick)));
 
         // Audio has primed such that a video frame arriving now maps 150 ms
         // into the past, and every later frame likewise.
-        let t0 = obs::time::gettime_ns();
+        let t0 = clock.now();
         let late = 150_000_000;
         publish_mapping(&shared, t0 - late, 10_000_000_000);
 
         for i in 0..30u64 {
             let arrival = t0 + i * FRAME;
             feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
-            thread.run_once(arrival);
+            run_at(&mut thread, &clock, arrival);
         }
 
         // 150 ms of lateness plus a tick of decode allowance, in whole ticks:
@@ -1032,18 +1041,18 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
 #[test]
 fn a_stale_startup_burst_does_not_raise_the_delay() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // Twenty 30fps frames from the probe, all pushed at `t0`, mapping from
     // 593 ms in the past up to one 40 ms out, with the one before it 6.7 ms
     // out: on time, but only just.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     let last_due = t0 + 40_000_000;
     publish_mapping(&shared, last_due, 10_000_000_000 + 19 * FRAME as i64);
     for i in 0..20i64 {
         feed(&mut thread, 10_000_000_000 + i * FRAME as i64, t0);
     }
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
 
     assert_eq!(thread.pacing().len(), 2, "eighteen stale frames dropped");
     assert_eq!(
@@ -1051,7 +1060,7 @@ fn a_stale_startup_burst_does_not_raise_the_delay() {
         0,
         "buffered frames are not evidence of a late sender"
     );
-    thread.run_once(last_due - FRAME);
+    run_at(&mut thread, &clock, last_due - FRAME);
     let emitted = recorder.emitted();
     assert_eq!(
         emitted[0].timestamp,
@@ -1067,23 +1076,23 @@ fn a_stale_startup_burst_does_not_raise_the_delay() {
 #[test]
 fn a_late_stream_is_measured_on_its_newest_frame() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // Frames that arrived in real time over the last lookback, each mapping
     // 150 ms before its arrival, the newest one now.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     let late = 150_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
     feed(&mut thread, 10_000_000_000, t0);
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
 
     // 150 ms plus a tick, in ticks, from the newest frame; the older ones
     // were stale even after that and went.
     let delay = 10 * TICK;
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), delay);
     assert_eq!(thread.pacing().len(), 1);
-    thread.run_once(t0 - late + delay);
+    run_at(&mut thread, &clock, t0 - late + delay);
     assert_eq!(recorder.only().timestamp, t0 - late + delay);
 }
 
@@ -1096,10 +1105,10 @@ fn a_late_stream_is_measured_on_its_newest_frame() {
 #[test]
 fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // A frame arriving now maps 100 ms out: a comfortable margin to anchor on.
-    let t0 = anchor_with_margin(&shared, &mut thread);
+    let t0 = anchor_with_margin(&shared, &mut thread, &clock);
     assert_eq!(recorder.emitted().len(), 1, "anchored with a full margin");
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
@@ -1113,7 +1122,7 @@ fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
             10_000_000_000 + (i * FRAME) as i64,
             arrival_of(i),
         );
-        thread.run_once(arrival_of(i));
+        run_at(&mut thread, &clock, arrival_of(i));
         delay_seen.push(shared.conn.video_delay_ns.load(Relaxed));
     }
 
@@ -1141,9 +1150,9 @@ fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
 #[test]
 fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let t0 = anchor_with_margin(&shared, &mut thread);
+    let t0 = anchor_with_margin(&shared, &mut thread, &clock);
     assert_eq!(recorder.emitted().len(), 1);
 
     // Two seconds of frames with 3 ms in hand: a tenth of the lead.
@@ -1154,7 +1163,7 @@ fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() 
             10_000_000_000 + (i * FRAME) as i64,
             arrival_of(i),
         );
-        thread.run_once(arrival_of(i));
+        run_at(&mut thread, &clock, arrival_of(i));
     }
 
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
@@ -1166,9 +1175,9 @@ fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() 
 #[test]
 fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let t0 = anchor_with_margin(&shared, &mut thread);
+    let t0 = anchor_with_margin(&shared, &mut thread, &clock);
     assert_eq!(recorder.emitted().len(), 1);
 
     let due_of = |i: u64| t0 + 100_000_000 + i * FRAME;
@@ -1179,7 +1188,7 @@ fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
             10_000_000_000 + (i * FRAME) as i64,
             due_of(i) + 20_000_000,
         );
-        thread.run_once(due_of(i) + 20_000_000);
+        run_at(&mut thread, &clock, due_of(i) + 20_000_000);
     }
     // ... then a second and a half of frames with their full margin.
     for i in 7..=50u64 {
@@ -1188,9 +1197,9 @@ fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
             10_000_000_000 + (i * FRAME) as i64,
             due_of(i) - 100_000_000,
         );
-        thread.run_once(due_of(i) - 100_000_000);
+        run_at(&mut thread, &clock, due_of(i) - 100_000_000);
     }
-    thread.run_once(due_of(50));
+    run_at(&mut thread, &clock, due_of(50));
 
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
     assert_eq!(
@@ -1206,24 +1215,24 @@ fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
 #[test]
 fn a_clear_forgets_the_video_delay() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     publish_mapping(&shared, t0 - 150_000_000, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
     feed(&mut thread, 10_000_000_000, t0);
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 10 * TICK);
 
     shared.video.request_clear();
     let t1 = t0 + 5_000_000_000;
-    thread.run_once(t1);
+    run_at(&mut thread, &clock, t1);
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
     // The next connection's audio primes with room to spare: no delay.
     publish_mapping(&shared, t1 + 200_000_000, 20_000_000_000);
     feed(&mut thread, 20_000_000_000, t1);
-    thread.run_once(t1 + 200_000_000);
+    run_at(&mut thread, &clock, t1 + 200_000_000);
     assert_eq!(
         recorder.emitted().last().map(|f| f.timestamp),
         Some(t1 + 200_000_000)
@@ -1242,19 +1251,19 @@ fn a_clear_forgets_the_video_delay() {
 #[test]
 fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
     let max = irl_core::consts::VIDEO_DELAY_MAX_MS * 1_000_000;
 
     // A frame arriving now maps six seconds into the past, past the ceiling,
     // and every later one too.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     let late = 6_000_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
 
     for i in 0..60u64 {
         let arrival = t0 + i * FRAME;
         feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
-        thread.run_once(arrival);
+        run_at(&mut thread, &clock, arrival);
         assert_eq!(
             thread.pacing().len(),
             0,
@@ -1292,14 +1301,14 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
 #[test]
 fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // The first frame in hand maps 1.3 s into the past.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     publish_mapping(&shared, t0 - 1_300_000_000, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
     feed(&mut thread, 10_000_000_000, t0);
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
     let set = shared.conn.video_delay_ns.load(Relaxed);
     assert_eq!(set, (1_300_000_000 + TICK).div_ceil(TICK) * TICK);
 
@@ -1311,17 +1320,18 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     for i in 1..=frames {
         let arrival = t0 + i * FRAME;
         feed(&mut thread, pts_of(i), arrival);
-        thread.run_once(arrival);
+        run_at(&mut thread, &clock, arrival);
         delays.push(shared.conn.video_delay_ns.load(Relaxed));
     }
     for k in 1..=60u64 {
-        thread.run_once(t0 + (frames + k) * FRAME);
+        run_at(&mut thread, &clock, t0 + (frames + k) * FRAME);
     }
 
-    // Untouched for the ten-second window, then down to a tick of headroom,
-    // gradually: 5% takes back 1.3 s in about 26 s.
+    // Untouched for the ten-second window, then down to what frames need,
+    // gradually: 5% takes back 1.3 s in about 26 s. 100 ms in hand covers the
+    // tick of decode and the tick of headroom, so nothing is left.
     assert_eq!(delays[8 * 30], set, "inside the window the delay stands");
-    assert_eq!(*delays.last().unwrap(), TICK, "settled on what frames need");
+    assert_eq!(*delays.last().unwrap(), 0, "settled on what frames need");
     let halfway = delays[(10 + 13) * 30];
     assert!(
         halfway > set / 3 && halfway < set * 2 / 3,
@@ -1348,43 +1358,41 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
 /// Once the audio hold rises for video that trails its audio, the speed
 /// controller builds it by playing slower, and the audio playout offset (with
 /// every due time mapped through it) grows until video is on time again. The
-/// standing delay covered that same lateness in the meantime, so each
-/// millisecond of growth is one it no longer needs: it hands it back as the
-/// hold builds. Due times stay exactly where they were, so the picture
-/// neither jumps nor changes speed while the lip-sync error the delay stood
-/// for drains to nothing.
+/// delay covered that same lateness in the meantime, and it is the floor less
+/// the offset, so each millisecond of growth is one it no longer carries. Due
+/// times stay exactly where they were, so the picture neither jumps nor
+/// changes speed while the lip-sync error the delay stood for drains to
+/// nothing.
 #[test]
 fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // Every frame maps 300 ms into the past.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     let late = 300_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
     feed(&mut thread, 10_000_000_000, t0);
-    thread.run_once(t0);
+    run_at(&mut thread, &clock, t0);
     let set = shared.conn.video_delay_ns.load(Relaxed);
     assert_eq!(set, (late + TICK).div_ceil(TICK) * TICK);
 
-    // The hold builds at -2 %: the offset grows by 2 % of each frame, and the
-    // pump credits the same growth as built.
+    // The hold builds at -2 %: the offset grows by 2 % of each frame.
     let growth_per_frame = FRAME / 50;
     let frames = 30 * 30u64;
     let mut delays = Vec::new();
     for i in 1..=frames {
         let grown = i * growth_per_frame;
         publish_mapping(&shared, t0 - late + grown, 10_000_000_000);
-        shared.audio_state().hold_built_ns = grown;
         let arrival = t0 + i * FRAME;
         feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
-        thread.run_once(arrival);
+        run_at(&mut thread, &clock, arrival);
         delays.push(shared.conn.video_delay_ns.load(Relaxed));
     }
     // By now video is in hand early; let what is queued go out.
     for k in 1..=30u64 {
-        thread.run_once(t0 + (frames + k) * FRAME);
+        run_at(&mut thread, &clock, t0 + (frames + k) * FRAME);
     }
 
     assert!(
@@ -1426,11 +1434,11 @@ fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
 #[test]
 fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
     let shared = shared_with_audio();
-    let (mut thread, recorder) = thread_with(shared.clone());
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
 
     // 39 frames, 1.3 s of video, arrive at four times real time; from then
     // on frames arrive live, 100 ms before they are due.
-    let t0 = obs::time::gettime_ns();
+    let t0 = clock.now();
     let caught_up = 39u64;
     let live_from = t0 + (caught_up - 1) * FRAME / 4;
     let arrival_of = |i: u64| {
@@ -1450,7 +1458,7 @@ fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
 
     for i in 0..caught_up + 90 {
         feed(&mut thread, pts_of(i), arrival_of(i));
-        thread.run_once(arrival_of(i));
+        run_at(&mut thread, &clock, arrival_of(i));
         assert_eq!(
             shared.conn.video_delay_ns.load(Relaxed),
             0,

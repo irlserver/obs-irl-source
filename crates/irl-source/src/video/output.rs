@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
-use irl_core::{consts, timing, video_time};
+use irl_core::{consts, video_time};
 use obs::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
 use crate::video::thread::VideoThread;
@@ -165,40 +165,35 @@ impl VideoThread {
 
     /* ── Timestamp mapping ────────────────────────────────── */
 
-    /// The OBS timestamp a freshly transferred frame is scheduled for.
+    /// The OBS timestamp a freshly transferred frame is scheduled for: its
+    /// [`Self::base_due`] plus the video delay that implies.
+    pub fn due_time(&mut self, frame: &Frame) -> u64 {
+        let base_ns = self.base_due(frame);
+        self.delay.due_ns(frame.pts(), base_ns)
+    }
+
+    /// The OBS timestamp a frame is due at before the video delay.
     ///
     /// While audio is playing, queued audio is the master playout clock: video
     /// PTS maps through the same stream-PTS → OBS-clock offset as the latest
     /// chunk handed to OBS, which keeps lip sync stable across buffering and
     /// speed changes. Without that mapping it falls back to the video-only
     /// wall-clock anchor.
-    pub fn due_time(&mut self, frame: &Frame) -> u64 {
+    pub fn base_due(&mut self, frame: &Frame) -> u64 {
         // `frame.pts()` is already in nanoseconds: intake rescales it with the
         // time base captured at stream open, because the video thread must not
         // touch the format context (it can be freed mid-reconnect).
         let pts_ns = frame.pts();
-        let now = obs::time::gettime_ns();
+        let now = self.now_ns();
 
-        let (obs_end, buffered_end, startup_warmup_ms) = {
+        let (mapping, startup_warmup_ms) = {
             let state = self.shared.audio_state();
-            (
-                state.latest_obs_end_ts_ns,
-                state.latest_buffered_end_pts_ns,
-                state.startup_warmup_remaining_ms,
-            )
+            (state.playout_mapping(), state.startup_warmup_remaining_ms)
         };
-        let frame_interval_ns = self.shared.conn.video_frame_interval_ns.load(Relaxed);
 
         // No audio-stream test: a published mapping already implies the pump
         // handed OBS a real chunk, so it implies the audio stream.
-        // Both schedules carry the standing video delay; see
-        // `VideoThread::settle_anchor_candidate`.
-        let delay_ns = self.delay.delay_ns();
-
-        if obs_end != 0 && buffered_end > 0 {
-            let mapped = video_time::map_through_playout(pts_ns, obs_end, buffered_end)
-                .saturating_add(delay_ns);
-            self.record_lead(mapped as i64, now, frame_interval_ns);
+        if let Some(mapped) = mapping.map(pts_ns) {
             return mapped;
         }
 
@@ -215,27 +210,20 @@ impl VideoThread {
             self.shared.conn.video_ts_init.store(true, Relaxed);
         }
 
-        let mut computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now)
-            .saturating_add(delay_ns);
+        let computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now);
 
-        // Startup fallback before the audio playout mapping exists. The
-        // mapping cannot stand in for "there is audio" here, so this reads the
-        // flag the receiver publishes.
-        if self.shared.flags.audio_present.load(Relaxed) {
-            let mut audio_lead_ns = 0;
-            if obs_end == 0 {
-                audio_lead_ns = startup_warmup_ms as i64 * 1_000_000;
-                if !self.shared.cfg.low_latency_audio {
-                    audio_lead_ns += self.shared.hot.watermarks().target_ms as i64 * 1_000_000;
-                }
-            }
-            if audio_lead_ns > 0 {
-                computed += audio_lead_ns as u64;
-            }
+        // Audio that is coming but not mapped yet will play its Target
+        // Buffer (and whatever is left of the warm-up) after it arrives. The
+        // mapping cannot stand in for "there is audio" here, so this reads
+        // the flag the receiver publishes.
+        if !self.shared.flags.audio_present.load(Relaxed) {
+            return computed;
         }
-
-        self.record_lead(computed as i64, now, frame_interval_ns);
-        computed
+        let mut audio_lead_ms = i64::from(startup_warmup_ms);
+        if !self.shared.cfg.low_latency_audio {
+            audio_lead_ms += i64::from(self.shared.hot.watermarks().target_ms);
+        }
+        computed + audio_lead_ms.max(0) as u64 * 1_000_000
     }
 
     /// Whether audio has published a playout mapping at all — the same test
@@ -244,25 +232,24 @@ impl VideoThread {
     /// a held offset belongs to audio that has stopped, and anchoring on it
     /// would be anchoring on a guess.
     pub fn mapping_published(&self) -> bool {
-        self.shared.audio_state().playout_mapping().is_some()
+        self.shared.audio_state().playout_mapping().is_published()
     }
 
     /// The current stream-PTS → OBS-clock offset, for re-deriving the due time
     /// of frames already queued.
     ///
-    /// Free of the side effects in [`Self::due_time`]: the lead warning and the
-    /// fallback anchor belong to a frame arriving, and running them for every
-    /// queued frame would report the queue rather than the stream.
-    /// `None` when there is no audio to slave to, or when the mapping has been
-    /// gone long enough that holding it would be a guess; the caller then
-    /// keeps the due times the frames arrived with. The standing video delay
-    /// rides on the offset, so a reschedule keeps it.
+    /// Free of the side effects in [`Self::due_time`]: the fallback anchor
+    /// belongs to a frame arriving, and running it for every queued frame
+    /// would report the queue rather than the stream. `None` when there is no
+    /// audio to slave to, or when the mapping has been gone long enough that
+    /// holding it would be a guess; the caller then keeps the due times the
+    /// frames arrived with.
     pub fn playout_offset(&mut self) -> Option<i64> {
-        let mapping = self.shared.audio_state().playout_mapping();
-        let now = obs::time::gettime_ns();
+        let offset_ns = self.shared.audio_state().playout_mapping().offset_ns();
+        let now = self.now_ns();
 
-        if let Some((obs_end, buffered_end)) = mapping {
-            self.playout_offset_ns = video_time::playout_offset_ns(obs_end, buffered_end);
+        if let Some(offset_ns) = offset_ns {
+            self.playout_offset_ns = offset_ns;
             self.playout_offset_time_ns = now;
         } else if self.playout_offset_time_ns == 0
             || now.saturating_sub(self.playout_offset_time_ns) > consts::VIDEO_OFFSET_HOLD_NS
@@ -270,43 +257,7 @@ impl VideoThread {
             return None;
         }
 
-        Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
-    }
-
-    /// Warn when the mapping placed this frame further ahead of wall clock
-    /// than libobs can queue.
-    ///
-    /// The lead is never clamped. What libobs queues is the lead's *growth*
-    /// since its play head last anchored, not its size, so a large but steady
-    /// lead queues nothing and clamping it would only shift video ahead of
-    /// audio.
-    pub fn record_lead(&mut self, ts: i64, now: u64, frame_interval_ns: i64) {
-        let lead_ns = ts - now as i64;
-        let frame_interval_ns = if frame_interval_ns <= 0 {
-            consts::VIDEO_INTERVAL_DEFAULT_NS
-        } else {
-            frame_interval_ns
-        };
-        let queue_safe_ns = self.shared.hot.watermarks().target_ms as i64 * 1_000_000
-            + video_time::queue_safe_ns(frame_interval_ns);
-        if lead_ns <= queue_safe_ns {
-            return;
-        }
-
-        // Only a risk while the lead is still climbing — a steady lead of any
-        // size is free — so this is a "watch this" line, not a fault.
-        if timing::throttle(
-            &mut self.lead_warn_time_ns,
-            now,
-            consts::VIDEO_LEAD_WARN_INTERVAL_NS,
-        ) {
-            irl_info!(
-                "Video lead {}ms is beyond what OBS can queue ({}ms at {:.0}fps); harmless while it holds steady, but a rise of that size would make OBS drop queued video",
-                lead_ns / 1_000_000,
-                queue_safe_ns / 1_000_000,
-                1_000_000_000.0 / frame_interval_ns as f64
-            );
-        }
+        Some(self.playout_offset_ns)
     }
 
     /* ── Output ───────────────────────────────────────────── */

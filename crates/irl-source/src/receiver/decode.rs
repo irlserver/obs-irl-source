@@ -151,15 +151,12 @@ impl Receiver {
             ffmpeg::rescale_q(pts, self.video_tb, ffmpeg::NS_TIME_BASE)
         });
         let bytes = self.pkt.size().max(0) as usize;
-        self.shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
         let received_ns = obs::time::gettime_ns();
-
-        // Where the audio hold reads the sender's skew: this packet against
-        // the newest audio decoded before it, in mux order.
-        if let Some(dts) = self.pkt.dts_or_pts() {
-            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, ffmpeg::NS_TIME_BASE);
-            crate::audio::hold::observe_video_packet(&self.shared, received_ns, dts_ns);
-        }
+        let dts_ns = self
+            .pkt
+            .dts_or_pts()
+            .map(|dts| ffmpeg::rescale_q(dts, self.video_tb, ffmpeg::NS_TIME_BASE));
+        note_video_arrival(&self.shared, received_ns, pts_ns, dts_ns);
 
         match self.pkt.new_ref() {
             Ok(packet) => self.shared.video.push_packet(
@@ -176,5 +173,16 @@ impl Receiver {
                 irl_warn!("Could not reference a video packet ({err}); frame dropped");
             }
         }
+    }
+}
+
+/// What the receiver reads off a video packet as it arrives, before queueing
+/// it: its PTS for the skew stat, and its decode timestamp for the audio
+/// hold, which reads the sender's skew against the newest audio decoded
+/// before it, in mux order.
+pub fn note_video_arrival(shared: &Shared, received_ns: u64, pts_ns: i64, dts_ns: Option<i64>) {
+    shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
+    if let Some(dts_ns) = dts_ns {
+        audio::hold::observe_video_packet(shared, received_ns, dts_ns);
     }
 }

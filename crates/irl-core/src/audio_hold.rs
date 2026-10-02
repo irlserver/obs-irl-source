@@ -22,9 +22,8 @@
 //! takes the *worst* reading across the longer `AUDIO_HOLD_RELAX_WINDOW_MS`,
 //! so the hold does not pump up and down.
 
-use std::collections::VecDeque;
-
 use crate::consts;
+use crate::window::{Extreme, WindowExtreme};
 
 /// How much longer audio must be held so that video `skew_ms` behind it is in
 /// hand `margin_ms` before it is due: the part of the skew that `covered_ms`
@@ -146,60 +145,6 @@ impl Default for AudioHold {
             lowest: WindowExtreme::new(RAISE_WINDOW_NS, Extreme::Lowest),
             highest: WindowExtreme::new(RELAX_WINDOW_NS, Extreme::Highest),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Extreme {
-    Lowest,
-    Highest,
-}
-
-/// The lowest or highest value pushed within the last `window_ns`, kept as a
-/// monotonic queue: a value that a newer, more extreme one has beaten can
-/// never be the answer again, so it is dropped on the spot and every push is
-/// amortised O(1).
-#[derive(Debug)]
-struct WindowExtreme {
-    window_ns: u64,
-    extreme: Extreme,
-    /// `(when, value)`, oldest first, strictly less extreme from front to back.
-    entries: VecDeque<(u64, i64)>,
-}
-
-impl WindowExtreme {
-    fn new(window_ns: u64, extreme: Extreme) -> Self {
-        Self {
-            window_ns,
-            extreme,
-            entries: VecDeque::new(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    fn push(&mut self, now_ns: u64, value: i64) {
-        while let Some(&(_, last)) = self.entries.back() {
-            let beaten = match self.extreme {
-                Extreme::Lowest => last >= value,
-                Extreme::Highest => last <= value,
-            };
-            if !beaten {
-                break;
-            }
-            self.entries.pop_back();
-        }
-        self.entries.push_back((now_ns, value));
-        let horizon_ns = now_ns.saturating_sub(self.window_ns);
-        while self.entries.front().is_some_and(|&(at, _)| at < horizon_ns) {
-            self.entries.pop_front();
-        }
-    }
-
-    fn value(&self) -> Option<i64> {
-        self.entries.front().map(|&(_, value)| value)
     }
 }
 

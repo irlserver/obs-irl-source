@@ -81,6 +81,42 @@ pub fn push_packet(shared: &Shared, pts_ns: i64, bytes: usize) {
     );
 }
 
+/// A decoded audio frame of `frames` interleaved float samples per channel at
+/// [`RATE`], stamped `pts_ns` in a nanosecond time base, as the decoder would
+/// hand it to the intake. Channel `c` of sample `i` holds `value(i, c)`.
+pub fn decoded_audio(
+    pts_ns: i64,
+    duration_ns: i64,
+    frames: i32,
+    value: impl Fn(usize, usize) -> f32,
+) -> ffmpeg::Frame {
+    let mut frame = ffmpeg::Frame::new().unwrap();
+    // SAFETY: setting the audio parameters before av_frame_get_buffer is the
+    // documented allocation sequence; the buffer is then written through its
+    // own data pointer for exactly frames * CHANNELS samples.
+    unsafe {
+        let raw = frame.as_mut_ptr();
+        (*raw).format = ffmpeg::AVSampleFormat::AV_SAMPLE_FMT_FLT as core::ffi::c_int;
+        (*raw).nb_samples = frames;
+        (*raw).sample_rate = RATE;
+        ffmpeg::sys::av_channel_layout_default(&raw mut (*raw).ch_layout, CHANNELS);
+        assert_eq!(ffmpeg::sys::av_frame_get_buffer(raw, 0), 0);
+        (*raw).pts = pts_ns;
+        // In the frame's time base, which here is nanoseconds, not a sample
+        // count. PTS repair sizes its expected gap from this.
+        (*raw).duration = duration_ns;
+
+        let dst = (*raw).data[0].cast::<f32>();
+        for i in 0..frames as usize {
+            for c in 0..CHANNELS as usize {
+                dst.add(i * CHANNELS as usize + c)
+                    .write_unaligned(value(i, c));
+            }
+        }
+    }
+    frame
+}
+
 /// One audio submission, flattened.
 pub struct Emitted {
     pub timestamp: u64,

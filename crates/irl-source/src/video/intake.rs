@@ -181,11 +181,11 @@ pub fn handle_frame(
     // this thread does not own.
     let pts_ns = ffmpeg::rescale_q(pts, tb, ffmpeg::NS_TIME_BASE);
 
-    // Frame interval EMA, for the frame rate the stats line reports and the
-    // lead warning's frame budget. Measured rather than taken from
-    // avg_frame_rate, which live SRT/RTMP demuxers routinely leave unset or
-    // wrong. Out-of-range deltas (PTS repair, discontinuities, reordering) are
-    // skipped rather than smoothed in.
+    // Frame interval EMA, for the frame rate the stats line reports.
+    // Measured rather than taken from avg_frame_rate, which live SRT/RTMP
+    // demuxers routinely leave unset or wrong. Out-of-range deltas (PTS
+    // repair, discontinuities, reordering) are skipped rather than smoothed
+    // in.
     let delta = pts_ns - state.prev_pts_ns;
     let measurable = state.prev_pts_ns != 0;
     state.prev_pts_ns = pts_ns;

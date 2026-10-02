@@ -85,7 +85,7 @@ fn expected_ts(anchor: u64, samples: u64, rate: u64) -> u64 {
 
 /// Lip sync, measured on the audio content rather than on the bookkeeping:
 /// a ramp encodes each sample's media time, so where a sample actually lands
-/// on the OBS clock can be compared with where [`map_through_playout`] would
+/// on the OBS clock can be compared with where [`PlayoutMapping::map`] would
 /// put the video frame carrying the same media time.
 ///
 /// 44.1 kHz is the interesting rate. 1024 samples is 2089.795 ticks of the
@@ -94,7 +94,7 @@ fn expected_ts(anchor: u64, samples: u64, rate: u64) -> u64 {
 /// rate every phone encoder sends, and the only one where the repaired
 /// timeline can slip against the frames it labels.
 ///
-/// [`map_through_playout`]: irl_core::video_time::map_through_playout
+/// [`PlayoutMapping::map`]: irl_core::PlayoutMapping::map
 #[test]
 fn planar_aac_samples_follow_the_video_playout_mapping() {
     /// Two chunks of PI settling, comfortably inside the ~45 ms at which
@@ -139,11 +139,7 @@ fn planar_aac_samples_follow_the_video_playout_mapping() {
                 let content_pts = (out.samples[i * CHANNELS as usize] as f64 * 1e9) as i64;
                 let audio_due = out.timestamp + i as u64 * 1_000_000_000 / rate as u64;
                 let state = shared.audio_state();
-                let video_due = irl_core::video_time::map_through_playout(
-                    content_pts,
-                    state.latest_obs_end_ts_ns,
-                    state.latest_buffered_end_pts_ns,
-                );
+                let video_due = state.mapping.map(content_pts).expect("a published mapping");
                 worst_ns = worst_ns.max((audio_due as i64 - video_due as i64).abs());
                 checked += 1;
             }
@@ -197,12 +193,12 @@ fn a_pump_burst_stops_when_disconnect_pauses_playback() {
     }
     assert!(pump.pump_once());
     let count = recorder.len();
-    let samples = shared.audio_state().samples;
+    let samples = shared.audio_state().clock.samples();
     shared.flags.reconnecting.store(true, Relaxed);
     clock.fetch_add(1_000_000_000, Relaxed);
     assert!(!pump.pump_once());
     assert_eq!(recorder.len(), count);
-    assert_eq!(shared.audio_state().samples, samples);
+    assert_eq!(shared.audio_state().clock.samples(), samples);
 }
 
 /// A slow transport close must not submit a fade from the stopped clock:
@@ -222,8 +218,7 @@ fn disconnect_fade_does_not_submit_stale_audio() {
                 .unwrap()
                 .write_pts(&data, 1_000_000_000);
             let mut state = shared.audio_state();
-            state.primed = true;
-            state.anchor_ns = now + 80_000_000;
+            state.clock.restart(now + 80_000_000);
             obs_irl_source::receiver::stream::fade_out_buffered_audio(
                 &shared,
                 &mut state,
@@ -241,7 +236,8 @@ fn disconnect_fade_does_not_submit_stale_audio() {
                     "{rate}Hz disconnect submitted audio 920ms late"
                 );
                 assert_eq!(
-                    state.samples, 0,
+                    state.clock.samples(),
+                    0,
                     "a discarded fade must not claim output samples"
                 );
             }
@@ -459,7 +455,7 @@ fn an_idle_pump_reports_when_it_next_has_work() {
 
     // Primed and queued ahead: it now knows when the lead runs down, and that
     // is further away than a 1ms poll.
-    assert!(shared.audio_state().primed);
+    assert!(shared.audio_state().clock.is_primed());
     let hint = pump.idle_sleep_ms();
     assert!(
         hint > consts::AUDIO_PUMP_SLEEP_MS && hint <= consts::AUDIO_PUMP_MAX_SLEEP_MS,
@@ -491,7 +487,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     let mut pts_ns = 0i64;
     write_chunks(&shared, &mut pts_ns, 6, 0.1);
     while pump.pump_once() {}
-    assert!(shared.audio_state().primed, "never primed");
+    assert!(shared.audio_state().clock.is_primed(), "never primed");
 
     // The input goes quiet. Wall clock runs well past the stall threshold.
     for _ in 0..40 {
@@ -505,7 +501,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
         "a quiet low-latency source must not restart the output clock"
     );
     assert!(
-        !shared.audio_state().primed,
+        !shared.audio_state().clock.is_primed(),
         "the clock should be stood down, not left running"
     );
 
@@ -513,7 +509,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     write_chunks(&shared, &mut pts_ns, 6, 0.2);
     while pump.pump_once() {}
     assert!(
-        shared.audio_state().primed,
+        shared.audio_state().clock.is_primed(),
         "did not re-prime on real audio"
     );
     assert_eq!(shared.conn.audio_output_restarts.load(Relaxed), 0);
@@ -577,7 +573,7 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
         clock.fetch_add(AAC_NS, Relaxed);
     }
 
-    assert!(shared.audio_state().primed, "never primed");
+    assert!(shared.audio_state().clock.is_primed(), "never primed");
     let tail = &levels[levels.len() - 1000..];
     let mean = tail.iter().map(|&f| f as f64).sum::<f64>() / tail.len() as f64;
     let chunk_ms = (AAC_NS / 1_000_000) as f64;
