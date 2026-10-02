@@ -1,9 +1,6 @@
-//! Demuxer option table (port of `apply_demuxer_options`, `receiver-stream.c:20-187`).
-//!
-//! The C function writes straight into an `AVDictionary`; here it is an
-//! ordered list the caller feeds to `av_dict_set` in order, which gives the
-//! same result — later entries override earlier ones, and the user's own
-//! options come last so they win.
+//! Demuxer option table: an ordered list the caller feeds to `av_dict_set`
+//! in order, so later entries override earlier ones and the user's own
+//! options, which come last, win.
 
 use std::borrow::Cow;
 
@@ -107,10 +104,8 @@ pub fn demuxer_options(
     opts
 }
 
-/// Parse space-separated `key=value` pairs; entries without `=` are ignored.
-///
-/// Ports the `strtok_r(dup, " ")` loop: runs of spaces collapse, and a token
-/// splits at its first `=`.
+/// Parse space-separated `key=value` pairs; entries without `=` are ignored,
+/// runs of spaces collapse, and a token splits at its first `=`.
 pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
     extra
         .split(' ')
@@ -130,10 +125,10 @@ pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
 /// waits the same way from the caller's point of view. The option reaches
 /// FFmpeg either way the user writes it — in the URL's query string or in the
 /// FFmpeg Options field, which [`demuxer_options`] merges into the same
-/// dictionary — so both are read here. Reading only the URL made a listener
-/// configured through FFmpeg Options keep the caller's deadline: the accept
-/// was torn down every 10 s and rebound after the reconnect delay, and a
-/// sender whose handshake landed in the gap never got in.
+/// dictionary — so both are read here. Reading only the URL would leave a
+/// listener configured through FFmpeg Options on the caller's deadline: the
+/// accept is torn down every 10 s and rebound after the reconnect delay, and
+/// a sender whose handshake lands in the gap never gets in.
 ///
 /// The URL test is on the query only: a path or a passphrase that happens to
 /// contain the word must not decide this.
@@ -179,7 +174,7 @@ mod tests {
         assert!(!has_scheme("srt:/host", "srt"));
         assert!(!has_scheme("srtla://host", "srt"));
         assert!(!has_scheme("", "srt"));
-        // A bare scheme still matches, as the C strncmp pair does.
+        // A bare scheme still matches.
         assert!(has_scheme("srt://", "srt"));
     }
 

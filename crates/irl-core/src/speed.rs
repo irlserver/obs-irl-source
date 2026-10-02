@@ -1,12 +1,10 @@
-//! Playback-speed controller and stuck-drain watch (ports of
-//! `compute_buffered_output_speed`, `audio_update_speed_trim`,
-//! `apply_output_speed`'s fractional carry and `audio_check_drain_progress`).
+//! Playback-speed controller, fractional sample carry and stuck-drain watch.
 //!
 //! The controller is PI: a fast proportional ramp with an almost-flat
 //! deadband and asymmetric authority, plus a slow integral trim underneath it.
-//! `docs/audio-timing-pitfalls.md` is the record of why each piece is shaped
-//! the way it is; `cargo run -p irl-core --example speed-controller-sim` is
-//! the closed-loop harness that found every defect it ever had.
+//! `docs/audio-timing-pitfalls.md` explains why each piece is shaped the way
+//! it is; `cargo run -p irl-core --example speed-controller-sim` is the
+//! closed-loop harness.
 
 use crate::config::Watermarks;
 use crate::consts;
@@ -36,35 +34,24 @@ pub struct SpeedInputs {
     pub max_speed: f32,
     /// FFmpeg `av_gettime` microseconds, for the trim's dt.
     pub now_us: u64,
-    /// `irl_audio_recovery_active`: concealment or post-reset recovery is
-    /// moving the fill for reasons that are not the sender's clock.
+    /// Concealment or post-reset recovery is moving the fill for reasons that
+    /// are not the sender's clock.
     pub recovery_active: bool,
 }
 
 /// The integral term that holds the buffer at target when the sender's media
 /// clock is not wall clock.
 ///
-/// The ramp in [`SpeedController`] is proportional: it only produces a speed
-/// away from 1.0 while the buffer sits away from target. That is the right
-/// shape for a transient — a stall's backlog drains and the ramp relaxes —
-/// but it cannot hold a *constant*. A sender whose media clock runs at 1.003×
-/// delivers 3 ms of extra audio every second forever, and the only ramp
-/// position that consumes it is one with a permanent level error, so the
-/// buffer parks off-target and the latency parks with it, right up until the
-/// offset re-anchor concedes and splices.
+/// The proportional ramp in [`SpeedController`] can only hold a constant rate
+/// offset (a sender at 1.003× delivers 3 ms of extra audio every second) with
+/// a permanent level error, so the buffer and the latency park off target.
+/// The trim removes that error. It accumulates only near target, where the
+/// level reports the sender's rate, is clamped to ±1 %, and converges on the
+/// rate without measuring it (see `docs/audio-timing-pitfalls.md`).
 ///
-/// The trim removes that standing error. It accumulates only in the ramp's
-/// linear region, where the level genuinely reports the sender's rate, and is
-/// clamped to ±1 %. It converges to the sender's rate without ever measuring
-/// it — see the estimator section of `docs/audio-timing-pitfalls.md` for the
-/// measurement that was built, measured and deleted.
-///
-/// Lives in the audio state rather than on the pump because its lifetime is
-/// not the pump's: it deliberately survives a throttled decoder flush (an
-/// audio-only reset must not cost two minutes of relearning) and is cleared by
-/// a stream reset, where the timeline broke badly enough that the level no
-/// longer maps to the sender's clock and a reconnect may not even be the same
-/// encoder.
+/// It survives a decoder flush (an audio-only reset must not cost two minutes
+/// of relearning) and is cleared by a stream reset, after which the level no
+/// longer maps to the sender's clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpeedTrim {
     value: f32,
@@ -85,7 +72,7 @@ impl SpeedTrim {
         self.value
     }
 
-    /// Forget the sender (`irl_reset_stream_timing_state`).
+    /// Forget the sender.
     pub fn reset(&mut self) {
         *self = Self::new();
     }
@@ -122,18 +109,12 @@ impl SpeedTrim {
         let err_s = err_ms as f64 / 1000.0;
         let step = consts::AUDIO_SPEED_TRIM_GAIN * err_s * dt;
 
-        // Anti-windup, the second half of the error-window gate above.
-        //
-        // While the loop is saturated the level has stopped reporting the
-        // sender's rate — it reports that the controller ran out of authority.
-        // At the default target the window gate already covers this, but a
-        // small target puts min_ms within 60 ms of target and the command can
-        // pin while the error is still inside the window, so the check earns
-        // its place here.
-        //
-        // Test the command actually issued, not the ramp alone: the actuator
-        // clamps ramp + trim, so with the trim near its own limit the sum
-        // saturates while the ramp is still short of it.
+        // Anti-windup. While the loop is saturated the level reports that the
+        // controller ran out of authority, not the sender's rate. A small
+        // target puts min_ms inside the error window, so the window gate alone
+        // does not cover it. Test the command actually issued, not the ramp
+        // alone: the actuator clamps ramp + trim, so the sum can saturate
+        // while the ramp is still short of it.
         let command = ramp + self.value;
         let pinned_high = command >= inp.max_speed - 0.0005;
         let pinned_low = command <= consts::AUDIO_SPEED_MIN + 0.0005;
@@ -180,12 +161,8 @@ impl SpeedController {
             return 1.0;
         }
 
-        // Regulate the smoothed level, not the instantaneous one. An upstream
-        // that hands over batches rather than a smooth stream — a remux hop, a
-        // relay — makes the level sawtooth across the whole ramp, and a
-        // controller that chases that modulates playback speed at the batch
-        // period. That is audible as pitch wobble and, because video due times
-        // ride the audio playout offset, visible as judder.
+        // Regulate the smoothed level, not the instantaneous one; see
+        // `AUDIO_SPEED_LEVEL_SMOOTHING`.
         if self.level < 0.0 {
             self.level = fill_ms as f32;
         }
@@ -195,12 +172,11 @@ impl SpeedController {
         let ramp = Self::ramp(fill_ms, inp.wm, inp.max_speed);
         trim.update(fill_ms, inp.wm.target_ms, ramp, &inp);
 
-        // The trim shifts the operating point the ramp swings around; the hard
-        // clamp below is unchanged, because the min and the catch-up ceiling
-        // are the audibility limits and hold absolutely. That the slow-down
-        // authority shrinks to −1 % once the trim has learned +1 % is correct,
-        // not a loss: having established that the sender runs fast, dropping
-        // to 0.98 absolute would be over-correcting.
+        // The trim shifts the operating point the ramp swings around, but the
+        // clamp below stays absolute: the min and the catch-up ceiling are the
+        // audibility limits. Once the trim has learned +1 % the slow-down
+        // authority shrinks to −1 %, which is correct for a sender known to
+        // run fast.
         let target_speed = ramp + trim.value();
 
         if self.current <= 0.0 {
@@ -264,13 +240,10 @@ impl Default for SpeedController {
 /// The fractional output-sample debt carried between chunks.
 ///
 /// The resampler is driven in whole samples per chunk, so rounding each chunk
-/// independently quantises the applied speed to multiples of `1/in_frames` —
-/// about 0.1 % at 1024 frames. Everything the controller asks for below that
-/// either rounds away to 1.0 or gets executed at twice its size, which makes
-/// both the deadband slope and the trim meaningless, and makes the
-/// compensation chatter on and off as the request crosses a rounding boundary.
-/// Carrying the remainder makes the long-run rate exact at any requested
-/// speed.
+/// independently quantises the applied speed to multiples of `1/in_frames`
+/// (about 0.1 % at 1024 frames). Below that a request rounds away to 1.0 or
+/// runs at twice its size, which defeats the deadband slope and the trim.
+/// Carrying the remainder makes the long-run rate exact at any speed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpeedCarry {
     frac: f64,
@@ -282,7 +255,7 @@ impl SpeedCarry {
         Self { frac: 0.0 }
     }
 
-    /// Forget the debt (`irl_reset_audio_timing_state`).
+    /// Forget the debt.
     pub fn reset(&mut self) {
         *self = Self::new();
     }
@@ -440,8 +413,8 @@ mod tests {
 
     #[test]
     fn the_ramp_is_continuous_across_the_deadband_edges() {
-        // The old flat deadband stepped here. One millisecond either side of
-        // an edge must now differ by about one millisecond's worth of slope.
+        // One millisecond either side of an edge differs by about one
+        // millisecond's worth of slope, not a step.
         for edge in [100, 140] {
             let inside = settle(edge);
             let outside = settle(if edge == 100 { edge - 1 } else { edge + 1 });
@@ -654,7 +627,7 @@ mod tests {
 
     #[test]
     fn the_loop_settles_rather_than_limit_cycling() {
-        // The flat deadband left the integrator undamped and the pair swung
+        // A flat deadband leaves the integrator undamped and the pair swings
         // ±20 ms forever. Measure the swing after it has had time to settle.
         const DT_US: u64 = 21_333;
         let mut c = SpeedController::new();
@@ -831,9 +804,8 @@ mod tests {
     #[test]
     fn the_carry_applies_speeds_below_the_rounding_step() {
         // Without it, 1/1024 (~0.1 %) is the smallest applicable speed: a
-        // requested +0.02 % was discarded and +0.05 % came out at +0.098 %.
-        // That is the whole range the deadband slope and most of the trim
-        // operate in.
+        // requested +0.02 % would be discarded and +0.05 % would come out at
+        // +0.098 %, the whole range the deadband slope and the trim work in.
         for req in [
             1.0f32, 1.0002, 1.0005, 1.001, 1.002, 1.005, 1.01, 0.9995, 0.998, 0.99,
         ] {

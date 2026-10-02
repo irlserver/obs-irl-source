@@ -27,7 +27,7 @@ impl HwDecode {
     /// Parse a stored value; out of range degrades to `Auto`. `nvdec_available`
     /// is false on platforms without a CUDA build (macOS), where a saved NVDEC
     /// setting also degrades to `Auto`. Returns the value and whether it was
-    /// degraded (the C plugin logs a warning in that case).
+    /// degraded, which the caller logs.
     pub fn from_i64(value: i64, nvdec_available: bool) -> (Self, bool) {
         match value {
             0 => (Self::Auto, false),
@@ -56,10 +56,10 @@ pub struct Watermarks {
 impl Watermarks {
     /// `min = max(target / 2, 20)`, `max = target + 200`.
     ///
-    /// A non-positive target falls back to the default, as `config_load` does,
-    /// and anything else is clamped to the slider's range: the dialog bounds
-    /// it, but a scene collection can carry any value, including a target
-    /// saved by a build with a different ceiling.
+    /// A non-positive target falls back to the default, and anything else is
+    /// clamped to the slider's range: the dialog bounds it, but a scene
+    /// collection can carry any value, including a target saved by a build
+    /// with a different ceiling.
     pub fn derive(target_ms: i32) -> Self {
         let target_ms = if target_ms <= 0 {
             consts::DEFAULT_BUFFER_TARGET_MS as i32

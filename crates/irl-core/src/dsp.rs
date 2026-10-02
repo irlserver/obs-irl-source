@@ -1,11 +1,8 @@
 //! Small sample-domain helpers: fades, silence shaping, last-sample memory.
 //!
-//! Ports `remember_last_sample`, `audio_apply_fade_in`,
-//! `shape_silence_from_last` (`receiver-audio.c:210-265`), the fade-in ramp in
-//! `irl_pump_audio_once` (`receiver-audio.c:861-883`) and the fade of
-//! `audio_buffer_read_with_fade_out`. Everything works on interleaved `f32`,
-//! which is the only format the plugin ever hands to OBS; [`FloatEdit`] and
-//! [`LastSample::remember_bytes`] bridge to the byte buffers it travels in.
+//! Everything works on interleaved `f32`, the only format the plugin hands to
+//! OBS; [`FloatEdit`] and [`LastSample::remember_bytes`] bridge to the byte
+//! buffers it travels in.
 
 use crate::consts::{self, AUDIO_MAX_CHANNELS};
 
@@ -61,13 +58,13 @@ impl LastSample {
             let off = start + ch * SAMPLE_BYTES;
             *value = read_f32(&samples[off..off + SAMPLE_BYTES]);
         }
-        // `channels > 8` reaches `remember` with a short slice, which is
-        // exactly the case the C rejected (`*dst_valid = false`).
+        // `channels > 8` reaches `remember` with a short slice, which clears
+        // the memory.
         self.remember(&values[..take], channels);
     }
 
     /// Forget the remembered frame; the next concealment chunk is pure
-    /// silence (`ctx->audio_out_last_valid = false` after the first one).
+    /// silence.
     pub fn forget(&mut self) {
         self.valid = false;
     }
@@ -78,7 +75,7 @@ impl LastSample {
 /// forbid the unsafe cast between the two views. The rare in-place edits
 /// (concealment shaping and the splice fades) therefore decode into a reusable
 /// `f32` scratch, run the helper, and write the result back. A normal chunk is
-/// emitted untouched, so the steady-state copy count matches the C.
+/// emitted untouched, so the steady state pays no extra copy.
 #[derive(Debug, Default)]
 pub struct FloatEdit {
     scratch: Vec<f32>,
@@ -101,7 +98,7 @@ impl FloatEdit {
 }
 
 /// Frames the concealment fade covers: `AUDIO_CONCEAL_FADE_MS` worth, never
-/// more than the chunk (`audio_conceal_fade_frames`).
+/// more than the chunk.
 fn conceal_fade_frames(rate: i32, max_frames: usize) -> usize {
     if rate <= 0 || max_frames == 0 {
         return 0;
@@ -133,11 +130,8 @@ pub fn apply_fade_in(samples: &mut [f32], channels: usize, rate: i32) {
     }
 }
 
-/// Fill `samples` with silence that decays from `last` to zero.
-///
-/// The C caller memsets the scratch buffer before calling
-/// `shape_silence_from_last`; both steps live here, so the whole buffer is
-/// silence and only its head carries the decay.
+/// Fill `samples` with silence that decays from `last` to zero: the whole
+/// buffer is silence and only its head carries the decay.
 pub fn shape_silence_from_last(samples: &mut [f32], channels: usize, rate: i32, last: &LastSample) {
     samples.fill(0.0);
     if channels == 0 {

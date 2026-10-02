@@ -1,12 +1,12 @@
-//! Output-clock arithmetic (port of `receiver-audio.c:267-329`).
+//! Output-clock arithmetic.
 
 use crate::consts;
 use crate::rescale;
 
 /// `anchor + samples / rate` in nanoseconds: the pure sample-counter clock.
 ///
-/// Ports `audio_output_next_ts`. The whole audio contract rests on this being
-/// a counter and not a clock read: OBS wants `ts[n+1] = ts[n] + frames/rate`
+/// The whole audio contract rests on this being a counter and not a clock
+/// read: OBS wants `ts[n+1] = ts[n] + frames/rate`
 /// exactly, so the timestamp is always re-derived from the anchor and the
 /// running sample count rather than accumulated.
 pub fn output_next_ts(anchor_ns: u64, samples: u64, rate: u32) -> u64 {
@@ -20,9 +20,8 @@ pub fn output_next_ts(anchor_ns: u64, samples: u64, rate: u32) -> u64 {
 /// Lead kept ahead of wall clock: `max(AUDIO_OUT_LEAD_MS, 3 chunks)`, or one
 /// chunk in low-latency mode.
 ///
-/// Ports `audio_output_lead_ns`. The 80 ms floor has to cover the plugin's own
-/// delivery jitter (1 ms pump sleep plus scheduling) and one OBS mix tick
-/// (21.3 ms), with margin.
+/// The 80 ms floor has to cover the plugin's own delivery jitter (1 ms pump
+/// sleep plus scheduling) and one OBS mix tick (21.3 ms), with margin.
 pub fn output_lead_ns(chunk_samples: i32, rate: i32, low_latency: bool) -> u64 {
     if rate <= 0 || chunk_samples <= 0 {
         return if low_latency {
@@ -45,8 +44,6 @@ pub fn output_lead_ns(chunk_samples: i32, rate: i32, low_latency: bool) -> u64 {
 
 /// Samples a packet of `duration` (stream time base) should contain at
 /// `rate`; `fallback` when the duration is unusable.
-///
-/// Ports `audio_expected_samples`.
 pub fn expected_samples(duration: i64, tb_num: i32, tb_den: i32, rate: i32, fallback: i32) -> i32 {
     if duration <= 0 || rate <= 0 || tb_den <= 0 {
         return fallback;
@@ -61,9 +58,8 @@ pub fn expected_samples(duration: i64, tb_num: i32, tb_den: i32, rate: i32, fall
 /// `expected − actual` clamped to ±`AUDIO_SOFT_COMPENSATION_MAX_SAMPLES`,
 /// zero outside that window.
 ///
-/// Ports `audio_soft_compensation_samples`. Real discontinuities are PTS
-/// repair's job; this only takes out tiny per-frame drift, in the spirit of a
-/// bounded `aresample` async correction.
+/// Real discontinuities are PTS repair's job; this only takes out tiny
+/// per-frame drift, in the spirit of a bounded `aresample` async correction.
 pub fn soft_compensation_samples(expected: i32, actual: i32) -> i32 {
     let delta = expected - actual;
     let window =
@@ -75,8 +71,6 @@ pub fn soft_compensation_samples(expected: i32, actual: i32) -> i32 {
 }
 
 /// Fill required before priming: `target + lead`, or 0 in low-latency mode.
-///
-/// Ports the prime gate in `irl_pump_audio_once` (`receiver-audio.c:776-783`).
 pub fn prime_threshold_ms(target_ms: i32, lead_ns: u64, low_latency: bool) -> i32 {
     if low_latency {
         return 0;
@@ -87,31 +81,23 @@ pub fn prime_threshold_ms(target_ms: i32, lead_ns: u64, low_latency: bool) -> i3
 /// Frames to read this cycle so the buffer's reachable levels straddle the
 /// target evenly instead of landing wherever priming happened to leave them.
 ///
-/// Reads and writes are both whole decoded chunks, so the level can only ever
-/// be `phase + k · chunk` — 21.3 ms steps for 1024-sample AAC. It dithers
-/// between the two grid points either side of the target as writes and reads
-/// alternate, and `phase` is set by accident at priming. On a 120 ms target
-/// with AAC that was 106 ms and 128 ms: the low state is 14 ms short, so the
-/// *average* cushion the user gets is up to a chunk below what they asked for.
-/// See "The buffer level is quantised to one chunk" in
-/// `docs/audio-timing-pitfalls.md`.
+/// Reads and writes are both whole decoded chunks, so the level can only be
+/// `phase + k · chunk` (21.3 ms steps for 1024-sample AAC) and dithers between
+/// the two grid points either side of the target, with `phase` set by accident
+/// at priming. The average cushion can then be up to a chunk below the target
+/// (see `docs/audio-timing-pitfalls.md`).
 ///
-/// One read of a different size moves `phase`, permanently. Centring the pair
-/// on the target — reachable levels at `target ± chunk/2` — makes the average
-/// cushion the configured one and halves the worst-case shortfall. Note that
-/// putting a grid point *on* the target would be worse, not better: the pair
-/// becomes `target` and `target − chunk`, so the average sits half a chunk low.
+/// One read of a different size moves `phase` for good. Centring the pair on
+/// the target (levels at `target ± chunk/2`) makes the average cushion the
+/// configured one. Putting a grid point *on* the target would be worse: the
+/// pair becomes `target` and `target − chunk`, half a chunk low on average.
 ///
-/// Nothing is skipped or duplicated — this cycle consumes a little more or less
-/// and the remainder is still there next cycle. It is a phase correction, not a
-/// rate one, so it cannot fight the speed controller, which owns the rate: over
-/// any window the average read size still equals the average write size.
+/// Nothing is skipped or duplicated, and it is a phase correction, not a rate
+/// one, so it cannot fight the speed controller.
 ///
-/// Returns `base_frames` when the grid is already centred, and otherwise a size
-/// within half a chunk of a normal read — long rather than absurdly short when
-/// the correction is large. The caller must have that many frames buffered,
-/// which after priming it does by construction (priming waits for the target
-/// plus the output lead).
+/// Returns `base_frames` when the grid is already centred, otherwise a size
+/// within half a chunk of a normal read. The caller must have that many frames
+/// buffered, which after priming it does by construction.
 pub fn aligning_read_frames(fill_frames: i64, target_frames: i64, base_frames: i32) -> i32 {
     if base_frames <= 0 || fill_frames <= 0 {
         return base_frames;
@@ -136,8 +122,8 @@ pub fn aligning_read_frames(fill_frames: i64, target_frames: i64, base_frames: i
     frames as i32
 }
 
-/// Nanoseconds for `frames` at `rate`, truncating (the C `chunk_ns` /
-/// `stream_duration_ns` form: plain integer division, not `av_rescale`).
+/// Nanoseconds for `frames` at `rate`, truncating (plain integer division,
+/// not `av_rescale`).
 pub fn frames_to_ns(frames: u64, rate: u32) -> u64 {
     if rate == 0 {
         return 0;
@@ -181,8 +167,8 @@ mod alignment_tests {
 
     #[test]
     fn one_read_centres_the_dither_on_the_target() {
-        // The log this came from: primed at 213ms against a 120ms target and
-        // dithering between 106ms and 128ms, so the average cushion ran short.
+        // Primed at 213ms against a 120ms target, the level dithers between
+        // 106ms and 128ms, so the average cushion runs short.
         assert!(straddles_target(ms(213.0), ms(120.0), BASE));
         // And from wherever else priming happens to land.
         for fill_ms in [100, 121, 150, 200, 213, 400, 874, 8000] {

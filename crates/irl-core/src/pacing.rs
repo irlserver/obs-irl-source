@@ -1,6 +1,6 @@
-//! Video pacing queue (port of `receiver-video.c:82-209`): decoded frames in
-//! system memory waiting for their due time, bounded by frame count and
-//! bytes, with due times re-derived from the live audio playout offset.
+//! Video pacing queue: decoded frames in system memory waiting for their due
+//! time, bounded by frame count and bytes, with due times re-derived from the
+//! live audio playout offset.
 
 use std::collections::VecDeque;
 
@@ -39,13 +39,11 @@ impl<F> PacingQueue<F> {
     /// Empty queue holding `lead_ns` of media, under hard ceilings of
     /// `max_frames` and `max_bytes`.
     ///
-    /// The two bounds mean different things and that distinction is the whole
-    /// design. `lead_ns` is the *soft* bound: it is how far ahead of display
-    /// the caller decodes, it is reached in normal operation every second of
-    /// every stream, and reaching it simply means "stop decoding for now".
-    /// `max_frames` / `max_bytes` are the *hard* bound: memory that must not be
-    /// exceeded whatever the stream does, and reaching one means pacing has
-    /// failed and frames go out early ([`DueVerdict::EmitEarly`], counted).
+    /// `lead_ns` is the *soft* bound: how far ahead of display the caller
+    /// decodes. Reaching it is normal and means "stop decoding for now".
+    /// `max_frames` / `max_bytes` are the *hard* bound on memory; reaching one
+    /// means pacing has failed and frames go out early
+    /// ([`DueVerdict::EmitEarly`], counted).
     pub fn new(lead_ns: i64, max_frames: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -96,10 +94,9 @@ impl<F> PacingQueue<F> {
     /// Re-derive every due time: `due = map(pts)`.
     ///
     /// Rescheduling against one offset per cycle preserves the spacing
-    /// between frames (their due times differ only by their PTS deltas) and
-    /// moves the whole queue with the audio it is mapped to, so video rides
-    /// the same latency reclaim instead of trailing it for the depth of the
-    /// queue.
+    /// between frames and moves the whole queue with the audio it is mapped
+    /// to, so video follows a latency change instead of trailing it for the
+    /// depth of the queue.
     pub fn reschedule(&mut self, map: impl Fn(i64) -> u64) {
         for entry in &mut self.entries {
             entry.due_ns = map(entry.pts_ns);
@@ -108,18 +105,17 @@ impl<F> PacingQueue<F> {
 
     /// Head frame verdict at `now_ns`.
     ///
-    /// Over the ceilings the head goes out early rather than being dropped:
-    /// too-early video is what the un-paced path did all the time, and it
-    /// beats a hole in the picture. As in C, a cycle spent over a ceiling
-    /// counts an overflow even if the head happened to be due anyway.
+    /// Over the ceilings the head goes out early rather than being dropped,
+    /// since early video beats a hole in the picture. A cycle spent over a
+    /// ceiling counts an overflow even if the head was due anyway.
     /// `slack_ns` is how early a frame may go out: the emit slack plus the
-    /// delivery lead (see [`consts::VIDEO_PACING_LEAD_TICKS`]). The caller
-    /// samples it per cycle, because the canvas frame rate is a setting the
-    /// user can change while the source runs.
+    /// delivery lead (see [`crate::consts::VIDEO_PACING_LEAD_TICKS`]). The
+    /// caller samples it per cycle, because the canvas frame rate can change
+    /// while the source runs.
     /// `allow_early` is false while the caller still needs a frame at its exact
-    /// due time — the one that re-anchors libobs's play head. Emitting that one
-    /// early would anchor the whole connection early, which is the offset the
-    /// lead exists to avoid, so a hard ceiling waits instead of overflowing.
+    /// due time (the one that re-anchors libobs's play head). Emitting that one
+    /// early would anchor the whole connection early, so a hard ceiling waits
+    /// instead of overflowing.
     pub fn due_now(&mut self, now_ns: u64, slack_ns: i64, allow_early: bool) -> Option<DueVerdict> {
         let due_ns = self.entries.front()?.due_ns;
         // Only a *hard* ceiling forces a frame out early. Sitting at the decode
@@ -423,11 +419,8 @@ mod tests {
         assert_eq!(q.overflows(), 1);
     }
 
-    /// The distinction the packet-paced design rests on: holding the decode
-    /// lead is the normal steady state and must never emit a frame early.
-    /// Before the split, "full" meant both things, so a Target Buffer that
-    /// needed more decoded frames than the byte ceiling allowed degraded into
-    /// permanent early emission instead of just decoding later.
+    /// Holding the decode lead is the normal steady state and must never emit
+    /// a frame early; only a memory ceiling does.
     #[test]
     fn reaching_the_decode_lead_stops_intake_without_emitting_early() {
         // 100ms of lead, 30fps frames, no memory ceiling in reach.

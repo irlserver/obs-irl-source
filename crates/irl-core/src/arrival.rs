@@ -1,26 +1,16 @@
 //! Whether video has stopped catching up to live.
 //!
-//! The standing video delay ([`crate::video_delay`]) is sized before the play
-//! head anchors from how late a frame reached the plugin against its audio.
-//! That is only the sender's skew once the video is *live*. At the start of a
-//! connection it often is not: a relay hands a new subscriber video from its
-//! last keyframe next to live audio, and that video is behind its audio until
-//! it has caught up. Measured then, a stream with no skew at all reads more
-//! than a second late.
+//! How late video reaches the plugin against its audio is the sender's skew
+//! only once video is *live*. A relay hands a new subscriber video from its
+//! last keyframe next to live audio, so at connection start a stream with no
+//! skew can read more than a second late.
 //!
-//! The network cannot produce that reading. Audio and video travel in one
-//! mux, so loss, throttling and jitter delay them together. Video can only be
-//! behind its audio and then not be if it arrived faster than real time in
-//! between, and that is observable: a packet's arrival time minus its PTS
-//! falls with every frame while video catches up, and hovers around a floor
-//! once it is live. A sender that really is late (#33) holds a steady offset
-//! from its first packet.
-//!
-//! So the floor of that offset is tracked, and video counts as live once the
-//! floor has not dropped by more than a tolerance across a lookback. A
-//! batching relay passes: the newest frame of each batch lands on the same
-//! floor as the newest of the one before. A bounded wait covers a stream that
-//! never stops catching up.
+//! Catching up means arriving faster than real time, so a packet's arrival
+//! time minus its PTS falls with every frame and then hovers around a floor;
+//! a sender that really is late (#33) holds a steady offset from its first
+//! packet. Video counts as live once that floor has not dropped by more than
+//! a tolerance across a lookback, or after a bounded wait. A batching relay
+//! passes, since the newest frame of each batch lands on the same floor.
 
 use std::collections::VecDeque;
 

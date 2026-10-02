@@ -1,4 +1,4 @@
-//! Three-tier PTS discontinuity repair (port of `src/pts-repair.c`).
+//! Three-tier PTS discontinuity repair.
 
 use crate::consts;
 use crate::rescale;
@@ -25,9 +25,8 @@ pub struct Verdict {
     pub corrected_pts: i64,
     /// Silence to insert (only for `Silence`).
     pub silence_ms: i32,
-    /// Gap observed, in milliseconds. This is the C `last_action_gap_ms`: the
-    /// magnitude of the gap, unsigned, for both directions (the direction is
-    /// carried by the action — a backward jump either passes or resets).
+    /// Magnitude of the gap observed, in milliseconds, for both directions
+    /// (the action carries the direction: a backward jump passes or resets).
     pub gap_ms: i32,
 }
 
@@ -48,7 +47,8 @@ pub struct PtsRepair {
 }
 
 impl PtsRepair {
-    /// `pts_repair_init`.
+    /// Repair state for one stream; gaps are in milliseconds, the time base
+    /// is the stream's.
     pub fn new(small_gap_ms: i32, large_gap_ms: i32, tb_num: i32, tb_den: i32) -> Self {
         Self {
             last_pts: 0,
@@ -65,7 +65,7 @@ impl PtsRepair {
         }
     }
 
-    /// `pts_repair_reset`.
+    /// Forget the timeline; the next frame starts a new one.
     pub fn reset(&mut self) {
         self.last_pts = 0;
         self.last_duration = 0;
@@ -76,7 +76,7 @@ impl PtsRepair {
         self.initialised = false;
     }
 
-    /// `pts_repair_evaluate`.
+    /// Judge one frame's `pts` and `duration` (stream time base).
     pub fn evaluate(&mut self, pts: i64, duration: i64) -> Verdict {
         // First frame — just record and pass through.
         if !self.initialised {
@@ -100,17 +100,13 @@ impl PtsRepair {
         // within one tick of the stream's own time base. Re-baseline on the
         // PTS the sender actually sent.
         //
-        // The tick test is what makes a frame duration the container cannot
-        // express harmless. 1024 samples at 44.1 kHz is 2089.8 ticks of a
-        // 90 kHz clock and `duration` can only carry 2090, so the stream lands
-        // one tick *before* the prediction every few frames; over RTMP's
-        // millisecond time base a frame is 23.22 ticks against a carried 23.
-        // Without this, the backward wobble falls into the leading-edge rule
-        // below, which deliberately freezes the baseline — and the next frame
-        // then reads as a whole-frame forward gap and gets interpolated onto
-        // the frozen baseline. The repaired timeline is a frame short from
-        // there on and never recovers it, which lands as a standing ~23 ms
-        // offset in the audio→video playout mapping on every 44.1 kHz stream.
+        // The tick test makes a frame duration the container cannot express
+        // harmless: 1024 samples at 44.1 kHz is 2089.8 ticks of a 90 kHz
+        // clock against a carried 2090, so the stream lands one tick early
+        // every few frames. Without it that wobble falls into the leading-edge
+        // rule below, which freezes the baseline, and the repaired timeline
+        // ends up a frame short for good: a standing ~23 ms lip-sync error on
+        // every 44.1 kHz stream.
         if gap_ms < 1 || gap.abs() <= 1 {
             self.last_pts = pts;
             self.last_duration = if duration > 0 {
@@ -235,8 +231,7 @@ impl PtsRepair {
         (self.tb_num, self.tb_den)
     }
 
-    /// Gap of the most recent evaluation, in milliseconds
-    /// (`pts_repair.last_action_gap_ms`).
+    /// Gap of the most recent evaluation, in milliseconds.
     pub fn last_action_gap_ms(&self) -> i32 {
         self.last_action_gap_ms
     }
@@ -288,8 +283,7 @@ mod tests {
     /// early every few frames. The repaired timeline must track the sender,
     /// not lose a frame to it: the audio→video playout mapping is derived from
     /// these PTS, so a frame lost here is a standing ~23 ms lip-sync error on
-    /// every 44.1 kHz stream. 48 kHz divides the 90 kHz clock exactly and was
-    /// never affected, which is why this only ever showed on phone encoders.
+    /// every 44.1 kHz stream. 48 kHz divides the 90 kHz clock exactly.
     #[test]
     fn a_frame_duration_the_time_base_cannot_express_does_not_lose_a_frame() {
         for (rate, tb_den) in [(44_100i64, 90_000i64), (44_100, 1_000), (48_000, 90_000)] {

@@ -9,19 +9,11 @@
 //! touching `speed.rs`; it exits non-zero if the loop fails to settle at any
 //! buffer target, or if a requested speed is not applied faithfully.
 //!
-//! It exists because the PI speed controller is the one piece of real
-//! mathematics in the audio path and is otherwise unfalsifiable: you cannot
-//! tell a converging controller from a limit-cycling one by reading it. Every
-//! defect the controller had during development was found here — the limit
-//! cycle the trim produced against the original flat deadband, the windup a
-//! stall leaked into the trim before the error window existed, and the sample
-//! quantisation that was silently discarding or doubling every correction
-//! under 0.1 %. `docs/audio-timing-pitfalls.md` is the write-up.
-//!
-//! Unlike the C harness this replaces (`tools/speed-controller-sim.c`, which
-//! copy-pasted the controller because the real one read `struct irl_source`),
-//! this **links** [`irl_core::speed`]. Its constants cannot drift out of step
-//! with the plugin's, because they are the same constants.
+//! You cannot tell a converging controller from a limit-cycling one by reading
+//! it, so this runs it: it checks for limit cycles, for a stall leaking into
+//! the trim, and for sample quantisation discarding or doubling small
+//! corrections (see `docs/audio-timing-pitfalls.md`). It links
+//! [`irl_core::speed`], so it always simulates the controller that ships.
 //!
 //! **Caveat:** the buffer level here is CONTINUOUS. On real audio it moves in
 //! whole decoded chunks (21.3 ms for 1024-sample AAC), so the sub-millisecond
@@ -219,9 +211,9 @@ fn main() -> std::process::ExitCode {
     // How faithfully the requested speed is actually applied. The resampler is
     // driven in whole samples per chunk, so rounding each chunk independently
     // quantises the applied speed to multiples of 1/in_frames (~0.1 % at
-    // 1024). That is the region the deadband slope and the trim both live in,
-    // so the request was either discarded or doubled; `SpeedCarry` carries the
-    // fractional remainder to fix it.
+    // 1024), the region the deadband slope and the trim live in; `SpeedCarry`
+    // carries the fractional remainder so the request is neither discarded
+    // nor doubled.
     println!("applied vs requested speed (1024-frame chunks)");
     for req in [
         1.0f32, 1.0002, 1.0005, 1.001, 1.002, 1.005, 1.01, 0.9995, 0.998, 0.99,

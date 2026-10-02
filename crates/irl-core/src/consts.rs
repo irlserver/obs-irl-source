@@ -17,7 +17,6 @@ pub const RECONNECT_DELAY_MIN_S: i32 = 1;
 /// Reconnect delay property bounds.
 pub const RECONNECT_DELAY_MAX_S: i32 = 60;
 /// Transport receive buffer handed to FFmpeg (`buffer_size` / `recv_buffer_size`).
-/// Formerly the dead `network_buffer_mb` setting; now a constant.
 pub const NETWORK_BUFFER_MB: i64 = 2;
 /// Target jitter buffer fill.
 pub const DEFAULT_BUFFER_TARGET_MS: i64 = 120;
@@ -68,7 +67,7 @@ pub const BUFFER_MIN_DIVISOR: i64 = 2;
 pub const BUFFER_MIN_FLOOR_MS: i64 = 20;
 /// `max = target + MAX_EXTRA`.
 pub const BUFFER_MAX_EXTRA_MS: i64 = 200;
-/// Ring capacity is this many times `buffer_max_ms` (see `audio-buffer.c`).
+/// Ring capacity is this many times `buffer_max_ms`.
 pub const BUFFER_CAPACITY_MULTIPLIER: i64 = 4;
 
 // ── PTS repair ──
@@ -141,14 +140,11 @@ pub const AUDIO_SPEED_LEVEL_SMOOTHING: f32 = 0.008;
 
 /// Speed at the edge of the deadband.
 ///
-/// The deadband used to be flat: dead-on 1.0 anywhere within 20 ms of target.
-/// That is fine for a proportional-only loop, and fatal once the trim is added
-/// — a region with zero proportional feedback leaves the integrator undamped,
-/// and the pair limit-cycles through it forever (simulated: ±20 ms of fill on
-/// a ~2 minute period, never settling). A shallow slope through the deadband
-/// restores the damping. At 0.2 % it is 3.5 cents at the very edge, an order
-/// of magnitude under anything audible, and it makes the ramp continuous where
-/// it used to step.
+/// The deadband is sloped rather than flat because a region with zero
+/// proportional feedback leaves the trim's integrator undamped, and the pair
+/// limit-cycles through it (simulated: ±20 ms of fill on a ~2 minute period,
+/// never settling). At 0.2 % the slope is 3.5 cents at the very edge, an order
+/// of magnitude under anything audible.
 pub const AUDIO_SPEED_DEADBAND_SLOPE: f32 = 0.002;
 
 /// Integral gain of the speed trim, in 1/s² (error in seconds of buffer, dt
@@ -256,10 +252,9 @@ pub const VIDEO_INTERVAL_DEFAULT_NS: i64 = 33_333_333;
 /// Pacing queue frame ceiling.
 ///
 /// It has to carry the largest Target Buffer at the highest frame rate anyone
-/// streams: the lead is the audio buffer, so 8 s at 120 fps is 960 frames. At
-/// 512 the count bound, not the byte bound, was what decided when pacing gave
-/// up — and it did so at a different latency for every frame rate. The byte
-/// ceiling below is the one that should bind.
+/// streams: the lead is the audio buffer, so 8 s at 120 fps is 960 frames. The
+/// byte ceiling below is the one meant to bind; a count bound that binds first
+/// gives up at a different latency for every frame rate.
 pub const VIDEO_PACING_MAX_FRAMES: usize = 1024;
 /// Pacing queue byte ceiling (1 GiB).
 pub const VIDEO_PACING_MAX_BYTES: usize = 1024 * 1024 * 1024;
@@ -270,23 +265,15 @@ pub const VIDEO_PACING_SLACK_NS: i64 = 1_000_000;
 /// ticks.
 ///
 /// The frame still carries its due time as its timestamp, so libobs shows it
-/// at the same moment either way; what the lead buys is that the frame is
-/// already queued when the render tick it belongs to runs.
+/// at the same moment either way; the lead makes sure it is already queued
+/// when its render tick runs. `ready_async_frame()` takes the frame whose
+/// timestamp it has just passed, so a frame handed over *at* its due time
+/// slips to the next tick whenever the video thread wakes late, which on a
+/// 30fps source and a 60fps canvas is visible judder.
 ///
-/// `ready_async_frame()` advances its play head by exact wall-clock deltas and
-/// takes the frame whose timestamp it has just passed, so a frame already in
-/// the async queue lands on a deterministic tick. A frame handed over *at* its
-/// due time has not been queued yet when that tick runs and slips to the next
-/// one — but only sometimes, because what decides it is the video thread's
-/// wakeup jitter: millisecond-granular at best, and far coarser on a Windows
-/// box whose timer resolution nothing has raised. For a 30fps source on a
-/// 60fps canvas that is the difference between every frame holding two ticks
-/// and frames alternating between one and three — judder, on exactly the
-/// panning shots where it shows most.
-///
-/// Two ticks covers that jitter, and still leaves a queue depth of one to four
-/// source frames, far under the 30 at which `cache_video()` discards the whole
-/// async queue.
+/// Two ticks covers that wakeup jitter (coarse on Windows) and keeps the queue
+/// at one to four source frames, far under the 30 at which `cache_video()`
+/// discards the whole async queue.
 pub const VIDEO_PACING_LEAD_TICKS: u64 = 2;
 /// Ceiling on that lead, for a canvas running at an unusually low frame rate.
 pub const VIDEO_PACING_MAX_LEAD_NS: u64 = 50_000_000;
@@ -298,31 +285,21 @@ pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// Margin past the audio prime estimate that video waits for the audio playout
 /// mapping before anchoring libobs's play head on its own clock.
 ///
-/// While an audio stream is present, the first frame handed to libobs must go
-/// out at the due time the *audio mapping* gives it, because libobs anchors its
-/// play head to that frame's arrival and never moves it again. Before the
-/// mapping exists the only schedule available is the video-only fallback, and
-/// the two disagree by roughly the output lead plus a chunk (~100 ms) in one
-/// direction, or by whatever audio warm-up remained in the other — so a
-/// connection anchored on a fallback frame plays the whole way with that
-/// lip-sync error baked in. Video therefore holds until audio primes. The
-/// prime is expected within `STARTUP_AUDIO_WARMUP_MS + target + AUDIO_OUT_LEAD_MS`;
-/// this is the slack past that before a stream whose audio never arrives is
-/// let through on the fallback anyway.
+/// libobs anchors its play head to the first frame's arrival and never moves
+/// it, and the video-only fallback schedule disagrees with the audio mapping
+/// by ~100 ms, so video holds until audio primes. The prime is expected within
+/// `STARTUP_AUDIO_WARMUP_MS + target + AUDIO_OUT_LEAD_MS`; this is the slack
+/// past that before a stream whose audio never arrives is let through on the
+/// fallback anyway.
 pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 
 /// Ceiling on the standing video delay (`irl_core::video_delay`).
 ///
-/// The delay covers a sender whose video reaches the plugin later than the
-/// audio of the same instant by more than Target Buffer absorbs. It costs
-/// nothing to carry: a late frame is shown on arrival with or without it, the
-/// delay only lets it be paced, so the ceiling is not a latency bound but a
-/// stop on a decoder or a host that cannot keep up, whose lateness grows
-/// without end. It has to clear every skew a phone can produce, though: a
-/// video pipeline running a stabiliser has sent video 1.6 s behind its audio
-/// (#33), and past the ceiling the stream plays unpaced (see
-/// `VideoThread::settle_anchor_candidate`). The audio hold
-/// (`irl_core::audio_hold`) is what puts a sender's skew back in sync.
+/// A late frame is shown on arrival with or without the delay, which only
+/// lets it be paced, so the ceiling is not a latency bound but a stop on a
+/// decoder or host whose lateness grows without end. It has to clear every
+/// skew a phone produces: a stabiliser has sent video 1.6 s behind its audio
+/// (#33). Past the ceiling the stream plays unpaced.
 pub const VIDEO_DELAY_MAX_MS: u64 = 5000;
 /// After the play head is anchored, a raise of the video delay moves the
 /// picture, so late frames must recur across this window before one is made.
@@ -406,7 +383,7 @@ pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
 
 /// Ring capacity when the format is degenerate and `4 × max_ms` works out to
-/// nothing (`audio_buffer_init`'s `buf->capacity = 65536` fallback).
+/// nothing.
 pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
 
 #[cfg(test)]

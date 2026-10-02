@@ -3,8 +3,7 @@
 //! output-clock arithmetic, video pacing, the demuxer option table, config
 //! derivation and the stats field table.
 //!
-//! Everything here is plain data in, plain data out, so it is unit-tested
-//! against the thresholds the C plugin was tuned with. Time values are passed
+//! Everything here is plain data in, plain data out. Time values are passed
 //! in as parameters (nanoseconds for the OBS domain, microseconds for the
 //! FFmpeg domain) rather than read from a clock, so tests are deterministic
 //! and the two domains cannot be mixed by accident.

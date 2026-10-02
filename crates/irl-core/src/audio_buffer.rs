@@ -1,9 +1,9 @@
-//! PTS-aware audio ring buffer (port of `src/audio-buffer.c`).
+//! PTS-aware audio ring buffer.
 //!
 //! Interleaved PCM in a byte ring, sized in milliseconds, with a parallel
 //! queue of `(pts_ns, size, consumed)` chunks so every read can report the
-//! stream PTS of its oldest byte. The C version carried its own mutex; here
-//! the caller wraps it in one (lock order: the audio state lock first).
+//! stream PTS of its oldest byte. It has no lock of its own: the caller wraps
+//! it in one (lock order: the audio state lock first).
 
 use crate::consts;
 
@@ -59,12 +59,7 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     /// Allocate for `sample_rate`/`channels`/`bytes_per_sample` with the
-    /// capacity `4 × max_ms` implies (plus headroom, as in C).
-    ///
-    /// Ports `audio_buffer_init`. The C function returns false only when the
-    /// mutex could not be created; this type has no mutex (the caller wraps
-    /// it), so the `Option` is never `None` — it keeps the shape of the C
-    /// call site.
+    /// capacity `4 × max_ms` implies. Never returns `None`.
     pub fn new(
         sample_rate: i32,
         channels: i32,
@@ -94,11 +89,7 @@ impl AudioBuffer {
         Some(buf)
     }
 
-    /// Reinitialise for a new format (flushes).
-    ///
-    /// Ports `audio_buffer_reconfigure`. The watermarks are kept: the C
-    /// function took them again only because the caller had them at hand,
-    /// and always passed the values already in force.
+    /// Reinitialise for a new format (flushes). The watermarks are kept.
     pub fn reconfigure(&mut self, sample_rate: i32, channels: i32, bytes_per_sample: i32) -> bool {
         self.sample_rate = sample_rate;
         self.channels = channels;
@@ -168,7 +159,7 @@ impl AudioBuffer {
         // Continuation marker: derive the new chunk's PTS from the prior
         // chunk's end so reads stay PTS-consistent. Without this, read_pts
         // would report 0 for these bytes while pts_consume drained unrelated
-        // chunk metadata. Computed before the chunk ring is trimmed, as in C.
+        // chunk metadata. Computed before the chunk ring is trimmed.
         let mut pts_ns = 0;
         if self.chunk_count > 0 && self.sample_rate > 0 && self.frame_size() > 0 {
             let last_idx =
@@ -223,8 +214,7 @@ impl AudioBuffer {
         (got, pts)
     }
 
-    /// Read up to `out.len()` bytes without reporting a PTS
-    /// (`audio_buffer_read`).
+    /// Read up to `out.len()` bytes without reporting a PTS.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         if self.data.is_empty() || out.is_empty() {
             return 0;
@@ -238,8 +228,8 @@ impl AudioBuffer {
 
     /// Read applying a linear 1→0 fade across the whole read.
     ///
-    /// Float sample format is assumed, as in C; the fade is skipped when the
-    /// buffer holds anything else.
+    /// Float sample format is assumed; the fade is skipped when the buffer
+    /// holds anything else.
     pub fn read_with_fade_out(&mut self, out: &mut [u8]) -> usize {
         let got = self.read(out);
         if got == 0 || self.frame_size() == 0 {
@@ -307,7 +297,6 @@ impl AudioBuffer {
         (samples * 1000 / self.sample_rate as i64) as i32
     }
 
-    /// Fill in bytes.
     /// Fill in whole frames (`fill_bytes / frame_size`).
     pub fn fill_frames(&self) -> i64 {
         let frame = self.frame_size();
@@ -366,13 +355,13 @@ impl AudioBuffer {
         self.chunk_count
     }
 
-    /// True when the buffer holds at least `min_ms` (`audio_buffer_ready`).
+    /// True when the buffer holds at least `min_ms`.
     pub fn ready(&self) -> bool {
         self.fill_ms() >= self.min_ms
     }
 
-    /// PTS of the oldest queued byte (`audio_buffer_peek_pts`): the oldest
-    /// chunk's PTS advanced by the part of it already consumed. 0 when empty.
+    /// PTS of the oldest queued byte: the oldest chunk's PTS advanced by the
+    /// part of it already consumed. 0 when empty.
     pub fn peek_pts(&self) -> i64 {
         self.oldest_pts()
     }
@@ -387,8 +376,7 @@ impl AudioBuffer {
     }
 
     /// Allocate enough headroom that Max Buffer is not an audible hard trim
-    /// point (`audio_buffer_init`: `ms_to_bytes(max_ms * 4)`, 65536 on a
-    /// degenerate format).
+    /// point.
     fn capacity_for(&self, max_ms: i32) -> usize {
         let capacity = self.ms_to_bytes_i64(max_ms as i64 * consts::BUFFER_CAPACITY_MULTIPLIER);
         if capacity == 0 {

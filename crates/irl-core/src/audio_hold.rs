@@ -2,43 +2,25 @@
 //! video which leaves the sender behind its audio is in hand when the two are
 //! due.
 //!
-//! Plenty of senders hand the transport their audio before the video of the
-//! same instant, both stamped with the capture time. A hardware encoder runs
-//! a few frames behind the microphone, pocketSRT queues its audio about 300 ms
-//! ahead of its deadline, and a phone with video stabilization on sends each
-//! frame a second or more after its sound (#33). At the receiver that shows as
-//! video with PTS `P` arriving long after audio with PTS `P`. Audio plays
-//! Target Buffer plus the output lead after it arrives, so once the skew is
-//! more than that, the picture for a sound is not here yet when the sound
-//! plays. Nothing done to the video schedule can fix it: a frame cannot be
-//! shown before it arrives, and the standing video delay
-//! ([`crate::video_delay`]) only trades the lateness for a fixed lip-sync
-//! error. The audio has to wait for the picture, which is what the media
-//! source does by pacing both streams on their PTS.
+//! Many senders hand the transport their audio before the video of the same
+//! instant (pocketSRT queues audio ~300 ms early, a stabiliser sends video a
+//! second or more late, #33). Once the skew exceeds Target Buffer plus the
+//! output lead, the picture for a sound is not here when the sound plays, and
+//! no video schedule can fix that: the audio has to wait. So the jitter
+//! buffer's target is raised by the uncovered part of the skew plus a margin.
+//! Before priming that only starts audio later; after it the speed controller
+//! builds the cushion at -2 % while the video delay ([`crate::video_delay`])
+//! bridges the gap.
 //!
-//! So the jitter buffer's target is raised by the part of the skew that Target
-//! Buffer and the output lead do not already cover, plus a margin. Before
-//! playback primes that costs nothing audible: audio simply starts later,
-//! together with the picture. After it, the speed controller builds the extra
-//! cushion by playing at its inaudible -2 %, and the video delay bridges the
-//! gap until it has (the video thread hands the delay back as the cushion
-//! grows, so the picture never jumps).
+//! The skew is measured in mux order (each video packet's timestamp against
+//! the newest audio PTS decoded before it), so loss and stalls, which delay
+//! both streams together, leave it alone. The caller measures only once video
+//! is live (`crate::arrival`), which keeps a relay's keyframe replay out.
 //!
-//! The skew is measured in mux order: each video packet's timestamp against
-//! the newest audio PTS decoded before it. Audio and video travel in one mux,
-//! so loss, throttling and a stall delay them together and leave the reading
-//! alone; only the sender, or a relay replaying video from its last keyframe
-//! next to live audio, moves it. The caller keeps the second case out by
-//! measuring only once video is live (`crate::arrival`).
-//!
-//! What is raised and what is released are deliberately different readings.
-//! A raise takes the *sustained* skew, the lowest reading across
-//! `AUDIO_HOLD_RAISE_WINDOW_MS`: a skew that was there the whole window. A
-//! burst of late video from a hiccup at the sender is short, the video delay
-//! covers it, and paying for it in latency for the rest of the connection
-//! would be the wrong trade. A release takes the *worst* reading across the
-//! much longer `AUDIO_HOLD_RELAX_WINDOW_MS`, so it never undercuts a skew
-//! seen recently, and the hold does not pump up and down with one.
+//! A raise takes the *lowest* reading across `AUDIO_HOLD_RAISE_WINDOW_MS`, so
+//! a short burst of late video stays the video delay's to cover. A release
+//! takes the *worst* reading across the longer `AUDIO_HOLD_RELAX_WINDOW_MS`,
+//! so the hold does not pump up and down.
 
 use std::collections::VecDeque;
 

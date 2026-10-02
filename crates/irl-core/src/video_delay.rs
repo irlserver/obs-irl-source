@@ -1,44 +1,24 @@
 //! The standing delay on the video schedule.
 //!
-//! Pacing hands each frame to libobs before it is due, which is what keeps
-//! libobs's async queue about one frame deep and the cadence smooth. A frame
-//! handed over *after* it is due is shown a canvas tick late, and when two
-//! late frames reach libobs inside one tick it discards the older one: that is
-//! the "low fps" a stream shows when its video reaches the plugin later than
-//! the audio of the same instant by more than Target Buffer covers. How early
-//! a frame is in hand is the sender's to set, so the plugin cannot make a late
-//! frame early; what it can do is move the whole video schedule later by a
-//! fixed amount, so that the frames stop being late.
+//! A frame handed to libobs after it is due is shown a tick late, and when two
+//! late frames land inside one tick libobs drops the older one ("low fps").
+//! The plugin cannot make a late frame early, so it moves the whole video
+//! schedule later by this delay, sized from the worst shortfall seen. It
+//! trades a known lip-sync error for a smooth picture.
 //!
-//! That amount is the delay here. It is added to every due time and sized from
-//! the worst shortfall seen. It trades a fixed, known lip-sync error for a
-//! smooth picture; the caller's log line says how much more Target Buffer
-//! would take the error back to zero. Before libobs's play head is anchored
-//! nothing has been shown yet, so a shortfall is acted on at once. Afterwards a
-//! raise moves the picture (one frame holds for the size of the raise), so it
-//! takes a shortfall that recurs across a window, not a single late frame from
-//! a scheduling hiccup.
+//! Before libobs's play head is anchored nothing has been shown, so a
+//! shortfall raises the delay at once. Afterwards a raise moves the picture,
+//! so it takes a shortfall that recurs across a window.
 //!
-//! The delay is also taken back, slowly. The measurement that sets it before
-//! the anchor is one frame at the start of a connection, and on a poor link
-//! that moment is a burst followed by catch-up (a relay replaying video from
-//! an older keyframe next to live audio, a throttled uplink draining its
-//! queue): the frame can look more than a second late on a stream that has no
-//! skew at all once it settles, and a delay that never shrank then held
-//! on-time video that far behind its audio for the whole connection. So every
-//! frame handed over also reports its *arrival* margin, and when a whole
-//! window of them needed less than the delay in force by more than a
-//! threshold, the delay ramps down to what the window needed plus a tick. It
-//! ramps rather than steps: due times move a little earlier each cycle, so
-//! the picture plays a few percent fast (the caller passes the Catch-Up
-//! Speed) and nothing jumps or is skipped. A raise cancels a ramp.
+//! The pre-anchor reading is one frame and can be a startup burst, so the
+//! delay also comes back down: when a whole window of frames needed less by
+//! more than a threshold, it ramps (never steps) to what the window needed
+//! plus a tick, at the Catch-Up Speed the caller passes. A raise cancels a
+//! ramp.
 //!
-//! The bar is deliberately "not late", not "a full delivery lead early". The
-//! lead the pacing queue applies to a frame it holds is an allowance for its
-//! own timer oversleeping on the way to the due time; a frame handed over on
-//! arrival never sleeps, and libobs shows it on time as long as it is in the
-//! queue before its due time passes. Asking every frame for the lead would
-//! delay a healthy stream by the lead for nothing.
+//! The bar is "not late", not "a full delivery lead early": the lead covers
+//! the pacing timer oversleeping, and a frame handed over on arrival never
+//! sleeps.
 
 use crate::consts;
 
