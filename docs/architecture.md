@@ -1,6 +1,6 @@
 # Architecture
 
-This page explains why the plugin is shaped the way it is: the threads, what each one owns, and how audio and video are kept in step. `CLAUDE.md` lists the rules that follow from it. `docs/audio-pipeline.md` covers the audio path in depth, and `docs/audio-timing-pitfalls.md` covers the speed controller.
+This page explains why the plugin is shaped the way it is: the threads, what each one owns, and how audio and video are kept in step. `CLAUDE.md` lists the rules that follow from it. `docs/audio-pipeline.md` covers the audio path in depth, `docs/audio-timing-pitfalls.md` covers the speed controller, and `docs/skew-testing.md` reproduces late video on a real OBS.
 
 ## Crates
 
