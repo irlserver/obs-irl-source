@@ -231,17 +231,15 @@ impl AudioIntake {
             match guard.as_mut() {
                 Some(buf) => buf.reconfigure(out_rate, out_channels, dsp::SAMPLE_BYTES as i32),
                 None => {
-                    let buf = irl_core::AudioBuffer::new(
+                    *guard = Some(irl_core::AudioBuffer::new(
                         out_rate,
                         out_channels,
                         dsp::SAMPLE_BYTES as i32,
                         watermarks.target_ms,
                         watermarks.min_ms,
                         watermarks.max_ms,
-                    );
-                    let ok = buf.is_some();
-                    *guard = buf;
-                    ok
+                    ));
+                    true
                 }
             }
         };

@@ -59,7 +59,7 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     /// Allocate for `sample_rate`/`channels`/`bytes_per_sample` with the
-    /// capacity `4 × max_ms` implies. Never returns `None`.
+    /// capacity `4 × max_ms` implies.
     pub fn new(
         sample_rate: i32,
         channels: i32,
@@ -67,7 +67,7 @@ impl AudioBuffer {
         target_ms: i32,
         min_ms: i32,
         max_ms: i32,
-    ) -> Option<Self> {
+    ) -> Self {
         let mut buf = Self {
             data: Vec::new(),
             head: 0,
@@ -86,7 +86,7 @@ impl AudioBuffer {
         };
         let capacity = buf.capacity_for(max_ms);
         buf.data = vec![0u8; capacity];
-        Some(buf)
+        buf
     }
 
     /// Reinitialise for a new format (flushes). The watermarks are kept.
@@ -507,7 +507,6 @@ mod tests {
             target_ms / 2,
             target_ms + 200,
         )
-        .unwrap()
     }
 
     /// A chunk whose every float sample equals `value`.

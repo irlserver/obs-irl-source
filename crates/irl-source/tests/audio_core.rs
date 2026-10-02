@@ -28,7 +28,7 @@ fn make_shared(low_latency: bool, adaptive: bool) -> Arc<Shared> {
 
 /// A configured jitter buffer and a pump wired to `clock` and `recorder`.
 fn make_pump(shared: &Arc<Shared>, clock: &Arc<AtomicU64>, recorder: &Recorder) -> AudioPump {
-    *shared.audio_buf() = AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320);
+    *shared.audio_buf() = Some(AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320));
     shared.audio_state().decoded_frame_samples = CHUNK_FRAMES;
 
     let clock = Arc::clone(clock);
@@ -214,7 +214,7 @@ fn disconnect_fade_does_not_submit_stale_audio() {
             let shared = make_shared(false, true);
             let recorder = Recorder::with_samples();
             let now = 10_000_000_000;
-            *shared.audio_buf() = AudioBuffer::new(rate, CHANNELS, 4, 120, 60, 320);
+            *shared.audio_buf() = Some(AudioBuffer::new(rate, CHANNELS, 4, 120, 60, 320));
             let data = vec![0u8; rate as usize / 10 * CHANNELS as usize * 4];
             shared
                 .audio_buf()
@@ -534,7 +534,7 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
     let clock = Arc::new(AtomicU64::new(1_000_000_000));
     let recorder = Recorder::with_samples();
 
-    *shared.audio_buf() = AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320);
+    *shared.audio_buf() = Some(AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320));
     shared.audio_state().decoded_frame_samples = AAC_FRAMES as i32;
     let mut pump = {
         let ns = Arc::clone(&clock);
