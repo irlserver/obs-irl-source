@@ -1,6 +1,5 @@
-//! Every tuning constant of the plugin, in one place. Values are the C
-//! plugin's (`include/irl-source.h` and the file-local `#define`s); the
-//! `consts_match_c_values` test pins them so a typo is caught once.
+//! Every tuning constant of the plugin, in one place. The `consts_are_pinned`
+//! test pins every value, so a typo is caught once.
 
 /// The source id registered with OBS; also what the websocket vendor matches.
 pub const SOURCE_ID: &str = "irl_source";
@@ -18,7 +17,6 @@ pub const RECONNECT_DELAY_MIN_S: i32 = 1;
 /// Reconnect delay property bounds.
 pub const RECONNECT_DELAY_MAX_S: i32 = 60;
 /// Transport receive buffer handed to FFmpeg (`buffer_size` / `recv_buffer_size`).
-/// Formerly the dead `network_buffer_mb` setting; now a constant.
 pub const NETWORK_BUFFER_MB: i64 = 2;
 /// Target jitter buffer fill.
 pub const DEFAULT_BUFFER_TARGET_MS: i64 = 120;
@@ -26,14 +24,12 @@ pub const DEFAULT_BUFFER_TARGET_MS: i64 = 120;
 pub const BUFFER_TARGET_MIN_MS: i32 = 20;
 /// Target buffer property ceiling.
 ///
-/// Not a limit of the controller — it is where holding the cushion stops
+/// Not a limit of the controller: it is where holding the cushion stops
 /// being free. Every millisecond of audio buffer is also a millisecond of
-/// decoded video held in the pacing queue (see [`VIDEO_PACING_MAX_FRAMES`] /
-/// [`VIDEO_PACING_MAX_BYTES`]), and the whole target is paid as startup delay
-/// before playback primes. High-bitrate uplinks with deep sender-side
-/// buffering do stall for several seconds, though, and 2s could not ride
-/// those out, so the ceiling is set by what the video side can still pace
-/// rather than by what the audio side needs.
+/// compressed video held in the packet queue, and the whole target is paid as
+/// startup delay before playback primes. High-bitrate uplinks with deep
+/// sender-side buffering do stall for several seconds, though, and 2s could
+/// not ride those out.
 pub const BUFFER_TARGET_MAX_MS: i32 = 8000;
 /// Target buffer property step.
 pub const BUFFER_TARGET_STEP_MS: i32 = 10;
@@ -71,7 +67,7 @@ pub const BUFFER_MIN_DIVISOR: i64 = 2;
 pub const BUFFER_MIN_FLOOR_MS: i64 = 20;
 /// `max = target + MAX_EXTRA`.
 pub const BUFFER_MAX_EXTRA_MS: i64 = 200;
-/// Ring capacity is this many times `buffer_max_ms` (see `audio-buffer.c`).
+/// Ring capacity is this many times `buffer_max_ms`.
 pub const BUFFER_CAPACITY_MULTIPLIER: i64 = 4;
 
 // ── PTS repair ──
@@ -101,6 +97,12 @@ pub const BLEED_PACE_FILL_MS: i32 = 1000;
 pub const AUDIO_OFFSET_REANCHOR_MARGIN_MS: i64 = 400;
 /// Recovery hold after an underrun (microseconds).
 pub const AUDIO_RECOVERY_HOLD_US: u64 = 1_500_000;
+/// Recovery hold after the audio decoder was flushed or the stream timeline
+/// was reset (microseconds).
+pub const AUDIO_RESET_RECOVERY_HOLD_US: u64 = 2_500_000;
+/// How long the packet-level keyframe gate waits before giving up and feeding
+/// the decoder whatever arrives (microseconds).
+pub const VIDEO_PKT_GATE_TIMEOUT_US: u64 = 5_000_000;
 /// Hidden backlog trim trigger above target.
 pub const AUDIO_TRIM_TRIGGER_MS: i32 = 90;
 /// Fade applied when resuming from concealment.
@@ -138,14 +140,11 @@ pub const AUDIO_SPEED_LEVEL_SMOOTHING: f32 = 0.008;
 
 /// Speed at the edge of the deadband.
 ///
-/// The deadband used to be flat: dead-on 1.0 anywhere within 20 ms of target.
-/// That is fine for a proportional-only loop, and fatal once the trim is added
-/// — a region with zero proportional feedback leaves the integrator undamped,
-/// and the pair limit-cycles through it forever (simulated: ±20 ms of fill on
-/// a ~2 minute period, never settling). A shallow slope through the deadband
-/// restores the damping. At 0.2 % it is 3.5 cents at the very edge, an order
-/// of magnitude under anything audible, and it makes the ramp continuous where
-/// it used to step.
+/// The deadband is sloped rather than flat because a region with zero
+/// proportional feedback leaves the trim's integrator undamped, and the pair
+/// limit-cycles through it (simulated: ±20 ms of fill on a ~2 minute period,
+/// never settling). At 0.2 % the slope is 3.5 cents at the very edge, an order
+/// of magnitude under anything audible.
 pub const AUDIO_SPEED_DEADBAND_SLOPE: f32 = 0.002;
 
 /// Integral gain of the speed trim, in 1/s² (error in seconds of buffer, dt
@@ -253,10 +252,9 @@ pub const VIDEO_INTERVAL_DEFAULT_NS: i64 = 33_333_333;
 /// Pacing queue frame ceiling.
 ///
 /// It has to carry the largest Target Buffer at the highest frame rate anyone
-/// streams: the lead is the audio buffer, so 8 s at 120 fps is 960 frames. At
-/// 512 the count bound, not the byte bound, was what decided when pacing gave
-/// up — and it did so at a different latency for every frame rate. The byte
-/// ceiling below is the one that should bind.
+/// streams: the lead is the audio buffer, so 8 s at 120 fps is 960 frames. The
+/// byte ceiling below is the one meant to bind; a count bound that binds first
+/// gives up at a different latency for every frame rate.
 pub const VIDEO_PACING_MAX_FRAMES: usize = 1024;
 /// Pacing queue byte ceiling (1 GiB).
 pub const VIDEO_PACING_MAX_BYTES: usize = 1024 * 1024 * 1024;
@@ -267,23 +265,15 @@ pub const VIDEO_PACING_SLACK_NS: i64 = 1_000_000;
 /// ticks.
 ///
 /// The frame still carries its due time as its timestamp, so libobs shows it
-/// at the same moment either way; what the lead buys is that the frame is
-/// already queued when the render tick it belongs to runs.
+/// at the same moment either way; the lead makes sure it is already queued
+/// when its render tick runs. `ready_async_frame()` takes the frame whose
+/// timestamp it has just passed, so a frame handed over *at* its due time
+/// slips to the next tick whenever the video thread wakes late, which on a
+/// 30fps source and a 60fps canvas is visible judder.
 ///
-/// `ready_async_frame()` advances its play head by exact wall-clock deltas and
-/// takes the frame whose timestamp it has just passed, so a frame already in
-/// the async queue lands on a deterministic tick. A frame handed over *at* its
-/// due time has not been queued yet when that tick runs and slips to the next
-/// one — but only sometimes, because what decides it is the video thread's
-/// wakeup jitter: millisecond-granular at best, and far coarser on a Windows
-/// box whose timer resolution nothing has raised. For a 30fps source on a
-/// 60fps canvas that is the difference between every frame holding two ticks
-/// and frames alternating between one and three — judder, on exactly the
-/// panning shots where it shows most.
-///
-/// Two ticks covers that jitter, and still leaves a queue depth of one to four
-/// source frames, far under the 30 at which `cache_video()` discards the whole
-/// async queue.
+/// Two ticks covers that wakeup jitter (coarse on Windows) and keeps the queue
+/// at one to four source frames, far under the 30 at which `cache_video()`
+/// discards the whole async queue.
 pub const VIDEO_PACING_LEAD_TICKS: u64 = 2;
 /// Ceiling on that lead, for a canvas running at an unusually low frame rate.
 pub const VIDEO_PACING_MAX_LEAD_NS: u64 = 50_000_000;
@@ -295,31 +285,21 @@ pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// Margin past the audio prime estimate that video waits for the audio playout
 /// mapping before anchoring libobs's play head on its own clock.
 ///
-/// While an audio stream is present, the first frame handed to libobs must go
-/// out at the due time the *audio mapping* gives it, because libobs anchors its
-/// play head to that frame's arrival and never moves it again. Before the
-/// mapping exists the only schedule available is the video-only fallback, and
-/// the two disagree by roughly the output lead plus a chunk (~100 ms) in one
-/// direction, or by whatever audio warm-up remained in the other — so a
-/// connection anchored on a fallback frame plays the whole way with that
-/// lip-sync error baked in. Video therefore holds until audio primes. The
-/// prime is expected within `STARTUP_AUDIO_WARMUP_MS + target + AUDIO_OUT_LEAD_MS`;
-/// this is the slack past that before a stream whose audio never arrives is
-/// let through on the fallback anyway.
+/// libobs anchors its play head to the first frame's arrival and never moves
+/// it, and the video-only fallback schedule disagrees with the audio mapping
+/// by ~100 ms, so video holds until audio primes. The prime is expected within
+/// `STARTUP_AUDIO_WARMUP_MS + target + AUDIO_OUT_LEAD_MS`; this is the slack
+/// past that before a stream whose audio never arrives is let through on the
+/// fallback anyway.
 pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 
 /// Ceiling on the standing video delay (`irl_core::video_delay`).
 ///
-/// The delay covers a sender whose video reaches the plugin later than the
-/// audio of the same instant by more than Target Buffer absorbs. It costs
-/// nothing to carry: a late frame is shown on arrival with or without it, the
-/// delay only lets it be paced, so the ceiling is not a latency bound but a
-/// stop on a decoder or a host that cannot keep up, whose lateness grows
-/// without end. It has to clear every skew a phone can produce, though: a
-/// video pipeline running a stabiliser has sent video 1.6 s behind its audio
-/// (#33), and past the ceiling the stream plays unpaced (see
-/// `VideoThread::settle_anchor_candidate`). The audio hold
-/// (`irl_core::audio_hold`) is what puts a sender's skew back in sync.
+/// A late frame is shown on arrival with or without the delay, which only
+/// lets it be paced, so the ceiling is not a latency bound but a stop on a
+/// decoder or host whose lateness grows without end. It has to clear every
+/// skew a phone produces: a stabiliser has sent video 1.6 s behind its audio
+/// (#33). Past the ceiling the stream plays unpaced.
 pub const VIDEO_DELAY_MAX_MS: u64 = 5000;
 /// After the play head is anchored, a raise of the video delay moves the
 /// picture, so late frames must recur across this window before one is made.
@@ -384,10 +364,6 @@ pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 pub const VIDEO_TS_CLAMP_NS: i64 = 500_000_000;
 /// Video-only fallback: forward cap.
 pub const VIDEO_TS_CAP_NS: u64 = 200_000_000;
-/// Plane alignment of the transfer pool (FFmpeg's uncached-copy fast path).
-pub const XFER_PLANE_ALIGN: i32 = 64;
-/// Transfer pool dimension alignment.
-pub const XFER_DIM_ALIGN: i32 = 16;
 
 // ── Stream / network ──
 
@@ -407,112 +383,107 @@ pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
 
 /// Ring capacity when the format is degenerate and `4 × max_ms` works out to
-/// nothing (`audio_buffer_init`'s `buf->capacity = 65536` fallback).
+/// nothing.
 pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every constant, pinned against the value it has in the C plugin, so a
-    /// typo in one of the tables above is caught once rather than diagnosed
-    /// from a stream that sounds slightly wrong.
-    ///
-    /// The C source of each value is in the comment beside it: `irl-source.h`
-    /// unless a file is named.
+    /// Every constant, pinned to its value, so a typo in one of the tables
+    /// above is caught once rather than diagnosed from a stream that sounds
+    /// slightly wrong. A deliberate retune changes the value here too.
     #[test]
-    fn consts_match_c_values() {
+    fn consts_are_pinned() {
         // ── identity ──
-        assert_eq!(SOURCE_ID, "irl_source"); // IRL_SOURCE_ID
-        assert_eq!(VENDOR_NAME, "obs-irl-source"); // websocket-vendor.c
-        assert_eq!(VENDOR_API_VERSION, 1); // websocket-vendor.c
+        assert_eq!(SOURCE_ID, "irl_source");
+        assert_eq!(VENDOR_NAME, "obs-irl-source");
+        assert_eq!(VENDOR_API_VERSION, 1);
 
         // ── settings defaults ──
-        assert_eq!(DEFAULT_RECONNECT_DELAY_S, 2); // IRL_DEFAULT_RECONNECT_DELAY
-        assert_eq!(RECONNECT_DELAY_MIN_S, 1); // settings.c
-        assert_eq!(RECONNECT_DELAY_MAX_S, 60); // settings.c
-        assert_eq!(NETWORK_BUFFER_MB, 2); // IRL_DEFAULT_NETWORK_BUFFER_MB
-        assert_eq!(DEFAULT_BUFFER_TARGET_MS, 120); // IRL_DEFAULT_BUFFER_TARGET_MS
-        assert_eq!(BUFFER_TARGET_MIN_MS, 20); // IRL_BUFFER_TARGET_MIN_MS
-        assert_eq!(BUFFER_TARGET_MAX_MS, 8000); // IRL_BUFFER_TARGET_MAX_MS
-        assert_eq!(BUFFER_TARGET_STEP_MS, 10); // settings.c
-        const { assert!(DEFAULT_ADAPTIVE_SPEED) }; // IRL_DEFAULT_ADAPTIVE_SPEED
-        assert_eq!(DEFAULT_CATCHUP_PERCENT, 5); // IRL_DEFAULT_CATCHUP_PERCENT
-        assert_eq!(CATCHUP_PERCENT_MIN, 2); // IRL_CATCHUP_PERCENT_MIN
-        assert_eq!(CATCHUP_PERCENT_MAX, 15); // IRL_CATCHUP_PERCENT_MAX
-        const { assert!(DEFAULT_WAIT_FOR_KEYFRAME) }; // IRL_DEFAULT_WAIT_KEYFRAME
-        const { assert!(!DEFAULT_LOW_LATENCY_AUDIO) }; // IRL_DEFAULT_LOW_LATENCY_AUDIO
-        const { assert!(!DEFAULT_CLOSE_WHEN_INACTIVE) }; // IRL_DEFAULT_CLOSE_WHEN_INACTIVE
-        const { assert!(DEFAULT_CLEAR_ON_DISCONNECT) }; // IRL_DEFAULT_CLEAR_ON_DISCONNECT
+        assert_eq!(DEFAULT_RECONNECT_DELAY_S, 2);
+        assert_eq!(RECONNECT_DELAY_MIN_S, 1);
+        assert_eq!(RECONNECT_DELAY_MAX_S, 60);
+        assert_eq!(NETWORK_BUFFER_MB, 2);
+        assert_eq!(DEFAULT_BUFFER_TARGET_MS, 120);
+        assert_eq!(BUFFER_TARGET_MIN_MS, 20);
+        assert_eq!(BUFFER_TARGET_MAX_MS, 8000);
+        assert_eq!(BUFFER_TARGET_STEP_MS, 10);
+        const { assert!(DEFAULT_ADAPTIVE_SPEED) };
+        assert_eq!(DEFAULT_CATCHUP_PERCENT, 5);
+        assert_eq!(CATCHUP_PERCENT_MIN, 2);
+        assert_eq!(CATCHUP_PERCENT_MAX, 15);
+        const { assert!(DEFAULT_WAIT_FOR_KEYFRAME) };
+        const { assert!(!DEFAULT_LOW_LATENCY_AUDIO) };
+        const { assert!(!DEFAULT_CLOSE_WHEN_INACTIVE) };
+        const { assert!(DEFAULT_CLEAR_ON_DISCONNECT) };
 
         // ── buffer watermarks ──
-        assert_eq!(BUFFER_MIN_DIVISOR, 2); // IRL_BUFFER_MIN_DIVISOR
-        assert_eq!(BUFFER_MIN_FLOOR_MS, 20); // IRL_BUFFER_MIN_FLOOR_MS
-        assert_eq!(BUFFER_MAX_EXTRA_MS, 200); // IRL_BUFFER_MAX_EXTRA_MS
-        assert_eq!(BUFFER_CAPACITY_MULTIPLIER, 4); // audio-buffer.c
-        assert_eq!(AUDIO_BUFFER_FALLBACK_CAPACITY, 65536); // audio-buffer.c
+        assert_eq!(BUFFER_MIN_DIVISOR, 2);
+        assert_eq!(BUFFER_MIN_FLOOR_MS, 20);
+        assert_eq!(BUFFER_MAX_EXTRA_MS, 200);
+        assert_eq!(BUFFER_CAPACITY_MULTIPLIER, 4);
+        assert_eq!(AUDIO_BUFFER_FALLBACK_CAPACITY, 65536);
 
         // ── PTS repair ──
-        assert_eq!(SMALL_GAP_MS, 70); // IRL_SMALL_GAP_MS
-        assert_eq!(LARGE_GAP_MS, 2000); // IRL_LARGE_GAP_MS
-        assert_eq!(PTS_SMALL_GAP_RELOCK_COUNT, 8); // pts-repair.c
-        assert_eq!(PTS_SMALL_GAP_TOLERANCE_MS, 2); // pts-repair.c
-        assert_eq!(PTS_RELOCK_STEP_MS, 2); // pts-repair.c
-        assert_eq!(AUDIO_PTS_MAX_CHUNKS, 256); // audio-buffer.h
+        assert_eq!(SMALL_GAP_MS, 70);
+        assert_eq!(LARGE_GAP_MS, 2000);
+        assert_eq!(PTS_SMALL_GAP_RELOCK_COUNT, 8);
+        assert_eq!(PTS_SMALL_GAP_TOLERANCE_MS, 2);
+        assert_eq!(PTS_RELOCK_STEP_MS, 2);
+        assert_eq!(AUDIO_PTS_MAX_CHUNKS, 256);
 
         // ── audio output ──
-        assert_eq!(FADE_DURATION_MS, 50); // IRL_FADE_DURATION_MS
-        assert_eq!(STARTUP_AUDIO_WARMUP_MS, 150); // IRL_STARTUP_AUDIO_WARMUP_MS
-        assert_eq!(BLEED_PACE_FILL_MS, 1000); // IRL_BLEED_PACE_FILL_MS
-        assert_eq!(AUDIO_OFFSET_REANCHOR_MARGIN_MS, 400); // AUDIO_OFFSET_REANCHOR_MARGIN_MS
-        assert_eq!(AUDIO_RECOVERY_HOLD_US, 1_500_000); // receiver-audio.c
-        assert_eq!(AUDIO_TRIM_TRIGGER_MS, 90); // receiver-audio.c
-        assert_eq!(AUDIO_CONCEAL_FADE_MS, 8); // receiver-audio.c
-        assert_eq!(AUDIO_OUT_LEAD_MS, 80); // receiver-audio.c
-        assert_eq!(AUDIO_OUT_MAX_LAG_MS, 150); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_MIN, 0.98); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_DEADBAND_MS, 20); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_SMOOTHING, 0.05); // receiver-audio.c
-        // No C ancestor: the C regulated the instantaneous level.
+        assert_eq!(FADE_DURATION_MS, 50);
+        assert_eq!(STARTUP_AUDIO_WARMUP_MS, 150);
+        assert_eq!(BLEED_PACE_FILL_MS, 1000);
+        assert_eq!(AUDIO_OFFSET_REANCHOR_MARGIN_MS, 400);
+        assert_eq!(AUDIO_RECOVERY_HOLD_US, 1_500_000);
+        assert_eq!(AUDIO_RESET_RECOVERY_HOLD_US, 2_500_000);
+        assert_eq!(VIDEO_PKT_GATE_TIMEOUT_US, 5_000_000);
+        assert_eq!(AUDIO_TRIM_TRIGGER_MS, 90);
+        assert_eq!(AUDIO_CONCEAL_FADE_MS, 8);
+        assert_eq!(AUDIO_OUT_LEAD_MS, 80);
+        assert_eq!(AUDIO_OUT_MAX_LAG_MS, 150);
+        assert_eq!(AUDIO_SPEED_MIN, 0.98);
+        assert_eq!(AUDIO_SPEED_DEADBAND_MS, 20);
+        assert_eq!(AUDIO_SPEED_SMOOTHING, 0.05);
         assert_eq!(AUDIO_SPEED_LEVEL_SMOOTHING, 0.008);
-        assert_eq!(AUDIO_SPEED_DEADBAND_SLOPE, 0.002); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_TRIM_GAIN, 0.0025); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_TRIM_MAX, 0.01); // receiver-audio.c
-        assert_eq!(AUDIO_SPEED_TRIM_ERR_WINDOW_MS, 60); // receiver-audio.c (3 * deadband)
-        assert_eq!(AUDIO_SPEED_TRIM_MAX_DT_US, 1_000_000); // receiver-audio.c
-        assert_eq!(AUDIO_LL_MAX_FILL_MS, 100); // receiver-audio.c
-        assert_eq!(AUDIO_DRAIN_STUCK_US, 20_000_000); // receiver-audio.c
-        assert_eq!(AUDIO_DRAIN_STUCK_PROGRESS_MS, 100); // receiver-audio.c
-        assert_eq!(AUDIO_SOFT_COMPENSATION_MAX_SAMPLES, 8); // receiver-audio.c
-        assert_eq!(AUDIO_DEFAULT_FRAME_SAMPLES, 960); // receiver-audio.c
-        assert_eq!(AUDIO_PUMP_BURST, 16); // receiver.c
-        assert_eq!(AUDIO_PUMP_SLEEP_MS, 1); // receiver.c
-        // No C ancestor: the C polled at AUDIO_PUMP_SLEEP_MS unconditionally.
+        assert_eq!(AUDIO_SPEED_DEADBAND_SLOPE, 0.002);
+        assert_eq!(AUDIO_SPEED_TRIM_GAIN, 0.0025);
+        assert_eq!(AUDIO_SPEED_TRIM_MAX, 0.01);
+        assert_eq!(AUDIO_SPEED_TRIM_ERR_WINDOW_MS, 60); // 3 * deadband
+        assert_eq!(AUDIO_SPEED_TRIM_MAX_DT_US, 1_000_000);
+        assert_eq!(AUDIO_LL_MAX_FILL_MS, 100);
+        assert_eq!(AUDIO_DRAIN_STUCK_US, 20_000_000);
+        assert_eq!(AUDIO_DRAIN_STUCK_PROGRESS_MS, 100);
+        assert_eq!(AUDIO_SOFT_COMPENSATION_MAX_SAMPLES, 8);
+        assert_eq!(AUDIO_DEFAULT_FRAME_SAMPLES, 960);
+        assert_eq!(AUDIO_PUMP_BURST, 16);
+        assert_eq!(AUDIO_PUMP_SLEEP_MS, 1);
         assert_eq!(AUDIO_PUMP_MAX_SLEEP_MS, 20);
-        assert_eq!(AUDIO_MAX_CHANNELS, 8); // receiver-audio.c
+        assert_eq!(AUDIO_MAX_CHANNELS, 8);
 
         // ── decode ──
-        assert_eq!(DECODER_FLUSH_COOLDOWN_US, 350_000); // receiver-decode.c
-        assert_eq!(DECODER_WARNING_INTERVAL_US, 1_000_000); // receiver-decode.c
-        assert_eq!(DECODER_ERROR_BURST, 3); // receiver-decode.c
-        assert_eq!(VIDEO_DECODER_THREADS, 4); // receiver-stream.c
-        assert_eq!(VIDEO_EXTRA_HW_FRAMES, 6); // receiver-stream.c
-        // No C ancestor: the C decoded eagerly on the receiver thread and held
-        // the whole lead as decoded frames.
+        assert_eq!(DECODER_FLUSH_COOLDOWN_US, 350_000);
+        assert_eq!(DECODER_WARNING_INTERVAL_US, 1_000_000);
+        assert_eq!(DECODER_ERROR_BURST, 3);
+        assert_eq!(VIDEO_DECODER_THREADS, 4);
+        assert_eq!(VIDEO_EXTRA_HW_FRAMES, 6);
         assert_eq!(VIDEO_DECODE_LEAD_MS, 250);
         assert_eq!(VIDEO_PACKET_QUEUE_MAX_MS, 12_000);
         assert_eq!(VIDEO_PACKET_QUEUE_MAX_BYTES, 67_108_864);
 
         // ── video timing / pacing ──
-        assert_eq!(OBS_ASYNC_FRAME_BUDGET, 24); // IRL_OBS_ASYNC_FRAME_BUDGET
-        assert_eq!(VIDEO_LEAD_WARN_INTERVAL_NS, 10_000_000_000); // IRL_VIDEO_LEAD_WARN_INTERVAL_NS
-        assert_eq!(VIDEO_INTERVAL_MIN_NS, 4_000_000); // IRL_VIDEO_INTERVAL_MIN_NS
-        assert_eq!(VIDEO_INTERVAL_MAX_NS, 100_000_000); // IRL_VIDEO_INTERVAL_MAX_NS
-        assert_eq!(VIDEO_INTERVAL_DEFAULT_NS, 33_333_333); // IRL_VIDEO_INTERVAL_DEFAULT_NS
-        assert_eq!(VIDEO_PACING_MAX_FRAMES, 1024); // IRL_VIDEO_PACING_MAX_FRAMES
-        assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824); // IRL_VIDEO_PACING_MAX_BYTES
-        assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000); // IRL_VIDEO_PACING_SLACK_NS
-        assert_eq!(VIDEO_PACING_LEAD_TICKS, 2); // IRL_VIDEO_PACING_LEAD_TICKS
+        assert_eq!(OBS_ASYNC_FRAME_BUDGET, 24);
+        assert_eq!(VIDEO_LEAD_WARN_INTERVAL_NS, 10_000_000_000);
+        assert_eq!(VIDEO_INTERVAL_MIN_NS, 4_000_000);
+        assert_eq!(VIDEO_INTERVAL_MAX_NS, 100_000_000);
+        assert_eq!(VIDEO_INTERVAL_DEFAULT_NS, 33_333_333);
+        assert_eq!(VIDEO_PACING_MAX_FRAMES, 1024);
+        assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824);
+        assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000);
+        assert_eq!(VIDEO_PACING_LEAD_TICKS, 2);
         assert_eq!(VIDEO_ANCHOR_WAIT_MARGIN_MS, 1000);
         assert_eq!(VIDEO_DELAY_MAX_MS, 5000);
         assert_eq!(VIDEO_DELAY_WINDOW_MS, 1000);
@@ -522,8 +493,6 @@ mod tests {
         assert_eq!(VIDEO_LIVE_MAX_WAIT_MS, 2000);
         assert_eq!(VIDEO_DELAY_RELAX_WINDOW_MS, 10_000);
         assert_eq!(VIDEO_DELAY_RELAX_MIN_MS, 50);
-        // No C ancestor: the C played audio the moment its buffer held the
-        // target, whatever its video was doing.
         assert_eq!(AUDIO_HOLD_MARGIN_MS, 100);
         assert_eq!(AUDIO_HOLD_MAX_MS, 5000);
         assert_eq!(AUDIO_HOLD_RAISE_WINDOW_MS, 2000);
@@ -531,22 +500,20 @@ mod tests {
         assert_eq!(AUDIO_HOLD_RELAX_WINDOW_MS, 10_000);
         assert_eq!(AUDIO_HOLD_RELAX_MIN_MS, 50);
         assert_eq!(AUDIO_HOLD_PRIME_WAIT_MS, 2000);
-        assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000); // IRL_VIDEO_PACING_MAX_LEAD_NS
-        assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667); // IRL_VIDEO_CANVAS_TICK_DEFAULT_NS
-        assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50); // IRL_VIDEO_PACING_MAX_WAIT_MS
-        assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000); // IRL_VIDEO_OFFSET_HOLD_NS
-        assert_eq!(VIDEO_TS_CLAMP_NS, 500_000_000); // video-handler.c
-        assert_eq!(VIDEO_TS_CAP_NS, 200_000_000); // video-handler.c
-        assert_eq!(XFER_PLANE_ALIGN, 64); // video-handler.c
-        assert_eq!(XFER_DIM_ALIGN, 16); // video-handler.c (FFALIGN(w, 16))
+        assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000);
+        assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667);
+        assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50);
+        assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000);
+        assert_eq!(VIDEO_TS_CLAMP_NS, 500_000_000);
+        assert_eq!(VIDEO_TS_CAP_NS, 200_000_000);
 
         // ── stream / network ──
-        assert_eq!(IO_STALL_TIMEOUT_US, 10_000_000); // IRL_IO_STALL_TIMEOUT_US
-        assert_eq!(PROBE_FAST, 1_000_000); // receiver-stream.c
-        assert_eq!(PROBE_FULL, 5_000_000); // receiver-stream.c
-        assert_eq!(SRT_LATENCY_US, 200_000); // receiver-stream.c
-        assert_eq!(RTMP_BUFFER_MS, 1000); // receiver-stream.c
-        assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // receiver-stream.c (7 * 4096)
-        assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000); // receiver-stream.c
+        assert_eq!(IO_STALL_TIMEOUT_US, 10_000_000);
+        assert_eq!(PROBE_FAST, 1_000_000);
+        assert_eq!(PROBE_FULL, 5_000_000);
+        assert_eq!(SRT_LATENCY_US, 200_000);
+        assert_eq!(RTMP_BUFFER_MS, 1000);
+        assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // 7 * 4096
+        assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000);
     }
 }

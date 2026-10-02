@@ -3,8 +3,7 @@
 //! output-clock arithmetic, video pacing, the demuxer option table, config
 //! derivation and the stats field table.
 //!
-//! Everything here is plain data in, plain data out, so it is unit-tested
-//! against the thresholds the C plugin was tuned with. Time values are passed
+//! Everything here is plain data in, plain data out. Time values are passed
 //! in as parameters (nanoseconds for the OBS domain, microseconds for the
 //! FFmpeg domain) rather than read from a clock, so tests are deterministic
 //! and the two domains cannot be mixed by accident.
@@ -29,10 +28,10 @@ pub mod video_delay;
 pub mod video_time;
 
 pub use audio_buffer::{AudioBuffer, BufferState};
-pub use audio_hold::{AudioHold, HoldChange, HoldTuning};
+pub use audio_hold::{AudioHold, HoldChange};
 pub use config::{HwDecode, Watermarks};
 pub use dsp::LastSample;
-pub use pacing::{DueVerdict, PacedFrame, PacingQueue};
+pub use pacing::{DueVerdict, PacingQueue};
 pub use pts_repair::{PtsAction, PtsRepair, Verdict};
 pub use speed::{
     DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,

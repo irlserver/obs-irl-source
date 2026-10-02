@@ -9,9 +9,7 @@ use crate::{AVPixelFormat, AVSampleFormat, Error, Result};
 pub struct Colorimetry {
     pub colorspace: ffmpeg_sys_next::AVColorSpace,
     pub color_range: ffmpeg_sys_next::AVColorRange,
-    pub color_primaries: ffmpeg_sys_next::AVColorPrimaries,
     pub color_trc: ffmpeg_sys_next::AVColorTransferCharacteristic,
-    pub chroma_location: ffmpeg_sys_next::AVChromaLocation,
 }
 
 /// An owned `AVFrame*`. Refcounted buffers make it safe to move between
@@ -158,8 +156,8 @@ impl Frame {
     }
 
     /// Borrow plane `index`. `None` when the plane pointer is null **or the
-    /// linesize is not positive** — the negative-stride case the C plugin
-    /// routes to swscale — so the caller's format check lands in one place.
+    /// linesize is not positive** (a negative stride needs swscale), so the
+    /// caller's format check lands in one place.
     /// Length is `linesize * plane_height(index)`, with the chroma height
     /// derived from `av_pix_fmt_desc_get(format)->log2_chroma_h`.
     pub fn plane(&self, index: usize) -> Option<&[u8]> {
@@ -268,9 +266,7 @@ impl Frame {
             Colorimetry {
                 colorspace: (*self.0).colorspace,
                 color_range: (*self.0).color_range,
-                color_primaries: (*self.0).color_primaries,
                 color_trc: (*self.0).color_trc,
-                chroma_location: (*self.0).chroma_location,
             }
         }
     }
@@ -348,8 +344,7 @@ impl Frame {
         unsafe { (*self.0).pts = pts };
     }
 
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *const ffmpeg_sys_next::AVFrame {
+    pub(crate) fn as_ptr(&self) -> *const ffmpeg_sys_next::AVFrame {
         self.0
     }
 

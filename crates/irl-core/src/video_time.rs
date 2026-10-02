@@ -1,10 +1,5 @@
-//! Video timestamp mapping (port of `video-handler.c:285-411`).
-//!
-//! The arithmetic of `irl_video_due_time` and `video_record_lead`, extracted
-//! from the locking and logging around it: what those C functions do beyond
-//! this is snapshot audio-thread state under `audio_state_lock`, publish the
-//! lead stats and throttle a warning line, all of which belongs to the plugin
-//! crate.
+//! Video timestamp mapping: the arithmetic behind video due times and the
+//! lead libobs can absorb. Locking and logging stay in the plugin crate.
 
 use crate::consts;
 
@@ -13,18 +8,16 @@ use crate::consts;
 /// `pts` lands at `obs_end + (pts − buffered_end)`. Negative results clamp to
 /// zero.
 ///
-/// Ports the mapped branch of `irl_video_due_time` (`video-handler.c:360-369`)
-/// and the offset form used by `irl_video_playout_offset`. The caller decides
-/// whether a mapping exists at all: the C test is `obs_end_ts_ns != 0 &&
-/// buffered_end_pts_ns > 0`, and it holds the last known offset for
+/// The caller decides whether a mapping exists at all (`obs_end_ts_ns != 0
+/// && buffered_end_pts_ns > 0`), and holds the last known offset for
 /// `VIDEO_OFFSET_HOLD_NS` after that stops being true.
 pub fn map_through_playout(pts_ns: i64, obs_end_ts_ns: u64, buffered_end_pts_ns: i64) -> u64 {
     let mapped = pts_ns + (obs_end_ts_ns as i64 - buffered_end_pts_ns);
     if mapped < 0 { 0 } else { mapped as u64 }
 }
 
-/// The stream-PTS → OBS-clock offset the mapping implies
-/// (`irl_video_playout_offset`), for re-deriving queued frames' due times.
+/// The stream-PTS → OBS-clock offset the mapping implies, for re-deriving
+/// queued frames' due times.
 pub fn playout_offset_ns(obs_end_ts_ns: u64, buffered_end_pts_ns: i64) -> i64 {
     obs_end_ts_ns as i64 - buffered_end_pts_ns
 }
@@ -32,9 +25,8 @@ pub fn playout_offset_ns(obs_end_ts_ns: u64, buffered_end_pts_ns: i64) -> i64 {
 /// Video-only fallback anchored at the first frame: drift below −500 ms shows
 /// now, drift above +500 ms caps at now + 200 ms.
 ///
-/// Ports `video-handler.c:371-388`. The anchor deliberately stays put — a
-/// re-anchor would be a visible timeline jump, while clamping lets ordinary
-/// frames self-correct after a burst.
+/// The anchor deliberately stays put: a re-anchor would be a visible timeline
+/// jump, while clamping lets ordinary frames self-correct after a burst.
 pub fn fallback_anchor(pts_ns: i64, pts_base_ns: i64, sys_base_ns: u64, now_ns: u64) -> u64 {
     let computed = sys_base_ns.wrapping_add((pts_ns - pts_base_ns) as u64);
     let drift = computed as i64 - now_ns as i64;
@@ -51,11 +43,10 @@ pub fn fallback_anchor(pts_ns: i64, pts_base_ns: i64, sys_base_ns: u64, now_ns: 
 /// Lead libobs can absorb: `OBS_ASYNC_FRAME_BUDGET × frame_interval`, floored
 /// at the audio re-anchor margin.
 ///
-/// Ports the budget half of `video_record_lead` (`video-handler.c:293-297`).
-/// The caller adds `buffer_target_ms × 1e6` — the jitter buffer's own
-/// contribution to the lead — to get the C's `queue_safe_ns`. The budget is
-/// expressed in frames because that is what libobs counts: the same 400 ms is
-/// 12 frames at 30 fps and 48 at 120 fps.
+/// The caller adds the jitter buffer's own contribution to the lead
+/// (`buffer_target_ms × 1e6`). The budget is expressed in frames because that
+/// is what libobs counts: the same 400 ms is 12 frames at 30 fps and 48 at
+/// 120 fps.
 pub fn queue_safe_ns(frame_interval_ns: i64) -> i64 {
     let interval = if frame_interval_ns <= 0 {
         consts::VIDEO_INTERVAL_DEFAULT_NS
@@ -73,11 +64,9 @@ pub fn queue_safe_ns(frame_interval_ns: i64) -> i64 {
 
 /// EMA (1/8 step) of PTS deltas, ignoring deltas outside the 4–100 ms window.
 ///
-/// Ports the interval estimator in `irl_handle_video_frame`
-/// (`receiver-video.c:420-437`). Measured rather than taken from
-/// `avg_frame_rate`, which live SRT/RTMP demuxers routinely leave unset or
-/// wrong; out-of-range deltas (PTS repair, discontinuities, reordering) are
-/// skipped rather than smoothed in.
+/// Measured rather than taken from `avg_frame_rate`, which live SRT/RTMP
+/// demuxers routinely leave unset or wrong; out-of-range deltas (PTS repair,
+/// discontinuities, reordering) are skipped rather than smoothed in.
 pub fn interval_ema(prev_ns: i64, delta_ns: i64) -> i64 {
     let usable = consts::VIDEO_INTERVAL_MIN_NS..=consts::VIDEO_INTERVAL_MAX_NS;
     if !usable.contains(&delta_ns) {

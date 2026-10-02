@@ -7,7 +7,7 @@
 
 use core::ffi::CStr;
 
-use obs::{Data, IconType, MediaState, Properties, Source, SourceHandle, SourceType};
+use obs::{Data, MediaState, Properties, Source, SourceHandle};
 
 fn load() -> bool {
     // Never called here; `register_source` is exercised for its types only.
@@ -34,11 +34,9 @@ struct Dummy;
 
 impl Source for Dummy {
     const ID: &'static CStr = c"dummy_source";
-    const TYPE: SourceType = SourceType::Input;
     const OUTPUT_FLAGS: u32 = obs::sys::OBS_SOURCE_AUDIO
         | obs::sys::OBS_SOURCE_ASYNC_VIDEO
         | obs::sys::OBS_SOURCE_DO_NOT_DUPLICATE;
-    const ICON_TYPE: IconType = IconType::Media;
 
     fn type_name() -> &'static CStr {
         c"Dummy Source"

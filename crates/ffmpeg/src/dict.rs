@@ -24,23 +24,13 @@ impl Dictionary {
 
     /// Consume the dictionary for `avformat_open_input` (which takes it by
     /// `&mut` and leaves the unconsumed entries behind).
-    #[doc(hidden)]
-    pub fn as_mut_ptr(&mut self) -> *mut *mut ffmpeg_sys_next::AVDictionary {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut *mut ffmpeg_sys_next::AVDictionary {
         &mut self.0
     }
 
-    /// Number of entries left in the dictionary.
-    pub fn len(&self) -> usize {
-        self.iter_keys().count()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_null()
-    }
-
     /// Keys left after `avformat_open_input`, i.e. options the demuxer did not
-    /// recognise (logged by the C plugin).
-    pub fn remaining_keys(&self) -> Vec<String> {
+    /// recognise.
+    pub(crate) fn remaining_keys(&self) -> Vec<String> {
         self.iter_keys().collect()
     }
 
@@ -85,7 +75,6 @@ mod tests {
     #[test]
     fn set_then_read_back_keys() {
         let mut dict = Dictionary::new();
-        assert!(dict.is_empty());
         assert!(dict.remaining_keys().is_empty());
 
         dict.set(c"probesize", c"1000000").unwrap();
@@ -95,7 +84,5 @@ mod tests {
         let mut keys = dict.remaining_keys();
         keys.sort();
         assert_eq!(keys, vec!["fflags".to_string(), "probesize".to_string()]);
-        assert_eq!(dict.len(), 2);
-        assert!(!dict.is_empty());
     }
 }

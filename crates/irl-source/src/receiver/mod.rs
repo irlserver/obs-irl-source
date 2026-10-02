@@ -1,10 +1,10 @@
-//! Receiver thread (port of `src/receiver.c`; the thread body is W2-A's).
+//! Receiver thread.
 //!
-//! The receiver thread owns demux/decode. Decoded audio goes to
-//! [`audio_in::AudioIntake`], decoded video to
-//! [`crate::video::intake::VideoIntake`]; both are plain structs the receiver
-//! holds and calls. State that more than one of decode / audio intake / video
-//! intake touches lives in [`ReceiverFlags`] and is passed as `&mut`.
+//! The receiver thread owns demux and the audio decoder. Decoded audio goes
+//! to [`audio_in::AudioIntake`], a plain struct the receiver holds and calls;
+//! video packets go onto the video channel undecoded. State that both the
+//! packet path and the audio intake touch lives in [`ReceiverFlags`] and is
+//! passed as `&mut`.
 
 pub mod audio_in;
 pub mod decode;
@@ -20,18 +20,15 @@ use crate::receiver::audio_in::AudioIntake;
 use crate::shared::Shared;
 
 /// Receiver-thread state shared between the packet path (`decode.rs`) and
-/// the two frame intakes. Every field is receiver-thread-only; the C kept
-/// them on `struct irl_source` and reset them in `irl_prepare_new_connection`
-/// / `irl_reset_stream_timing_state`.
+/// the audio intake. Every field is receiver-thread-only.
 #[derive(Debug, Default)]
 pub struct ReceiverFlags {
-    /// Which streams the current connection carries (`audio_stream_idx >= 0`
-    /// / `video_stream_idx >= 0` in C); set at open, cleared at close.
+    /// Which streams the current connection carries; set at open, cleared at
+    /// close.
     pub has_audio_stream: bool,
     pub has_video_stream: bool,
     /// Consecutive audio decode errors (the audio decoder flushes after a
-    /// burst). Video decode is not on this thread; its state lives in
-    /// [`crate::video::DecodeState`].
+    /// burst).
     pub audio_decode_errors: i32,
     /// Throttles (FFmpeg µs domain).
     pub audio_last_decoder_flush_time_us: u64,
@@ -39,8 +36,7 @@ pub struct ReceiverFlags {
 }
 
 impl ReceiverFlags {
-    /// `irl_prepare_new_connection` + `irl_reset_stream_timing_state` for the
-    /// receiver-only fields: everything back to the fresh-connection state.
+    /// Put every field back to the fresh-connection state.
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -59,9 +55,9 @@ pub struct Receiver {
     shared: Arc<Shared>,
     fmt: Option<ffmpeg::FormatContext>,
     audio_dec: Option<ffmpeg::CodecContext>,
-    /// Created with the connection and released with it: keeping a device
-    /// across reconnects made the probe loop silently skip and attach a stale
-    /// device, so reconnects behaved differently from fresh connects.
+    /// Created with the connection and released with it: a device kept across
+    /// reconnects makes the probe loop skip and attach a stale device, so a
+    /// reconnect would behave differently from a fresh connect.
     hw_device: Option<ffmpeg::HwDeviceContext>,
     audio_stream_idx: i32,
     video_stream_idx: i32,
@@ -83,12 +79,12 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Allocate the packet and frame the read loop reuses. `None` mirrors the
-    /// C's "failed to allocate packet/frame" bail-out.
+    /// Allocate the packet and frame the read loop reuses. `None` when either
+    /// allocation fails.
     fn new(shared: Arc<Shared>) -> Option<Self> {
         let pkt = ffmpeg::Packet::new().ok()?;
         let frame = ffmpeg::Frame::new().ok()?;
-        let audio_in = AudioIntake::new(&shared.cfg);
+        let audio_in = AudioIntake::default();
         Some(Self {
             shared,
             fmt: None,
@@ -124,9 +120,9 @@ impl Receiver {
     /// should retry rather than treat it as a read error.
     ///
     /// EAGAIN is a non-blocking demuxer saying "nothing yet", not a failure.
-    /// Treating it as one tore down a healthy connection — closing the input,
-    /// resetting PTS repair, fading the buffered audio out and clearing the
-    /// source — for a normal empty poll.
+    /// Treating it as one would tear down a healthy connection (close the
+    /// input, reset PTS repair, fade out the buffered audio, clear the
+    /// source) for a normal empty poll.
     ///
     /// Bounded, because a retry re-arms the interrupt watch on every pass and
     /// the watch only measures one `av_read_frame` call: unbounded, a demuxer
@@ -169,8 +165,7 @@ impl Receiver {
             let read = {
                 let Self { fmt, pkt, .. } = self;
                 let Some(fmt) = fmt.as_mut() else { continue };
-                // `read_frame` arms the interrupt watch, which is the C's
-                // `ctx->io_start_us = av_gettime()` before `av_read_frame`.
+                // `read_frame` arms the interrupt watch.
                 fmt.read_frame(pkt)
             };
             match &read {
@@ -200,8 +195,8 @@ impl Receiver {
         }
 
         self.close_ffmpeg();
-        // Queued frames pin decoder surfaces; the run is over, so free them
-        // rather than leave them behind on the shared state.
+        // The run is over: free the queued packets rather than leave them
+        // behind on the shared state.
         self.shared.video.drain();
     }
 

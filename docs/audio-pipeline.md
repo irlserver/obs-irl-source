@@ -101,7 +101,7 @@ The PTS repair system classifies gaps into three tiers:
 
 The thresholds are fixed constants (`IRL_SMALL_GAP_MS` 70ms, `IRL_LARGE_GAP_MS` 2000ms). They were once exposed as Small Gap and Large Gap settings, but nobody could reason about them without reading the source. Each threshold marks a real boundary: below 70ms is decoder timestamp wobble, above 2s the stream has changed underneath the plugin.
 
-`pts_repairs` tracks non-normal PTS discontinuities. For tuning, use the split diagnostics: `pts_normalizations`, `pts_interpolations`, `silence_insertions`, `pts_resets`, `pts_last_gap_ms`, and `pts_max_gap_ms`. A high normalization count with low silence usually means frame-sized timestamp cadence smoothing, not packet-loss concealment.
+`pts_max_gap_ms` (`max_gap=` in the stats line) is the largest gap repaired on the current connection, which says which tier the worst discontinuity fell into.
 
 ### 4. Fade in/out (eliminates clicks on disconnect)
 

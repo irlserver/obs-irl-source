@@ -5,122 +5,54 @@
 //! and reads a test-owned clock instead of `os_gettime_ns`. The `SourceHandle`
 //! in `Shared` is never dereferenced by these paths.
 
-use std::ffi::CString;
-use std::ptr::NonNull;
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use parking_lot::Mutex;
-
-use irl_core::{AudioBuffer, HwDecode, Watermarks, consts};
-use obs_irl_source::audio::{AudioPump, AudioSink};
+use irl_core::{AudioBuffer, consts};
+use obs_irl_source::audio::AudioPump;
 use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
-use obs_irl_source::shared::{HotValues, LifetimeStats, Shared, StreamConfig};
+use obs_irl_source::shared::Shared;
 
-const RATE: i32 = 48_000;
-const CHANNELS: i32 = 2;
-/// One Opus frame at 48 kHz: 20 ms.
-const CHUNK_FRAMES: usize = 960;
-const CHUNK_NS: u64 = 20_000_000;
+use common::{CHANNELS, CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
 
 // ── Harness ───────────────────────────────────────────────────
 
-struct Recorded {
-    timestamp: u64,
-    frames: u32,
-    rate: u32,
-    samples: Vec<f32>,
-}
-
-/// Sink that keeps every submission instead of handing it to libobs.
-#[derive(Clone)]
-struct Recorder {
-    channels: usize,
-    emitted: Arc<Mutex<Vec<Recorded>>>,
-}
-
-impl Recorder {
-    fn new(channels: usize) -> Self {
-        Self {
-            channels,
-            emitted: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.emitted.lock().len()
-    }
-}
-
-impl AudioSink for Recorder {
-    fn output_audio(&self, audio: &obs::AudioFrame<'_>) {
-        let sys = audio.as_sys();
-        let bytes = sys.frames as usize * self.channels * 4;
-        // SAFETY: the frame borrows a live interleaved-float buffer of
-        // `frames * channels` samples, which is what the pump built.
-        let raw = unsafe { std::slice::from_raw_parts(sys.data[0], bytes) };
-        self.emitted.lock().push(Recorded {
-            timestamp: sys.timestamp,
-            frames: sys.frames,
-            rate: sys.samples_per_sec,
-            samples: raw
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-        });
-    }
-}
-
-fn stream_config(low_latency: bool) -> StreamConfig {
-    StreamConfig {
-        url: CString::new("srt://127.0.0.1:9000").unwrap(),
-        ffmpeg_options: None,
-        hw_decode: HwDecode::Auto,
-        low_latency_audio: low_latency,
-        small_gap_ms: consts::SMALL_GAP_MS,
-        large_gap_ms: consts::LARGE_GAP_MS,
-    }
-}
-
 fn make_shared(low_latency: bool, adaptive: bool) -> Arc<Shared> {
-    // SAFETY: no code under test dereferences the handle — audio leaves
-    // through the recording sink, and nothing here calls into libobs.
-    let source = unsafe { obs::SourceHandle::from_raw(NonNull::dangling()) };
-    let hot = HotValues {
-        reconnect_delay_s: 2,
-        adaptive_speed: adaptive,
-        catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
-        wait_for_keyframe: true,
-        clear_on_disconnect: true,
-        watermarks: Watermarks {
-            target_ms: 120,
-            min_ms: 60,
-            max_ms: 320,
-        },
-    };
-    Shared::new(
-        source,
-        stream_config(low_latency),
-        hot,
-        Arc::new(LifetimeStats::default()),
-    )
+    let mut hot = common::hot_values(120);
+    hot.adaptive_speed = adaptive;
+    common::shared(common::stream_config(low_latency), hot)
 }
 
 /// A configured jitter buffer and a pump wired to `clock` and `recorder`.
 fn make_pump(shared: &Arc<Shared>, clock: &Arc<AtomicU64>, recorder: &Recorder) -> AudioPump {
-    *shared.audio_buf() = AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320);
-    shared.audio_state().decoded_frame_samples = CHUNK_FRAMES as i32;
+    *shared.audio_buf() = Some(AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320));
+    shared.audio_state().decoded_frame_samples = CHUNK_FRAMES;
 
     let clock = Arc::clone(clock);
     AudioPump::with_sink(Arc::clone(shared), Box::new(recorder.clone()))
         .with_clock(Box::new(move || clock.load(Relaxed)))
 }
 
+/// A pump over a fresh `Shared`, the sink it emits into and the virtual clock
+/// it reads, starting at 1 s.
+fn harness(
+    low_latency: bool,
+    adaptive: bool,
+) -> (Arc<Shared>, Arc<AtomicU64>, Recorder, AudioPump) {
+    let shared = make_shared(low_latency, adaptive);
+    let clock = Arc::new(AtomicU64::new(1_000_000_000));
+    let recorder = Recorder::with_samples();
+    let pump = make_pump(&shared, &clock, &recorder);
+    (shared, clock, recorder, pump)
+}
+
 /// Append one 20 ms chunk of constant-valued PCM at `pts_ns`.
 fn write_chunk(shared: &Shared, pts_ns: i64, value: f32) {
-    let mut bytes = Vec::with_capacity(CHUNK_FRAMES * CHANNELS as usize * 4);
-    for _ in 0..CHUNK_FRAMES * CHANNELS as usize {
+    let mut bytes = Vec::with_capacity((CHUNK_FRAMES * CHANNELS) as usize * 4);
+    for _ in 0..CHUNK_FRAMES * CHANNELS {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
     shared
@@ -128,6 +60,15 @@ fn write_chunk(shared: &Shared, pts_ns: i64, value: f32) {
         .as_mut()
         .unwrap()
         .write_pts(&bytes, pts_ns);
+}
+
+/// Append `count` consecutive chunks of `value`, starting at `*pts_ns` and
+/// advancing it past the last one.
+fn write_chunks(shared: &Shared, pts_ns: &mut i64, count: usize, value: f32) {
+    for _ in 0..count {
+        write_chunk(shared, *pts_ns, value);
+        *pts_ns += CHUNK_NS as i64;
+    }
 }
 
 fn fill_ms(shared: &Shared) -> i32 {
@@ -163,15 +104,15 @@ fn planar_aac_samples_follow_the_video_playout_mapping() {
     for rate in [44_100, 48_000] {
         let shared = make_shared(false, true);
         let clock = Arc::new(AtomicU64::new(10_000_000_000));
-        let recorder = Recorder::new(CHANNELS as usize);
+        let recorder = Recorder::with_samples();
         let ns = Arc::clone(&clock);
         let us = Arc::clone(&clock);
         let mut pump = AudioPump::with_sink(shared.clone(), Box::new(recorder.clone()))
             .with_clock(Box::new(move || ns.load(Relaxed)))
             .with_us_clock(Box::new(move || us.load(Relaxed) / 1000));
         let tb = ffmpeg::Rational::new(1, 90_000);
-        let mut intake = AudioIntake::new(&shared.cfg);
-        intake.init_pts_repair(&shared.cfg, tb);
+        let mut intake = AudioIntake::default();
+        intake.init_pts_repair(tb);
         let mut flags = ReceiverFlags::default();
         let mut worst_ns = 0i64;
         let mut checked = 0;
@@ -250,10 +191,7 @@ fn aac_frame(rate: i32, first_sample: i64, tb: ffmpeg::Rational) -> ffmpeg::Fram
 
 #[test]
 fn a_pump_burst_stops_when_disconnect_pauses_playback() {
-    let shared = make_shared(false, false);
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, recorder, mut pump) = harness(false, false);
     for i in 0..15 {
         write_chunk(&shared, i * CHUNK_NS as i64, 0.25);
     }
@@ -274,9 +212,9 @@ fn disconnect_fade_does_not_submit_stale_audio() {
     for rate in [44_100, 48_000] {
         for teardown_ns in [0, 1_000_000_000] {
             let shared = make_shared(false, true);
-            let recorder = Recorder::new(CHANNELS as usize);
+            let recorder = Recorder::with_samples();
             let now = 10_000_000_000;
-            *shared.audio_buf() = AudioBuffer::new(rate, CHANNELS, 4, 120, 60, 320);
+            *shared.audio_buf() = Some(AudioBuffer::new(rate, CHANNELS, 4, 120, 60, 320));
             let data = vec![0u8; rate as usize / 10 * CHANNELS as usize * 4];
             shared
                 .audio_buf()
@@ -316,18 +254,12 @@ fn disconnect_fade_does_not_submit_stale_audio() {
 /// frames/rate` — here over 10 000 consecutive chunks of a healthy stream.
 #[test]
 fn output_timestamps_are_contiguous_over_ten_thousand_chunks() {
-    let shared = make_shared(false, false);
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, recorder, mut pump) = harness(false, false);
 
     let mut pts_ns = 0i64;
     // Prime: target (120 ms) + lead (80 ms) must be queued before playback
     // starts, so hand it 300 ms.
-    for _ in 0..15 {
-        write_chunk(&shared, pts_ns, 0.25);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 15, 0.25);
 
     let mut guard = 0;
     while recorder.len() < 10_000 {
@@ -373,16 +305,10 @@ fn output_timestamps_are_contiguous_over_ten_thousand_chunks() {
 /// real sample instead of clicking.
 #[test]
 fn underrun_conceals_with_shaped_silence() {
-    let shared = make_shared(false, false);
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, recorder, mut pump) = harness(false, false);
 
     let mut pts_ns = 0i64;
-    for _ in 0..15 {
-        write_chunk(&shared, pts_ns, 0.5);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 15, 0.5);
 
     // Feed nothing more: the buffer drains and the pump has to conceal. The
     // run stops short of the re-anchor margin (400 ms of concealment), so the
@@ -436,16 +362,10 @@ fn underrun_conceals_with_shaped_silence() {
 /// arrived, with the sample rate submitted to OBS unchanged.
 #[test]
 fn speed_compensation_emits_fewer_frames_than_it_reads() {
-    let shared = make_shared(false, true);
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, recorder, mut pump) = harness(false, true);
 
     let mut pts_ns = 0i64;
-    for _ in 0..12 {
-        write_chunk(&shared, pts_ns, 0.1);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 12, 0.1);
 
     // Hold the buffer well above buffer_max (320 ms) so the controller runs
     // at full drain authority.
@@ -472,7 +392,7 @@ fn speed_compensation_emits_fewer_frames_than_it_reads() {
         "the submitted rate must never change"
     );
     assert!(
-        (last.frames as usize) < CHUNK_FRAMES,
+        (last.frames as i32) < CHUNK_FRAMES,
         "at +5% a {CHUNK_FRAMES}-frame chunk must come out shorter, got {}",
         last.frames
     );
@@ -484,21 +404,14 @@ fn speed_compensation_emits_fewer_frames_than_it_reads() {
 /// backlog drains at whatever the slider says, not at a compiled-in +5 %.
 #[test]
 fn the_catchup_setting_bounds_the_drain_end_to_end() {
-    let shared = make_shared(false, true);
+    let (shared, clock, recorder, mut pump) = harness(false, true);
     shared
         .hot
         .catchup_percent
         .store(consts::CATCHUP_PERCENT_MIN, Relaxed);
 
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
-
     let mut pts_ns = 0i64;
-    for _ in 0..12 {
-        write_chunk(&shared, pts_ns, 0.1);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 12, 0.1);
 
     // Same runaway backlog as the test above, so the only difference is the
     // setting.
@@ -522,7 +435,7 @@ fn the_catchup_setting_bounds_the_drain_end_to_end() {
     let emitted = recorder.emitted.lock();
     let last = emitted.last().unwrap();
     assert!(
-        (last.frames as usize) < CHUNK_FRAMES && last.frames > 930,
+        (last.frames as i32) < CHUNK_FRAMES && last.frames > 930,
         "at +2% a {CHUNK_FRAMES}-frame chunk should come out around 941, got {}",
         last.frames
     );
@@ -533,10 +446,7 @@ fn the_catchup_setting_bounds_the_drain_end_to_end() {
 /// nothing is to be done for.
 #[test]
 fn an_idle_pump_reports_when_it_next_has_work() {
-    let shared = make_shared(false, true);
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, _, mut pump) = harness(false, true);
 
     // Nothing buffered yet: the wake condition is a write from another
     // thread, which no deadline here can predict.
@@ -544,14 +454,11 @@ fn an_idle_pump_reports_when_it_next_has_work() {
     assert_eq!(pump.idle_sleep_ms(), consts::AUDIO_PUMP_SLEEP_MS);
 
     let mut pts_ns = 0i64;
-    for _ in 0..20 {
-        write_chunk(&shared, pts_ns, 0.1);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 20, 0.1);
     while pump.pump_once() {}
 
     // Primed and queued ahead: it now knows when the lead runs down, and that
-    // is further away than the 1ms poll it used to spend.
+    // is further away than a 1ms poll.
     assert!(shared.audio_state().primed);
     let hint = pump.idle_sleep_ms();
     assert!(
@@ -572,23 +479,17 @@ fn an_idle_pump_reports_when_it_next_has_work() {
 }
 
 /// Low-latency mode emits no concealment, so an empty input cannot advance the
-/// sample counter. The output clock then sits still while wall clock moves, and
-/// the stall check used to read that as a stalled audio thread — restarting,
-/// re-anchoring, waiting one lead and tripping again, roughly every 150ms for
-/// as long as the source stayed quiet.
+/// sample counter. The output clock then sits still while wall clock moves,
+/// and the stall check must not read that as a stalled audio thread: it would
+/// restart, re-anchor, wait one lead and trip again, roughly every 150ms for
+/// as long as the source stays quiet.
 #[test]
 fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
-    let shared = make_shared(true, true); // low latency
-    let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
-    let mut pump = make_pump(&shared, &clock, &recorder);
+    let (shared, clock, _, mut pump) = harness(true, true); // low latency
 
     // Prime on real audio.
     let mut pts_ns = 0i64;
-    for _ in 0..6 {
-        write_chunk(&shared, pts_ns, 0.1);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 6, 0.1);
     while pump.pump_once() {}
     assert!(shared.audio_state().primed, "never primed");
 
@@ -609,10 +510,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     );
 
     // Real audio returns: the normal prime path establishes one new clock.
-    for _ in 0..6 {
-        write_chunk(&shared, pts_ns, 0.2);
-        pts_ns += CHUNK_NS as i64;
-    }
+    write_chunks(&shared, &mut pts_ns, 6, 0.2);
     while pump.pump_once() {}
     assert!(
         shared.audio_state().primed,
@@ -622,13 +520,11 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
 }
 
 /// AAC decodes 1024 frames at a time, which does not divide a 120ms target
-/// (5760 frames). Reads and writes are both whole chunks, so before the read
-/// alignment the residual could only be a multiple of 1024 and the loop had to
-/// straddle the target at 106ms or 128ms — up to a whole chunk of cushion the
-/// user configured and never got.
-///
-/// The existing tests all use 960-frame chunks, where 120ms *is* on the grid,
-/// so none of them could see this.
+/// (5760 frames). Reads and writes are both whole chunks, so without the read
+/// alignment the residual can only be a multiple of 1024 and the loop
+/// straddles the target at 106ms or 128ms: up to a whole chunk of cushion the
+/// user configured and never gets. With 960-frame chunks 120ms *is* on the
+/// grid, so only a 1024-frame stream shows this.
 #[test]
 fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
     const AAC_FRAMES: usize = 1024;
@@ -636,9 +532,9 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
 
     let shared = make_shared(false, true);
     let clock = Arc::new(AtomicU64::new(1_000_000_000));
-    let recorder = Recorder::new(CHANNELS as usize);
+    let recorder = Recorder::with_samples();
 
-    *shared.audio_buf() = AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320);
+    *shared.audio_buf() = Some(AudioBuffer::new(RATE, CHANNELS, 4, 120, 60, 320));
     shared.audio_state().decoded_frame_samples = AAC_FRAMES as i32;
     let mut pump = {
         let ns = Arc::clone(&clock);
@@ -699,11 +595,10 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
 #[test]
 fn intake_discards_warmup_then_buffers_decoded_audio() {
     let shared = make_shared(false, true);
-    let cfg = stream_config(false);
     let tb = ffmpeg::Rational::new(1, RATE);
 
-    let mut intake = AudioIntake::new(&cfg);
-    intake.init_pts_repair(&cfg, tb);
+    let mut intake = AudioIntake::default();
+    intake.init_pts_repair(tb);
     let mut flags = ReceiverFlags::default();
 
     let frames = 20;
@@ -721,13 +616,11 @@ fn intake_discards_warmup_then_buffers_decoded_audio() {
     assert_eq!(buffered_ms, (expected_chunks * 20) as i32);
 
     let state = shared.audio_state();
-    assert_eq!(state.decoded_frame_samples, CHUNK_FRAMES as i32);
+    assert_eq!(state.decoded_frame_samples, CHUNK_FRAMES);
     assert_eq!(
         state.latest_audio_stream_pts_ns,
         (frames - 1) * CHUNK_NS as i64
     );
-    assert_eq!(shared.conn.pts_repairs.load(Relaxed), 0);
-    assert_eq!(shared.conn.silence_insertions.load(Relaxed), 0);
 
     let buf = shared.audio_buf();
     let buf = buf.as_ref().unwrap();
@@ -745,7 +638,7 @@ fn audio_frame(pts: i64, value: f32) -> ffmpeg::Frame {
     unsafe {
         let raw = frame.as_mut_ptr();
         (*raw).format = ffmpeg::AVSampleFormat::AV_SAMPLE_FMT_FLT as core::ffi::c_int;
-        (*raw).nb_samples = CHUNK_FRAMES as i32;
+        (*raw).nb_samples = CHUNK_FRAMES;
         (*raw).sample_rate = RATE;
         ffmpeg::sys::av_channel_layout_default(&raw mut (*raw).ch_layout, CHANNELS);
         assert_eq!(ffmpeg::sys::av_frame_get_buffer(raw, 0), 0);
@@ -753,7 +646,7 @@ fn audio_frame(pts: i64, value: f32) -> ffmpeg::Frame {
         (*raw).duration = CHUNK_FRAMES as i64;
 
         let dst = (*raw).data[0];
-        for i in 0..CHUNK_FRAMES * CHANNELS as usize {
+        for i in 0..(CHUNK_FRAMES * CHANNELS) as usize {
             let bytes = value.to_le_bytes();
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(i * 4), 4);
         }

@@ -3,32 +3,15 @@
 //! No libobs runs under `cargo test`, so nothing here calls into it: the
 //! configuration is built directly rather than loaded from an `obs_data_t`.
 
+mod common;
+
 use std::ffi::CString;
 
 use irl_core::{HwDecode, Watermarks, consts};
 use obs_irl_source::config::Config;
-use obs_irl_source::shared::{HotValues, StreamConfig};
 
 fn config() -> Config {
-    Config {
-        stream: StreamConfig {
-            url: CString::new("srt://example.invalid:9000").unwrap(),
-            ffmpeg_options: None,
-            hw_decode: HwDecode::Auto,
-            low_latency_audio: false,
-            small_gap_ms: consts::SMALL_GAP_MS,
-            large_gap_ms: consts::LARGE_GAP_MS,
-        },
-        hot: HotValues {
-            reconnect_delay_s: consts::DEFAULT_RECONNECT_DELAY_S as i32,
-            adaptive_speed: consts::DEFAULT_ADAPTIVE_SPEED,
-            catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
-            wait_for_keyframe: consts::DEFAULT_WAIT_FOR_KEYFRAME,
-            clear_on_disconnect: consts::DEFAULT_CLEAR_ON_DISCONNECT,
-            watermarks: Watermarks::derive(consts::DEFAULT_BUFFER_TARGET_MS as i32),
-        },
-        close_when_inactive: consts::DEFAULT_CLOSE_WHEN_INACTIVE,
-    }
+    common::default_config("srt://example.invalid:9000")
 }
 
 #[test]

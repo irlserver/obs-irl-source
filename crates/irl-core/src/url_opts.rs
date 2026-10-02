@@ -1,9 +1,6 @@
-//! Demuxer option table (port of `apply_demuxer_options`, `receiver-stream.c:20-187`).
-//!
-//! The C function writes straight into an `AVDictionary`; here it is an
-//! ordered list the caller feeds to `av_dict_set` in order, which gives the
-//! same result — later entries override earlier ones, and the user's own
-//! options come last so they win.
+//! Demuxer option table: an ordered list the caller feeds to `av_dict_set`
+//! in order, so later entries override earlier ones and the user's own
+//! options, which come last, win.
 
 use std::borrow::Cow;
 
@@ -31,7 +28,6 @@ fn borrowed(key: &'static str, value: &'static str) -> (Cow<'static, str>, Cow<'
 pub fn demuxer_options(
     url: &str,
     extra: Option<&str>,
-    network_buffer_mb: i64,
     fast_probe: bool,
 ) -> Vec<(Cow<'static, str>, Cow<'static, str>)> {
     let mut opts: Vec<(Cow<'static, str>, Cow<'static, str>)> = Vec::with_capacity(20);
@@ -75,26 +71,24 @@ pub fn demuxer_options(
     // keeps working setups working; `extra` can turn it back on.
     opts.push(borrowed("tls_verify", "0"));
 
-    if network_buffer_mb > 0 {
-        let bytes = (network_buffer_mb * 1024 * 1024).to_string();
-        // "buffer_size" is bytes for udp:// (and rtp/rtsp, which forward it),
-        // but librist reuses the name for its recovery window in
-        // milliseconds, declared with a max of 30000 — a byte count there
-        // fails avformat_open_input outright with ERANGE.
-        if !has_scheme(url, "rist") {
-            opts.push(owned("buffer_size", bytes.clone()));
-        }
-        // "recv_buffer_size" is bytes for tcp:// and libsrt, and is what
-        // gives the setting any effect on rtmp(s):// and http(s)://.
-        opts.push(owned("recv_buffer_size", bytes));
+    let bytes = (consts::NETWORK_BUFFER_MB * 1024 * 1024).to_string();
+    // "buffer_size" is bytes for udp:// (and rtp/rtsp, which forward it),
+    // but librist reuses the name for its recovery window in
+    // milliseconds, declared with a max of 30000 — a byte count there
+    // fails avformat_open_input outright with ERANGE.
+    if !has_scheme(url, "rist") {
+        opts.push(owned("buffer_size", bytes.clone()));
+    }
+    // "recv_buffer_size" is bytes for tcp:// and libsrt, and is what
+    // gives the setting any effect on rtmp(s):// and http(s)://.
+    opts.push(owned("recv_buffer_size", bytes));
 
-        // udp:// also has a userspace ring between its receive thread and the
-        // demuxer, sized in 188-byte TS packets (default 7*4096 ≈ 5.3 MB).
-        // Grow it with the setting, never shrink it.
-        let fifo_pkts = network_buffer_mb * 1024 * 1024 / 188;
-        if fifo_pkts > consts::UDP_FIFO_DEFAULT_PACKETS {
-            opts.push(owned("fifo_size", fifo_pkts.to_string()));
-        }
+    // udp:// also has a userspace ring between its receive thread and the
+    // demuxer, sized in 188-byte TS packets (default 7*4096 ≈ 5.3 MB).
+    // Grow it with the buffer, never shrink it.
+    let fifo_pkts = consts::NETWORK_BUFFER_MB * 1024 * 1024 / 188;
+    if fifo_pkts > consts::UDP_FIFO_DEFAULT_PACKETS {
+        opts.push(owned("fifo_size", fifo_pkts.to_string()));
     }
 
     if has_scheme(url, "srt") {
@@ -110,10 +104,8 @@ pub fn demuxer_options(
     opts
 }
 
-/// Parse space-separated `key=value` pairs; entries without `=` are ignored.
-///
-/// Ports the `strtok_r(dup, " ")` loop: runs of spaces collapse, and a token
-/// splits at its first `=`.
+/// Parse space-separated `key=value` pairs; entries without `=` are ignored,
+/// runs of spaces collapse, and a token splits at its first `=`.
 pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
     extra
         .split(' ')
@@ -133,10 +125,10 @@ pub fn parse_extra(extra: &str) -> Vec<(String, String)> {
 /// waits the same way from the caller's point of view. The option reaches
 /// FFmpeg either way the user writes it — in the URL's query string or in the
 /// FFmpeg Options field, which [`demuxer_options`] merges into the same
-/// dictionary — so both are read here. Reading only the URL made a listener
-/// configured through FFmpeg Options keep the caller's deadline: the accept
-/// was torn down every 10 s and rebound after the reconnect delay, and a
-/// sender whose handshake landed in the gap never got in.
+/// dictionary — so both are read here. Reading only the URL would leave a
+/// listener configured through FFmpeg Options on the caller's deadline: the
+/// accept is torn down every 10 s and rebound after the reconnect delay, and
+/// a sender whose handshake lands in the gap never gets in.
 ///
 /// The URL test is on the query only: a path or a passphrase that happens to
 /// contain the word must not decide this.
@@ -153,71 +145,6 @@ pub fn awaits_caller(url: &str, extra: Option<&str>) -> bool {
         })
     });
     in_query || in_extra
-}
-
-#[cfg(test)]
-mod awaits_caller_tests {
-    use super::awaits_caller;
-
-    fn url_awaits_caller(url: &str) -> bool {
-        awaits_caller(url, None)
-    }
-
-    #[test]
-    fn listener_and_rendezvous_urls_wait_to_be_called() {
-        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=listener"));
-        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=rendezvous"));
-        assert!(url_awaits_caller("rist://0.0.0.0:7000?listen=1"));
-        assert!(url_awaits_caller(
-            "srt://0.0.0.0:7000?latency=200000&mode=listener"
-        ));
-    }
-
-    /// The field OBS shows next to the URL is where many people put it, and
-    /// libsrt does not care which: the two land in one dictionary.
-    #[test]
-    fn listener_mode_in_the_ffmpeg_options_counts_too() {
-        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=listener")));
-        assert!(awaits_caller(
-            "srt://0.0.0.0:7654",
-            Some("latency=2000000 mode=listener")
-        ));
-        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=rendezvous")));
-        assert!(awaits_caller("rist://0.0.0.0:7654", Some("listen=1")));
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("mode=caller")
-        ));
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("latency=2000000")
-        ));
-        assert!(!awaits_caller("srt://host.example:7000", Some("")));
-        // A value that merely contains the word is not the option.
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("passphrase=mode=listener")
-        ));
-    }
-
-    #[test]
-    fn caller_urls_dial_out() {
-        assert!(!url_awaits_caller("srt://host.example:7000"));
-        assert!(!url_awaits_caller("srt://host.example:7000?mode=caller"));
-        assert!(!url_awaits_caller("rtmp://host.example/app/key"));
-        assert!(!url_awaits_caller(""));
-    }
-
-    #[test]
-    fn only_the_query_decides() {
-        // A path or a passphrase containing the word must not flip it: a
-        // caller URL that never times out would hang on a dead host forever.
-        assert!(!url_awaits_caller("file:///media/mode=listener/clip.ts"));
-        assert!(!url_awaits_caller("srt://host.example:7000#mode=listener"));
-        assert!(url_awaits_caller(
-            "srt://host:7000?passphrase=mode%3Dlistener&mode=listener"
-        ));
-    }
 }
 
 #[cfg(test)]
@@ -247,24 +174,24 @@ mod tests {
         assert!(!has_scheme("srt:/host", "srt"));
         assert!(!has_scheme("srtla://host", "srt"));
         assert!(!has_scheme("", "srt"));
-        // A bare scheme still matches, as the C strncmp pair does.
+        // A bare scheme still matches.
         assert!(has_scheme("srt://", "srt"));
     }
 
     #[test]
     fn fast_probe_selects_the_one_megabyte_probe() {
-        let opts = demuxer_options("srt://h:1", None, 2, true);
+        let opts = demuxer_options("srt://h:1", None, true);
         assert_eq!(find(&opts, "probesize"), Some("1000000"));
         assert_eq!(find(&opts, "analyzeduration"), Some("1000000"));
 
-        let opts = demuxer_options("srt://h:1", None, 2, false);
+        let opts = demuxer_options("srt://h:1", None, false);
         assert_eq!(find(&opts, "probesize"), Some("5000000"));
         assert_eq!(find(&opts, "analyzeduration"), Some("5000000"));
     }
 
     #[test]
     fn the_unconditional_options_are_always_present() {
-        let opts = demuxer_options("rtmp://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmp://h/live/key", None, false);
         assert_eq!(find(&opts, "fflags"), Some("+genpts"));
         assert_eq!(find(&opts, "merge_pmt_versions"), Some("1"));
         assert_eq!(find(&opts, "overrun_nonfatal"), Some("1"));
@@ -280,50 +207,38 @@ mod tests {
 
     #[test]
     fn tls_verify_is_off_by_default() {
-        let opts = demuxer_options("rtmps://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmps://h/live/key", None, false);
         assert_eq!(find(&opts, "tls_verify"), Some("0"));
     }
 
     #[test]
     fn srt_gets_the_latency_window() {
-        let opts = demuxer_options("srt://h:1234?streamid=x", None, 2, false);
+        let opts = demuxer_options("srt://h:1234?streamid=x", None, false);
         assert_eq!(find(&opts, "latency"), Some("200000"));
 
-        let opts = demuxer_options("rtmp://h/live/key", None, 2, false);
+        let opts = demuxer_options("rtmp://h/live/key", None, false);
         assert!(!has(&opts, "latency"));
     }
 
     #[test]
     fn rist_omits_buffer_size_but_keeps_recv_buffer_size() {
-        let opts = demuxer_options("rist://h:1234", None, 2, false);
+        let opts = demuxer_options("rist://h:1234", None, false);
         assert!(
             !has(&opts, "buffer_size"),
             "librist reads buffer_size as milliseconds and fails on a byte count"
         );
         assert_eq!(find(&opts, "recv_buffer_size"), Some("2097152"));
 
-        let opts = demuxer_options("udp://h:1234", None, 2, false);
+        let opts = demuxer_options("udp://h:1234", None, false);
         assert_eq!(find(&opts, "buffer_size"), Some("2097152"));
         assert_eq!(find(&opts, "recv_buffer_size"), Some("2097152"));
     }
 
     #[test]
-    fn no_buffer_options_without_a_buffer_size() {
-        let opts = demuxer_options("udp://h:1234", None, 0, false);
-        assert!(!has(&opts, "buffer_size"));
-        assert!(!has(&opts, "recv_buffer_size"));
-        assert!(!has(&opts, "fifo_size"));
-    }
-
-    #[test]
     fn fifo_size_is_only_set_above_ffmpegs_own_default() {
-        // The 2 MB default is ~11 154 packets, below FFmpeg's 7*4096.
-        let opts = demuxer_options("udp://h:1234", None, consts::NETWORK_BUFFER_MB, false);
+        // The 2 MB buffer is ~11 154 packets, below FFmpeg's 7*4096.
+        let opts = demuxer_options("udp://h:1234", None, false);
         assert!(!has(&opts, "fifo_size"));
-
-        // 8 MB is ~44 620 packets, above it.
-        let opts = demuxer_options("udp://h:1234", None, 8, false);
-        assert_eq!(find(&opts, "fifo_size"), Some("44620"));
     }
 
     #[test]
@@ -331,7 +246,6 @@ mod tests {
         let opts = demuxer_options(
             "srt://h:1234",
             Some("probesize=32 latency=500000 tls_verify=1 ca_file=/tmp/ca.pem"),
-            2,
             true,
         );
         assert_eq!(find(&opts, "probesize"), Some("32"));
@@ -361,13 +275,13 @@ mod tests {
         // A trailing '=' is an empty value, as av_dict_set would store it.
         assert_eq!(parse_extra("k="), vec![("k".into(), "".into())]);
 
-        let opts = demuxer_options("srt://h:1", Some("garbage more_garbage"), 2, false);
+        let opts = demuxer_options("srt://h:1", Some("garbage more_garbage"), false);
         assert_eq!(find(&opts, "probesize"), Some("5000000"));
     }
 
     #[test]
     fn option_order_matches_the_c_dictionary_writes() {
-        let opts = demuxer_options("srt://h:1", Some("x=1"), 2, true);
+        let opts = demuxer_options("srt://h:1", Some("x=1"), true);
         let keys: Vec<&str> = opts.iter().map(|(k, _)| k.as_ref()).collect();
         assert_eq!(
             keys,
@@ -390,5 +304,60 @@ mod tests {
                 "x",
             ]
         );
+    }
+
+    /// Whether the stall deadline waits for a connection: only for a URL that
+    /// waits to be called, which the query or the FFmpeg Options can say.
+    #[test]
+    fn awaits_caller_reads_the_query_and_the_ffmpeg_options() {
+        let table = [
+            // Listener and rendezvous URLs wait to be called.
+            ("srt://0.0.0.0:7000?mode=listener", None, true),
+            ("srt://0.0.0.0:7000?mode=rendezvous", None, true),
+            ("rist://0.0.0.0:7000?listen=1", None, true),
+            (
+                "srt://0.0.0.0:7000?latency=200000&mode=listener",
+                None,
+                true,
+            ),
+            // Caller URLs dial out.
+            ("srt://host.example:7000", None, false),
+            ("srt://host.example:7000?mode=caller", None, false),
+            ("rtmp://host.example/app/key", None, false),
+            ("", None, false),
+            // Only the query decides. A path or a passphrase containing the
+            // word must not flip it: a caller URL that never times out would
+            // hang on a dead host forever.
+            ("file:///media/mode=listener/clip.ts", None, false),
+            ("srt://host.example:7000#mode=listener", None, false),
+            (
+                "srt://host:7000?passphrase=mode%3Dlistener&mode=listener",
+                None,
+                true,
+            ),
+            // The field OBS shows next to the URL is where many people put
+            // it, and libsrt does not care which: the two land in one
+            // dictionary.
+            ("srt://0.0.0.0:7654", Some("mode=listener"), true),
+            (
+                "srt://0.0.0.0:7654",
+                Some("latency=2000000 mode=listener"),
+                true,
+            ),
+            ("srt://0.0.0.0:7654", Some("mode=rendezvous"), true),
+            ("rist://0.0.0.0:7654", Some("listen=1"), true),
+            ("srt://host.example:7000", Some("mode=caller"), false),
+            ("srt://host.example:7000", Some("latency=2000000"), false),
+            ("srt://host.example:7000", Some(""), false),
+            // A value that merely contains the word is not the option.
+            (
+                "srt://host.example:7000",
+                Some("passphrase=mode=listener"),
+                false,
+            ),
+        ];
+        for (url, extra, expected) in table {
+            assert_eq!(awaits_caller(url, extra), expected, "{url} with {extra:?}");
+        }
     }
 }

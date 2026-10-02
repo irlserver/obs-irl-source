@@ -1,31 +1,16 @@
-//! Video decode (the video half of `irl_handle_video_packet` /
-//! `drain_video_frames`, moved off the receiver thread).
+//! Video decode, on the video thread.
 //!
-//! It lives here rather than in `receiver/` because the receiver must not be
-//! what decides *when* a packet is decoded. The stream's latency is held as
-//! compressed packets, and decode happens only as the frames come due — but the
-//! receiver spends most of its life blocked in `av_read_frame`, and a network
-//! stall is exactly when it blocks longest and when video most needs to keep
-//! draining what it already has.
+//! The stream's latency is held as compressed packets and decoded only as the
+//! frames come due. The receiver cannot be the one to decode: it spends a
+//! network stall blocked in `av_read_frame`, which is exactly when video most
+//! needs to keep draining what it already has.
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use irl_core::consts;
+use irl_core::{consts, timing};
 
 use crate::shared::{Shared, VideoDecoder};
 use crate::video::intake::{self, DecodeState};
-
-/// How long the packet-level keyframe gate waits before giving up and feeding
-/// the decoder whatever arrives (`receiver-decode.c`).
-const VIDEO_PKT_GATE_TIMEOUT_US: u64 = 5_000_000;
-
-fn should_log_warning(last_warning_us: &mut u64, now_us: u64) -> bool {
-    if *last_warning_us != 0 && now_us - *last_warning_us < consts::DECODER_WARNING_INTERVAL_US {
-        return false;
-    }
-    *last_warning_us = now_us;
-    true
-}
 
 fn note_decode_error(shared: &Shared, state: &mut DecodeState, stage: &str) {
     state.decode_errors += 1;
@@ -34,7 +19,11 @@ fn note_decode_error(shared: &Shared, state: &mut DecodeState, stage: &str) {
         return;
     }
     let now_us = ffmpeg::gettime_us() as u64;
-    if should_log_warning(&mut state.last_warning_us, now_us) {
+    if timing::throttle(
+        &mut state.last_warning_us,
+        now_us,
+        consts::DECODER_WARNING_INTERVAL_US,
+    ) {
         irl_warn!(
             "Video decoder {stage}: corruption burst ({} consecutive errors), waiting for the next keyframe",
             state.decode_errors
@@ -63,7 +52,7 @@ fn gate_open(shared: &Shared, state: &mut DecodeState, is_key: bool) -> bool {
     if state.pkt_gate_start_us == 0 {
         state.pkt_gate_start_us = now_us;
     }
-    if now_us - state.pkt_gate_start_us < VIDEO_PKT_GATE_TIMEOUT_US {
+    if now_us - state.pkt_gate_start_us < consts::VIDEO_PKT_GATE_TIMEOUT_US {
         return false;
     }
     state.pkt_gate_open = true;
@@ -117,16 +106,14 @@ pub fn decode_packet(
 
     let mut result = decoder.ctx.send_packet(packet);
     if result.as_ref().is_err_and(ffmpeg::Error::is_eagain) {
-        // The decoder refused the packet: it has output waiting and, on
-        // fixed-pool hardware decoders, no free surface until we take it.
-        // FFmpeg's contract is to read the output and resend the same packet —
-        // falling through would discard it, and with a reference frame that
-        // costs artifacts until the next keyframe rather than one dropped
-        // frame.
+        // The decoder has output waiting and, on fixed-pool hardware decoders,
+        // no free surface until we take it. FFmpeg's contract is to read the
+        // output and resend the same packet; dropping a reference frame costs
+        // artifacts until the next keyframe.
         //
-        // One retry, deliberately not a loop: a single drain frees every
-        // surface the decoder was waiting on, and a decoder that returned
-        // EAGAIN without producing anything would otherwise spin here.
+        // One retry, not a loop: a single drain frees every surface the
+        // decoder was waiting on, and a decoder that returned EAGAIN without
+        // producing anything would otherwise spin here.
         shared.lifetime.video_pkt_eagain.fetch_add(1, Relaxed);
         drain(decoder, scratch, shared, state, out);
         result = decoder.ctx.send_packet(packet);

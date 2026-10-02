@@ -10,55 +10,14 @@ use crate::proc::ProcHandler;
 use crate::properties::Properties;
 use crate::video::VideoFrame;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceType {
-    Input,
-    Filter,
-    Transition,
-}
-
-impl SourceType {
-    fn to_sys(self) -> obs_sys::obs_source_type {
-        use obs_sys::obs_source_type as T;
-        match self {
-            Self::Input => T::OBS_SOURCE_TYPE_INPUT,
-            Self::Filter => T::OBS_SOURCE_TYPE_FILTER,
-            Self::Transition => T::OBS_SOURCE_TYPE_TRANSITION,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IconType {
-    Unknown,
-    Media,
-    Camera,
-    Custom,
-}
-
-impl IconType {
-    fn to_sys(self) -> obs_sys::obs_icon_type {
-        use obs_sys::obs_icon_type as I;
-        match self {
-            Self::Unknown => I::OBS_ICON_TYPE_UNKNOWN,
-            Self::Media => I::OBS_ICON_TYPE_MEDIA,
-            Self::Camera => I::OBS_ICON_TYPE_CAMERA,
-            Self::Custom => I::OBS_ICON_TYPE_CUSTOM,
-        }
-    }
-}
-
-/// `enum obs_media_state`.
+/// The subset of `enum obs_media_state` a live input reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaState {
     None,
     Playing,
     Opening,
     Buffering,
-    Paused,
     Stopped,
-    Ended,
-    Error,
 }
 
 impl MediaState {
@@ -69,15 +28,12 @@ impl MediaState {
             Self::Playing => M::OBS_MEDIA_STATE_PLAYING,
             Self::Opening => M::OBS_MEDIA_STATE_OPENING,
             Self::Buffering => M::OBS_MEDIA_STATE_BUFFERING,
-            Self::Paused => M::OBS_MEDIA_STATE_PAUSED,
             Self::Stopped => M::OBS_MEDIA_STATE_STOPPED,
-            Self::Ended => M::OBS_MEDIA_STATE_ENDED,
-            Self::Error => M::OBS_MEDIA_STATE_ERROR,
         }
     }
 }
 
-/// An OBS source type. One `impl` per registered source id.
+/// An OBS input source type. One `impl` per registered source id.
 ///
 /// Callbacks take `&self`: OBS-thread callbacks and proc-handler calls (which
 /// arrive on other threads, e.g. obs-websocket's) may overlap, so interior
@@ -86,11 +42,8 @@ impl MediaState {
 pub trait Source: Send + Sync + Sized + 'static {
     /// `obs_source_info::id`.
     const ID: &'static CStr;
-    const TYPE: SourceType = SourceType::Input;
     /// `obs_source_info::output_flags` (`sys::OBS_SOURCE_*`).
     const OUTPUT_FLAGS: u32;
-    const ICON_TYPE: IconType = IconType::Unknown;
-    const VERSION: u32 = 0;
 
     /// Display name (`get_name`). The pointer is kept by OBS, hence `'static`.
     fn type_name() -> &'static CStr;
@@ -275,7 +228,7 @@ pub fn register_source<T: Source>() {
     // few hundred bytes, not a leak that grows.
     let info = Box::leak(Box::new(obs_sys::obs_source_info {
         id: T::ID.as_ptr(),
-        type_: T::TYPE.to_sys(),
+        type_: obs_sys::obs_source_type::OBS_SOURCE_TYPE_INPUT,
         output_flags: T::OUTPUT_FLAGS,
         get_name: Some(shim_get_name::<T>),
         create: Some(shim_create::<T>),
@@ -311,7 +264,7 @@ pub fn register_source<T: Source>() {
         get_defaults2: None,
         get_properties2: None,
         audio_mix: None,
-        icon_type: T::ICON_TYPE.to_sys(),
+        icon_type: obs_sys::obs_icon_type::OBS_ICON_TYPE_UNKNOWN,
         media_play_pause: Some(shim_media_play_pause::<T>),
         media_restart: Some(shim_media_restart::<T>),
         media_stop: Some(shim_media_stop::<T>),
@@ -321,7 +274,7 @@ pub fn register_source<T: Source>() {
         media_get_time: None,
         media_set_time: None,
         media_get_state: Some(shim_media_get_state::<T>),
-        version: T::VERSION,
+        version: 0,
         // NULL means "the id is already unversioned", which is what libobs
         // assumes for a source that never renamed itself.
         unversioned_id: core::ptr::null(),
@@ -498,12 +451,6 @@ pub struct OwnedSource(SourceHandle);
 impl OwnedSource {
     pub fn handle(&self) -> SourceHandle {
         self.0
-    }
-
-    /// # Safety
-    /// `ptr` must be an `obs_source_t` whose reference this value now owns.
-    pub unsafe fn from_raw(ptr: NonNull<obs_sys::obs_source_t>) -> Self {
-        Self(SourceHandle(ptr))
     }
 }
 

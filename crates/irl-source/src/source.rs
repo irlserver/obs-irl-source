@@ -1,5 +1,5 @@
-//! Source lifecycle (port of `src/irl-source.c`): create, destroy, update,
-//! tick, the show/activate gating, the media controls and the stats proc.
+//! Source lifecycle: create, destroy, update, tick, the show/activate gating,
+//! the media controls and the stats proc.
 
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
@@ -40,8 +40,7 @@ struct ObsState {
 /// The IRL source instance.
 pub struct IrlSource {
     source: SourceHandle,
-    /// Counters that outlive a connection (the set the C `reset_runtime_state`
-    /// deliberately skipped).
+    /// Counters that outlive a connection.
     lifetime: Arc<LifetimeStats>,
     /// Owns the `get_stats` closure; dropped in [`Drop`], before libobs tears
     /// the source's proc handler down.
@@ -89,18 +88,15 @@ impl Source for IrlSource {
             running: None,
         }));
 
-        // Register the stats proc so scripts and overlays can query state.
-        // The obs-websocket vendor extension calls this same proc, so both
-        // transports are guaranteed to report the same numbers. The field
-        // list itself lives in `irl_core::stats::FIELDS`.
+        // The obs-websocket vendor extension calls this same proc, so scripts
+        // and websocket clients see the same numbers.
         let proc_cb = match CString::new(proc_declaration()) {
             Ok(decl) => {
                 let state = Arc::clone(&obs_state);
-                let lifetime = Arc::clone(&lifetime);
                 Some(source.proc_handler().add(
                     &decl,
                     Box::new(move |cd: &mut CallData| {
-                        write_stats(cd, &snapshot(&state.lock(), &lifetime));
+                        write_stats(cd, &snapshot(&state.lock()));
                     }),
                 ))
             }
@@ -307,8 +303,8 @@ impl Source for IrlSource {
 }
 
 impl Drop for IrlSource {
-    /// `irl_source_destroy`. The frame is not cleared: the source itself is
-    /// going away, so there is nothing left to show it on.
+    /// The frame is not cleared: the source itself is going away, so there is
+    /// nothing left to show it on.
     fn drop(&mut self) {
         stop_receiver(&mut self.obs_state.lock(), self.source, false);
         // Explicit for order's sake: the closure the callback owns holds an
@@ -329,9 +325,8 @@ fn should_run_receiver(state: &ObsState, source: SourceHandle) -> bool {
         && (!state.config.close_when_inactive || source.showing())
 }
 
-/// Start the three workers for a fresh [`Shared`] (which is what replaces the
-/// C `reset_runtime_state`: every per-connection field starts zeroed and the
-/// lifetime counters are carried over untouched).
+/// Start the three workers for a fresh [`Shared`]: every per-connection field
+/// starts zeroed and the lifetime counters carry over untouched.
 fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<LifetimeStats>) {
     if state.running.is_some() || !should_run_receiver(state, source) {
         return;
@@ -345,8 +340,8 @@ fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<Lif
     );
     shared.flags.thread_active.store(true, Relaxed);
 
-    // Spawned in the order the C created them, with the same staged rollback:
-    // a thread that never started must not leave the others running.
+    // Staged rollback: a thread that never started must not leave the others
+    // running.
     let audio = match spawn_worker("irl-audio", Arc::clone(&shared), audio::audio_thread) {
         Ok(handle) => handle,
         Err(err) => {
@@ -404,7 +399,7 @@ fn stop_receiver(state: &mut ObsState, source: SourceHandle, clear_video: bool) 
         let _ = running.video.join();
         let _ = running.audio.join();
         let _ = running.receiver.join();
-        // Whatever the video thread never got to; frees the pinned surfaces.
+        // Whatever the video thread never got to.
         running.shared.video.drain();
         // The joins block the calling thread, which for the media controls
         // and show/hide is OBS's graphics thread: this is how long the whole
@@ -461,20 +456,11 @@ fn fit_to_canvas(source: SourceHandle) {
 
 // ── Stats ─────────────────────────────────────────────────────
 
-/// Snapshot every stat, consistently: the audio state (and, under it, the
-/// jitter buffer) is locked once, exactly as the C did.
-///
-/// With no run in progress the per-connection counters read zero — the C read
-/// the same fields after `reset_runtime_state` had zeroed them — while the
-/// lifetime counters and the settings-derived flags still report.
 /// `av_skew_ms`: video PTS minus audio PTS of what last reached the plugin,
-/// in ms. Both values are stamped by the receiver at arrival (audio as it
-/// writes the jitter buffer, video as it pushes the packet), so the
-/// difference is the sender's timestamp skew before any buffering here. The
-/// decoded-frame PTS would not do for the video side: a packet waits in the
-/// channel for its due time, standing video delay included, so that PTS
-/// trails arrival by the queue depth and the delay would read as a skew.
-/// Zero until both streams have delivered something.
+/// in ms. Both are stamped by the receiver at arrival, so the difference is
+/// the sender's skew before any buffering here. The decoded-frame PTS would
+/// trail arrival by the queue depth and read the video delay as skew. Zero
+/// until both streams have delivered something.
 pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     let video_pts_ns = shared.conn.video_arrival_pts_ns.load(Relaxed);
     if video_pts_ns == 0 || audio.latest_audio_stream_pts_ns == 0 {
@@ -483,13 +469,13 @@ pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     (video_pts_ns - audio.latest_audio_stream_pts_ns) / 1_000_000
 }
 
-fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
+/// Snapshot every stat, consistently: the audio state (and, under it, the
+/// jitter buffer) is locked once.
+///
+/// With no run in progress every stat reads zero, and the speed reads 1.0.
+fn snapshot(state: &ObsState) -> StatsSnapshot {
     let mut snap = StatsSnapshot {
         current_speed: 1.0,
-        adaptive_latency_control: state.config.hot.adaptive_speed,
-        low_latency_audio: state.config.stream.low_latency_audio,
-        video_lead_excess: lifetime.video_lead_excess.load(Relaxed) as i64,
-        reconnect_count: lifetime.reconnect_count.load(Relaxed) as i64,
         ..StatsSnapshot::default()
     };
 
@@ -509,38 +495,12 @@ fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     snap.reconnecting = shared.flags.reconnecting.load(Relaxed);
     snap.total_audio_frames = conn.total_audio_frames.load(Relaxed) as i64;
     snap.total_video_frames = conn.total_video_frames.load(Relaxed) as i64;
-    snap.pts_repairs = conn.pts_repairs.load(Relaxed) as i64;
-    snap.pts_normalizations = conn.pts_normalizations.load(Relaxed) as i64;
-    snap.pts_interpolations = conn.pts_interpolations.load(Relaxed) as i64;
-    snap.pts_resets = conn.pts_resets.load(Relaxed) as i64;
-    snap.pts_last_gap_ms = conn.pts_last_gap_ms.load(Relaxed) as i64;
     snap.pts_max_gap_ms = conn.pts_max_gap_ms.load(Relaxed) as i64;
-    snap.silence_insertions = conn.silence_insertions.load(Relaxed) as i64;
     snap.audio_underruns = conn.audio_underruns.load(Relaxed) as i64;
-    snap.audio_resync_skipped_chunks = conn.audio_resync_skipped_chunks.load(Relaxed) as i64;
-    snap.audio_hidden_trimmed_chunks = conn.audio_hidden_trimmed_chunks.load(Relaxed) as i64;
-    snap.audio_quality_events = conn.audio_quality_events.load(Relaxed) as i64;
     snap.audio_output_restarts = conn.audio_output_restarts.load(Relaxed) as i64;
-    snap.obs_lead_ms = conn.last_obs_lead_ns.load(Relaxed) / 1_000_000;
-    snap.audio_decoder_flushes = conn.audio_decoder_flushes.load(Relaxed) as i64;
-    snap.video_corrupt_frames = conn.video_corrupt_frames.load(Relaxed) as i64;
-    snap.video_corrupt_held = conn.video_corrupt_held.load(Relaxed) as i64;
-    snap.video_lead_ms = conn.video_lead_ns.load(Relaxed) / 1_000_000;
     snap.video_delay_ms = (conn.video_delay_ns.load(Relaxed) / 1_000_000) as i64;
     snap.av_skew_ms = av_skew_ms(shared, &audio);
     snap.audio_hold_ms = i64::from(conn.audio_hold_ms.load(Relaxed));
-
-    // Stream delay: how far behind real time the video output is, computed as
-    // wall clock minus the anchored video PTS. Includes SRT latency, decode
-    // time and any buffering, which is what makes it the number to watch in a
-    // latency overlay.
-    if conn.video_ts_init.load(Relaxed) && audio.latest_video_stream_pts_ns != 0 {
-        let video_wall_ns = conn.video_sys_base.load(Relaxed) as i64
-            + (audio.latest_video_stream_pts_ns - conn.video_pts_base.load(Relaxed));
-        snap.stream_delay_ms =
-            ((obs::time::gettime_ns() as i64 - video_wall_ns) / 1_000_000).max(0);
-    }
-
     snap
 }
 

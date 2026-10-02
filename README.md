@@ -155,7 +155,7 @@ const { responseData } = await obs.call("CallVendorRequest", {
     requestData: { source_name: "IRL Source" },
 });
 
-console.log(responseData.stream_delay_ms, responseData.buffer_fill_ms);
+console.log(responseData.buffer_fill_ms, responseData.current_speed);
 ```
 
 There is no event stream, so poll `GetStats` at whatever rate your overlay refreshes; once a second is plenty. The request reads the same snapshot the Lua path does, so both transports always report identical numbers.
@@ -251,14 +251,14 @@ The 70ms and 2000ms thresholds are fixed internally and match the libobs behavio
 - Low-delay decode: no B-frame reorder buffering, capped decode threading.
 - Zero-copy for supported pixel formats, planes go straight to OBS. Native 10-bit passthrough for YUV420P10LE (I010) and P010. Unsupported formats fall back to swscale.
 - Mid-stream resolution changes are detected and handled without recreating the source.
-- Damaged H.264 frames are passed through with their timestamps rather than dropped, which preserves cadence instead of freezing on every corrupt frame. HEVC frames predicted from a reference that never arrived are held back instead: HEVC has no error concealment, so FFmpeg synthesizes the missing reference as flat gray and everything predicted from it is gray until the next keyframe. The last good frame stays on screen for that stretch (`video_corrupt_held` counts them).
+- Damaged H.264 frames are passed through with their timestamps rather than dropped, which preserves cadence instead of freezing on every corrupt frame. HEVC frames predicted from a reference that never arrived are held back instead: HEVC has no error concealment, so FFmpeg synthesizes the missing reference as flat gray and everything predicted from it is gray until the next keyframe. The last good frame stays on screen for that stretch, and the log says how many frames were held once the picture resumes.
 - Video PTS is mapped through the audio playout offset for lip sync.
 
 ## Decoder recovery
 
 Repeated audio decode errors trigger a throttled audio decoder flush and a reset of bad timing state. This is what stops SRT bitrate starvation from permanently breaking audio, which is the failure mode the built-in Media Source hits.
 
-The video decoder is deliberately never flushed. Flushing empties the reference picture buffer and clears the decoder's recovery state, and neither the H.264 nor the HEVC decoder produces a real picture again until the next keyframe: H.264 paints frames gray until a recovery point, HEVC synthesizes each missing reference as flat gray. On a lossy stream that turned a few damaged frames into a whole GOP of gray. A decode error on a live stream is a property of the packet, not of the decoder, so the next intact packet decodes fine without a reset. Bursts are still counted and logged (`video_corrupt_frames`, and the `corrupt=`/`held=` fields of the stats line).
+The video decoder is deliberately never flushed. Flushing empties the reference picture buffer and clears the decoder's recovery state, and neither the H.264 nor the HEVC decoder produces a real picture again until the next keyframe: H.264 paints frames gray until a recovery point, HEVC synthesizes each missing reference as flat gray. On a lossy stream that turned a few damaged frames into a whole GOP of gray. A decode error on a live stream is a property of the packet, not of the decoder, so the next intact packet decodes fine without a reset. Bursts are still logged.
 
 ## Compared with the Media Source
 
@@ -312,44 +312,31 @@ Stats are exposed through OBS's `proc_handler` API under the `get_stats` call, a
 | --- | --- | --- |
 | `buffer_fill_ms` | int | Current audio jitter buffer fill level (ms) |
 | `current_speed` | float | Current audio correction factor. Buffered mode keeps this near 1.0. |
-| `adaptive_latency_control` | bool | Whether buffered steady-state latency correction is enabled |
-| `reconnecting` | bool | Whether the source is currently reconnecting |
 | `total_audio_frames` | int | Total audio frames decoded since connection |
 | `total_video_frames` | int | Total video frames decoded since connection |
-| `pts_repairs` | int | Number of non-normal PTS discontinuities repaired |
-| `pts_normalizations` | int | Number of frame-sized PTS cadence offsets normalized without treating them as damage |
-| `pts_interpolations` | int | Number of non-frame-sized small PTS gaps smoothed by timestamp interpolation |
-| `pts_resets` | int | Number of large PTS gaps that triggered a timing reset |
-| `pts_last_gap_ms` | int | Most recent repaired PTS gap size |
-| `pts_max_gap_ms` | int | Largest repaired PTS gap size since the current connection/reset |
-| `silence_insertions` | int | Number of silence insertions for gap filling |
+| `pts_max_gap_ms` | int | Largest repaired audio PTS gap since the current connection |
 | `audio_underruns` | int | Number of plugin-side underruns that emitted silence to keep OBS audio timestamps monotonic |
-| `audio_resync_skipped_chunks` | int | Number of buffered audio chunks skipped by low-latency backlog capping or startup trims |
-| `audio_hidden_trimmed_chunks` | int | Number of buffered chunks trimmed before playback primed (never audible) |
-| `audio_quality_events` | int | Aggregate audible-risk counter for underruns, inserted silence, resyncs, PTS resets, and audio decoder flushes |
 | `audio_output_restarts` | int | Output clock restarts after the audio thread stalled (should stay 0) |
-| `obs_lead_ms` | int | How far ahead of real time audio is queued inside OBS (healthy is roughly 60 to 100ms) |
-| `audio_decoder_flushes` | int | Number of audio decoder flushes after repeated decode errors |
-| `video_corrupt_frames` | int | Decoded frames the decoder flagged as damaged (concealed slice errors on H.264, missing-reference prediction on HEVC) |
-| `video_corrupt_held` | int | HEVC frames held back instead of shown because they were predicted from a missing reference and would have rendered gray; the last good frame stays on screen until the next keyframe |
-| `video_lead_ms` | int | How far ahead of real time the last video frame was timestamped. Tracks the audio buffer; a value climbing well past Target Buffer and staying there means concealment has inflated the A/V mapping |
-| `video_lead_excess` | int | Frames whose lead exceeded what OBS's async queue can absorb. Harmless while the lead is steady; sustained growth is what makes OBS drop queued video |
 | `video_delay_ms` | int | Standing delay added to the video schedule because video reached the plugin too late to be paced against the audio playout (the encoder sends video later than audio by more than Target Buffer covers). It is sized at connection start and then checked against what frames actually need: when ten seconds of frames all needed less, it ramps back down with video playing at the Catch-Up Speed, so a bad first second on a poor link does not leave the picture behind the sound for the whole stream. Lip sync is off by this much while it lasts. When the sender keeps its video this far behind its audio for two seconds, `audio_hold_ms` rises to cover it, and this delay drops back to zero as the audio slows into step. In Low Latency Audio mode, or with Adaptive Latency Control off, the hold is only sized when the stream starts. A delay that stays above zero with the hold in force means video is late for a reason on this machine (decoding, a busy GPU); raising Target Buffer by at least this much takes it back to zero |
 | `av_skew_ms` | int | Video PTS minus audio PTS of what last reached the plugin: how the sender stamps its two streams against each other, before any buffering here. Near zero for a healthy sender; a standing negative value is video stamped behind its audio, which is what `audio_hold_ms` then covers. Measured as packets arrive, so the delay itself does not show up in it |
 | `audio_hold_ms` | int | How much longer than Target Buffer audio waits before it plays, so that video which reaches the plugin later than its audio is in hand when the two are due. Measured before audio starts, so a sender that always sends its video late (pocketSRT, a phone with video stabilization on) is in sync from the first second. After that it rises when the skew lasts two seconds, which the speed controller builds by playing up to 2% slow, and falls when ten seconds of video needed less. 0 for a sender whose skew Target Buffer already covers |
-| `stream_delay_ms` | int | End-to-end stream delay (SRT latency + decode + buffering) |
-| `low_latency_audio` | bool | Whether OBS async unbuffered low-latency mode is enabled |
-| `reconnect_count` | int | Number of reconnect attempts since the source was created |
+| `reconnecting` | bool | Whether the source is currently reconnecting |
 
 ### OBS log stats
 
 The plugin also logs stats to the OBS log every 30 seconds:
 
 ```
-[irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ctrl=on pts_repairs=0 norm=0 interp=0 silence=0 resets=0 last_gap=0ms max_gap=0ms underruns=0 resync_skips=0 hidden_trims=0 quality_events=0 audio_flushes=0 corrupt=0 held=0 obs_lead=99ms chunk=960@48000 stream_chunk=20ms obs_chunk=20ms restarts=0 res=1920x1080
+[irl-source] Stats: video=1801 audio=1406 buf=118ms peak=164ms target=120ms speed=1.000 ll=off max_gap=0ms underruns=0 restarts=0 av_drift=0ms av_skew=-14ms hold=0ms vdelay=0ms vfps=60.0 vq_drops=0 pktq=7/38(96KB,116ms) paced=14/16(43MB) eagain=0/0 pktdrop=0/0 res=1920x1080
 ```
 
-A healthy stream shows `speed=1.000`, `underruns=0`, `restarts=0`, and a constant `chunk` size. `buf` plus `obs_lead` is your plugin-side latency (fill wanders inside a deadband around the target by design).
+A healthy stream shows `speed` near 1.000, `underruns=0`, `restarts=0`, `av_drift` near 0, and `vdelay` and `hold` at 0. `buf` wanders inside a deadband around `target` by design, and `peak` is the highest fill since the source was created. `ll` is Low Latency Audio, and `ctrl=off` appears only when Adaptive Latency Control is turned off. The rest describe the video path:
+
+- `vfps`: the frame rate the sender is delivering.
+- `vq_drops`: compressed video packets dropped because the decode queue overflowed (should stay 0).
+- `pktq`: compressed video waiting to be decoded, as now/peak packets (size, duration). Its duration tracks Target Buffer.
+- `paced`: decoded frames waiting for their due time, as now/peak (memory).
+- `eagain` and `pktdrop`: packets a decoder refused at first and packets it never took, as video/audio.
 
 ## Building from source
 

@@ -1,16 +1,8 @@
-//! Video pacing queue (port of `receiver-video.c:82-209`): decoded frames in
-//! system memory waiting for their due time, bounded by frame count and
-//! bytes, with due times re-derived from the live audio playout offset.
+//! Video pacing queue: decoded frames in system memory waiting for their due
+//! time, bounded by frame count and bytes, with due times re-derived from the
+//! live audio playout offset.
 
 use std::collections::VecDeque;
-
-/// What the queue needs to know about a frame.
-pub trait PacedFrame {
-    /// Stream PTS in nanoseconds.
-    fn pts_ns(&self) -> i64;
-    /// Bytes held.
-    fn bytes(&self) -> usize;
-}
 
 /// Decision for the head frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,21 +35,15 @@ struct Entry<F> {
     bytes: usize,
 }
 
-impl<F: PacedFrame> PacingQueue<F> {
+impl<F> PacingQueue<F> {
     /// Empty queue holding `lead_ns` of media, under hard ceilings of
     /// `max_frames` and `max_bytes`.
     ///
-    /// The two bounds mean different things and that distinction is the whole
-    /// design. `lead_ns` is the *soft* bound: it is how far ahead of display
-    /// the caller decodes, it is reached in normal operation every second of
-    /// every stream, and reaching it simply means "stop decoding for now".
-    /// `max_frames` / `max_bytes` are the *hard* bound: memory that must not be
-    /// exceeded whatever the stream does, and reaching one means pacing has
-    /// failed and frames go out early ([`DueVerdict::EmitEarly`], counted).
-    ///
-    /// Before the delay moved into the packet queue these were the same bound,
-    /// so a Target Buffer that needed more decoded frames than the byte ceiling
-    /// allowed silently degraded into permanent early emission.
+    /// `lead_ns` is the *soft* bound: how far ahead of display the caller
+    /// decodes. Reaching it is normal and means "stop decoding for now".
+    /// `max_frames` / `max_bytes` are the *hard* bound on memory; reaching one
+    /// means pacing has failed and frames go out early
+    /// ([`DueVerdict::EmitEarly`], counted).
     pub fn new(lead_ns: i64, max_frames: usize, max_bytes: usize) -> Self {
         Self {
             entries: VecDeque::new(),
@@ -89,13 +75,14 @@ impl<F: PacedFrame> PacingQueue<F> {
         self.entries.len() >= self.max_frames || self.bytes >= self.max_bytes
     }
 
-    /// Append a frame with its current due time.
-    pub fn push(&mut self, frame: F, due_ns: u64) {
+    /// Append a frame with its stream PTS in nanoseconds, the bytes it holds
+    /// and its current due time.
+    pub fn push(&mut self, frame: F, pts_ns: i64, bytes: usize, due_ns: u64) {
         let entry = Entry {
-            pts_ns: frame.pts_ns(),
-            bytes: frame.bytes(),
-            due_ns,
             frame,
+            pts_ns,
+            bytes,
+            due_ns,
         };
         self.bytes += entry.bytes;
         self.entries.push_back(entry);
@@ -107,10 +94,9 @@ impl<F: PacedFrame> PacingQueue<F> {
     /// Re-derive every due time: `due = map(pts)`.
     ///
     /// Rescheduling against one offset per cycle preserves the spacing
-    /// between frames (their due times differ only by their PTS deltas) and
-    /// moves the whole queue with the audio it is mapped to, so video rides
-    /// the same latency reclaim instead of trailing it for the depth of the
-    /// queue.
+    /// between frames and moves the whole queue with the audio it is mapped
+    /// to, so video follows a latency change instead of trailing it for the
+    /// depth of the queue.
     pub fn reschedule(&mut self, map: impl Fn(i64) -> u64) {
         for entry in &mut self.entries {
             entry.due_ns = map(entry.pts_ns);
@@ -119,18 +105,17 @@ impl<F: PacedFrame> PacingQueue<F> {
 
     /// Head frame verdict at `now_ns`.
     ///
-    /// Over the ceilings the head goes out early rather than being dropped:
-    /// too-early video is what the un-paced path did all the time, and it
-    /// beats a hole in the picture. As in C, a cycle spent over a ceiling
-    /// counts an overflow even if the head happened to be due anyway.
+    /// Over the ceilings the head goes out early rather than being dropped,
+    /// since early video beats a hole in the picture. A cycle spent over a
+    /// ceiling counts an overflow even if the head was due anyway.
     /// `slack_ns` is how early a frame may go out: the emit slack plus the
-    /// delivery lead (see [`consts::VIDEO_PACING_LEAD_TICKS`]). The caller
-    /// samples it per cycle, because the canvas frame rate is a setting the
-    /// user can change while the source runs.
+    /// delivery lead (see [`crate::consts::VIDEO_PACING_LEAD_TICKS`]). The
+    /// caller samples it per cycle, because the canvas frame rate can change
+    /// while the source runs.
     /// `allow_early` is false while the caller still needs a frame at its exact
-    /// due time — the one that re-anchors libobs's play head. Emitting that one
-    /// early would anchor the whole connection early, which is the offset the
-    /// lead exists to avoid, so a hard ceiling waits instead of overflowing.
+    /// due time (the one that re-anchors libobs's play head). Emitting that one
+    /// early would anchor the whole connection early, so a hard ceiling waits
+    /// instead of overflowing.
     pub fn due_now(&mut self, now_ns: u64, slack_ns: i64, allow_early: bool) -> Option<DueVerdict> {
         let due_ns = self.entries.front()?.due_ns;
         // Only a *hard* ceiling forces a frame out early. Sitting at the decode
@@ -229,20 +214,16 @@ mod tests {
         bytes: usize,
     }
 
-    impl PacedFrame for TestFrame {
-        fn pts_ns(&self) -> i64 {
-            self.pts_ns
-        }
-        fn bytes(&self) -> usize {
-            self.bytes
-        }
-    }
-
     fn frame(pts_ns: i64) -> TestFrame {
         TestFrame {
             pts_ns,
             bytes: FRAME_BYTES,
         }
+    }
+
+    fn push(q: &mut PacingQueue<TestFrame>, frame: TestFrame, due_ns: u64) {
+        let (pts_ns, bytes) = (frame.pts_ns, frame.bytes);
+        q.push(frame, pts_ns, bytes, due_ns);
     }
 
     fn queue() -> PacingQueue<TestFrame> {
@@ -258,7 +239,7 @@ mod tests {
         let mut q = PacingQueue::new(i64::MAX, consts::VIDEO_PACING_MAX_FRAMES, usize::MAX);
         for i in 0..consts::VIDEO_PACING_MAX_FRAMES {
             assert!(q.has_room(), "room at {i}");
-            q.push(frame(i as i64), 0);
+            push(&mut q, frame(i as i64), 0);
         }
         assert!(!q.has_room());
         assert_eq!(q.len(), consts::VIDEO_PACING_MAX_FRAMES);
@@ -269,7 +250,7 @@ mod tests {
         let mut q = PacingQueue::new(i64::MAX, usize::MAX, consts::VIDEO_PACING_MAX_BYTES);
         let mut pushed = 0;
         while q.has_room() {
-            q.push(frame(pushed), 0);
+            push(&mut q, frame(pushed), 0);
             pushed += 1;
         }
         // 1 GiB of 1080p NV12 is ~345 frames, well inside the frame ceiling.
@@ -281,12 +262,12 @@ mod tests {
     #[test]
     fn bytes_track_push_and_pop() {
         let mut q = queue();
-        q.push(frame(0), 0);
-        q.push(frame(1), 0);
+        push(&mut q, frame(0), 0);
+        push(&mut q, frame(1), 0);
         assert_eq!(q.bytes(), 2 * FRAME_BYTES);
-        q.pop();
+        assert_eq!(q.pop().unwrap().pts_ns, 0, "frames come back in push order");
         assert_eq!(q.bytes(), FRAME_BYTES);
-        q.pop();
+        assert_eq!(q.pop().unwrap().pts_ns, 1);
         assert_eq!(q.bytes(), 0);
         assert!(q.is_empty());
         assert_eq!(q.pop(), None);
@@ -296,7 +277,7 @@ mod tests {
     fn reschedule_shifts_the_queue_and_preserves_spacing() {
         let mut q = queue();
         for i in 0..5 {
-            q.push(frame(i * 16_000_000), 1_000 + i as u64 * 16_000_000);
+            push(&mut q, frame(i * 16_000_000), 1_000 + i as u64 * 16_000_000);
         }
 
         // The offset the audio side publishes moves by +250 ms.
@@ -315,14 +296,16 @@ mod tests {
     #[test]
     fn shift_moves_every_due_time_and_keeps_the_head() {
         let mut q = queue();
-        q.push(
+        push(
+            &mut q,
             TestFrame {
                 pts_ns: 0,
                 bytes: 1,
             },
             1_000,
         );
-        q.push(
+        push(
+            &mut q,
             TestFrame {
                 pts_ns: 40,
                 bytes: 1,
@@ -346,7 +329,7 @@ mod tests {
     #[test]
     fn a_frame_in_the_future_waits() {
         let mut q = queue();
-        q.push(frame(0), 100_000_000);
+        push(&mut q, frame(0), 100_000_000);
         assert_eq!(
             q.due_now(50_000_000, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Wait(50_000_000))
@@ -357,7 +340,7 @@ mod tests {
     #[test]
     fn slack_emits_rather_than_sleeping_again() {
         let mut q = queue();
-        q.push(frame(0), 100_000_000);
+        push(&mut q, frame(0), 100_000_000);
 
         // Exactly one slack unit out: emit.
         let now = 100_000_000 - consts::VIDEO_PACING_SLACK_NS as u64;
@@ -375,7 +358,7 @@ mod tests {
     #[test]
     fn a_due_or_late_frame_emits() {
         let mut q = queue();
-        q.push(frame(0), 100_000_000);
+        push(&mut q, frame(0), 100_000_000);
         assert_eq!(
             q.due_now(100_000_000, consts::VIDEO_PACING_SLACK_NS, true),
             Some(DueVerdict::Emit)
@@ -390,8 +373,8 @@ mod tests {
     #[test]
     fn over_the_hard_ceiling_emits_early_and_counts_an_overflow() {
         let mut q = PacingQueue::new(i64::MAX, 2, usize::MAX);
-        q.push(frame(0), 1_000_000_000);
-        q.push(frame(1), 1_016_000_000);
+        push(&mut q, frame(0), 1_000_000_000);
+        push(&mut q, frame(1), 1_016_000_000);
         assert!(!q.has_room());
 
         // Not remotely due, but a memory ceiling binds.
@@ -417,8 +400,8 @@ mod tests {
     #[test]
     fn a_hard_ceiling_does_not_emit_early_while_early_is_forbidden() {
         let mut q = PacingQueue::new(i64::MAX, 2, usize::MAX);
-        q.push(frame(0), 1_000_000_000);
-        q.push(frame(1), 1_016_000_000);
+        push(&mut q, frame(0), 1_000_000_000);
+        push(&mut q, frame(1), 1_016_000_000);
         assert!(!q.has_room(), "at the hard ceiling");
 
         // Allowed: the ceiling forces it out.
@@ -436,18 +419,15 @@ mod tests {
         assert_eq!(q.overflows(), 1);
     }
 
-    /// The distinction the packet-paced design rests on: holding the decode
-    /// lead is the normal steady state and must never emit a frame early.
-    /// Before the split, "full" meant both things, so a Target Buffer that
-    /// needed more decoded frames than the byte ceiling allowed degraded into
-    /// permanent early emission instead of just decoding later.
+    /// Holding the decode lead is the normal steady state and must never emit
+    /// a frame early; only a memory ceiling does.
     #[test]
     fn reaching_the_decode_lead_stops_intake_without_emitting_early() {
         // 100ms of lead, 30fps frames, no memory ceiling in reach.
         let mut q = PacingQueue::new(100_000_000, usize::MAX, usize::MAX);
         let mut pts = 0;
         while q.has_room() {
-            q.push(frame(pts), 1_000_000_000 + pts as u64);
+            push(&mut q, frame(pts), 1_000_000_000 + pts as u64);
             pts += 33_000_000;
         }
         assert!(q.span_ns() >= 100_000_000, "span {}", q.span_ns());
@@ -466,9 +446,9 @@ mod tests {
     fn the_span_is_the_media_time_held() {
         let mut q = PacingQueue::new(i64::MAX, usize::MAX, usize::MAX);
         assert_eq!(q.span_ns(), 0);
-        q.push(frame(1_000), 0);
+        push(&mut q, frame(1_000), 0);
         assert_eq!(q.span_ns(), 0);
-        q.push(frame(34_000_000), 0);
+        push(&mut q, frame(34_000_000), 0);
         assert_eq!(q.span_ns(), 33_999_000);
     }
 
@@ -476,7 +456,7 @@ mod tests {
     fn peak_is_a_high_water_mark() {
         let mut q = queue();
         for i in 0..7 {
-            q.push(frame(i), 0);
+            push(&mut q, frame(i), 0);
         }
         assert_eq!(q.peak(), 7);
         for _ in 0..7 {
@@ -484,7 +464,7 @@ mod tests {
         }
         assert_eq!(q.len(), 0);
         assert_eq!(q.peak(), 7, "peak survives the drain");
-        q.push(frame(99), 0);
+        push(&mut q, frame(99), 0);
         assert_eq!(q.peak(), 7);
     }
 
@@ -492,7 +472,7 @@ mod tests {
     fn drain_returns_every_frame_in_order() {
         let mut q = queue();
         for i in 0..4 {
-            q.push(frame(i * 1000), 0);
+            push(&mut q, frame(i * 1000), 0);
         }
         let frames = q.drain();
         assert_eq!(
@@ -503,14 +483,5 @@ mod tests {
         assert_eq!(q.bytes(), 0);
         assert!(q.has_room());
         assert_eq!(q.drain().len(), 0);
-    }
-
-    #[test]
-    fn frames_come_back_in_push_order() {
-        let mut q = queue();
-        q.push(frame(10), 1);
-        q.push(frame(20), 2);
-        assert_eq!(q.pop().unwrap().pts_ns, 10);
-        assert_eq!(q.pop().unwrap().pts_ns, 20);
     }
 }

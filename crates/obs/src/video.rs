@@ -40,23 +40,18 @@ impl VideoFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorSpace {
-    Default,
     Bt601,
     Bt709,
-    Srgb,
     Pq2100,
     Hlg2100,
 }
 
 impl ColorSpace {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::video_colorspace {
+    fn to_sys(self) -> obs_sys::video_colorspace {
         use obs_sys::video_colorspace as C;
         match self {
-            Self::Default => C::VIDEO_CS_DEFAULT,
             Self::Bt601 => C::VIDEO_CS_601,
             Self::Bt709 => C::VIDEO_CS_709,
-            Self::Srgb => C::VIDEO_CS_SRGB,
             Self::Pq2100 => C::VIDEO_CS_2100_PQ,
             Self::Hlg2100 => C::VIDEO_CS_2100_HLG,
         }
@@ -65,17 +60,14 @@ impl ColorSpace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorRange {
-    Default,
     Partial,
     Full,
 }
 
 impl ColorRange {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::video_range_type {
+    fn to_sys(self) -> obs_sys::video_range_type {
         use obs_sys::video_range_type as R;
         match self {
-            Self::Default => R::VIDEO_RANGE_DEFAULT,
             Self::Partial => R::VIDEO_RANGE_PARTIAL,
             Self::Full => R::VIDEO_RANGE_FULL,
         }
@@ -95,10 +87,9 @@ pub struct VideoFrame<'a> {
 impl<'a> VideoFrame<'a> {
     #[must_use]
     pub fn new(width: u32, height: u32, format: VideoFormat) -> Self {
-        // `struct obs_source_frame` has no niche-carrying member (raw
+        // SAFETY: `struct obs_source_frame` has no niche-carrying member (raw
         // pointers, integers, floats, bools and one `volatile long` libobs
-        // resets itself), so an all-zero value is a valid one — the same
-        // `memset(&frame, 0, sizeof frame)` the C plugin does.
+        // resets itself), so an all-zero value is a valid one.
         let mut inner: obs_sys::obs_source_frame = unsafe { core::mem::zeroed() };
         inner.width = width;
         inner.height = height;
@@ -135,15 +126,11 @@ impl<'a> VideoFrame<'a> {
     }
 
     /// Fill `color_matrix`, `color_range_min/max` and `full_range` through
-    /// `video_format_get_parameters_for_format` (the C `setup_color_params`).
-    /// Falls back to BT.709 when libobs rejects the colour space, and to
-    /// BT.709 limited range when it rejects the range as well.
-    ///
-    /// The C version ignores the return value, which leaves an all-zero matrix
-    /// behind for a combination libobs does not know. That is harmless for an
-    /// RGB frame (no conversion shader reads the matrix) but black for a YUV
-    /// one, so the retries are added here; `full_range` is kept consistent
-    /// with whichever range actually produced the matrix.
+    /// `video_format_get_parameters_for_format`. Falls back to BT.709 when
+    /// libobs rejects the colour space, and to BT.709 limited range when it
+    /// rejects the range as well: a combination libobs does not know leaves
+    /// an all-zero matrix, which renders a YUV frame black. `full_range`
+    /// follows whichever range produced the matrix.
     #[must_use]
     pub fn colorimetry(mut self, cs: ColorSpace, range: ColorRange) -> Self {
         self.inner.full_range = range == ColorRange::Full;

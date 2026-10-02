@@ -8,8 +8,7 @@ pub enum AudioFormat {
 }
 
 impl AudioFormat {
-    #[must_use]
-    pub fn to_sys(self) -> obs_sys::audio_format {
+    fn to_sys(self) -> obs_sys::audio_format {
         match self {
             // Interleaved 32-bit float: the only format the plugin submits,
             // because swresample always converts to it first.
@@ -18,9 +17,9 @@ impl AudioFormat {
     }
 }
 
-/// `enum speaker_layout`. [`SpeakerLayout::from_channels`] reproduces the C
-/// plugin's `(enum speaker_layout)channels` cast for the values libobs
-/// defines (1, 2, 3, 4, 5, 6, 8) and yields `Unknown` otherwise.
+/// `enum speaker_layout`. [`SpeakerLayout::from_channels`] maps a channel
+/// count to the layout with the same value for the counts libobs defines
+/// (1, 2, 3, 4, 5, 6, 8) and yields `Unknown` otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeakerLayout {
     Unknown,

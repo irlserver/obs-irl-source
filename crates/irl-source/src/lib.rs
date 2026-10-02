@@ -1,7 +1,5 @@
-//! obs-irl-source — IRL streaming source plugin for OBS Studio.
-//!
-//! Module entry points and the source registration. Everything unsafe lives
-//! in the `obs` and `ffmpeg` crates; this crate is plain safe Rust.
+//! The IRL Source plugin for OBS Studio: module entry points and the source
+//! registration. Everything unsafe lives in the `obs` and `ffmpeg` crates.
 
 #![forbid(unsafe_code)]
 

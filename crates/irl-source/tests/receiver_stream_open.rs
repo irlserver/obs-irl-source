@@ -29,7 +29,7 @@ fn opening_a_missing_file_fails_with_a_hard_error() {
 
     // The receiver logs `av_strerror` text and reconnects; neither EAGAIN nor
     // EOF, which are the two codes the decode path treats as "not an error".
-    assert!(err.code() < 0);
+    assert!(err.0 < 0);
     assert!(!err.is_eagain());
     assert!(!err.is_eof());
     assert!(!err.to_string().is_empty());
@@ -45,7 +45,7 @@ fn an_unknown_protocol_fails_rather_than_hanging() {
     .err()
     .expect("an unknown protocol must fail");
 
-    assert!(err.code() < 0);
+    assert!(err.0 < 0);
     assert!(!err.is_eagain());
 }
 
@@ -62,22 +62,12 @@ fn a_stopped_run_aborts_the_open() {
 }
 
 /// The demuxer option table the open feeds `av_dict_set` is the same one
-/// `irl-core` pins; this checks the receiver's two call-site arguments (the
-/// constant network buffer and the fast/full probe switch) reach it.
+/// `irl-core` pins; this checks the receiver's fast/full probe switch reaches
+/// it.
 #[test]
 fn the_probe_budget_follows_the_fast_probe_flag() {
-    let fast = irl_core::url_opts::demuxer_options(
-        "srt://127.0.0.1:9000",
-        None,
-        consts::NETWORK_BUFFER_MB,
-        true,
-    );
-    let full = irl_core::url_opts::demuxer_options(
-        "srt://127.0.0.1:9000",
-        None,
-        consts::NETWORK_BUFFER_MB,
-        false,
-    );
+    let fast = irl_core::url_opts::demuxer_options("srt://127.0.0.1:9000", None, true);
+    let full = irl_core::url_opts::demuxer_options("srt://127.0.0.1:9000", None, false);
 
     let probesize = |opts: &[(
         std::borrow::Cow<'static, str>,

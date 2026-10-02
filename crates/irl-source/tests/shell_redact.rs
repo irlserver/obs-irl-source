@@ -1,5 +1,5 @@
-//! Input-URL redaction (port of master 706372c): log lines keep the endpoint
-//! identity, never credentials.
+//! Input-URL redaction: log lines keep the endpoint identity, never
+//! credentials.
 
 use obs_irl_source::log::redacted_input_url;
 

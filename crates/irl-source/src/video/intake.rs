@@ -1,29 +1,15 @@
-//! Decoded video intake (port of `irl_handle_video_frame`,
-//! `receiver-video.c:289-438`).
-//!
-//! Runs on the **video** thread, not the receiver: decode moved there so that
-//! the stream's latency can be held as compressed packets rather than decoded
-//! frames, and so that a receiver blocked in `av_read_frame` during a network
-//! stall cannot stop video from draining the buffer it already has.
+//! Decoded video intake. Runs on the video thread, next to the decoder (see
+//! [`crate::video::decode`] for why that is not the receiver).
 
 use std::sync::atomic::Ordering::Relaxed;
 
 use irl_core::video_time;
 
 use crate::shared::Shared;
-use crate::video::output;
 
-/// Nanosecond time base every queued PTS is rescaled into: the video thread
-/// must not touch the format context, which the receiver frees on reconnect
-/// while decoded frames may still be in flight.
-const NS_TIME_BASE: ffmpeg::Rational = ffmpeg::Rational::new(1, 1_000_000_000);
-
-/// Video-thread-owned decode and intake state.
-///
-/// The C kept all of it on `struct irl_source` under the receiver's lock
-/// discipline. Only the two flags the audio path also touches are shared
-/// ([`crate::shared::VideoFlags`]); everything here belongs to one thread and
-/// needs no synchronisation at all.
+/// Video-thread-owned decode and intake state. Only the two flags the audio
+/// path also touches are shared ([`crate::shared::VideoFlags`]); everything
+/// here belongs to one thread.
 #[derive(Default)]
 pub struct DecodeState {
     /// Packet-level keyframe gate: the decoder is not fed until a key packet
@@ -52,9 +38,8 @@ impl DecodeState {
         *self = Self::default();
     }
 
-    /// The video half of `irl_reset_stream_timing_state`: an audio PTS reset
-    /// broke the timeline, so the interval estimate and the decoder-error
-    /// bookkeeping no longer describe this stream.
+    /// An audio PTS reset broke the timeline, so the interval estimate and the
+    /// decoder-error bookkeeping no longer describe this stream.
     ///
     /// The keyframe gates are deliberately untouched — the connection did not
     /// change and video has not lost its reference frames.
@@ -89,11 +74,11 @@ pub fn handle_frame(
     };
 
     let (width, height) = (frame.width(), frame.height());
-    let is_key = output::is_keyframe(frame);
+    let is_key = frame.is_key();
     let first_keyframe = shared.video_flags.first_keyframe.load(Relaxed);
 
-    // The frame-level backstop only gates when Wait For Keyframe is on
-    // (master 64dcd0f); the first-keyframe bookkeeping runs either way.
+    // The frame-level backstop only gates when Wait For Keyframe is on; the
+    // first-keyframe bookkeeping runs either way.
     if !first_keyframe && !is_key && shared.hot.wait_for_keyframe.load(Relaxed) {
         if shared.conn.total_video_frames.load(Relaxed) == 0 {
             irl_debug!("Waiting for keyframe (dropped non-keyframe)");
@@ -133,9 +118,6 @@ pub fn handle_frame(
     // until the next IDR/CRA.
     let frame_corrupt = frame.is_corrupt();
     let frame_damaged = frame_corrupt || frame.decode_error_flags() != 0;
-    if frame_damaged {
-        shared.conn.video_corrupt_frames.fetch_add(1, Relaxed);
-    }
 
     // HEVC has no error concealment: a reference that never arrived is
     // synthesized as a flat mid-gray picture (hevc/refs.c
@@ -197,10 +179,10 @@ pub fn handle_frame(
     // Convert PTS to nanoseconds against the time base the decoder was opened
     // with, which travels with it rather than being read off a format context
     // this thread does not own.
-    let pts_ns = ffmpeg::rescale_q(pts, tb, NS_TIME_BASE);
+    let pts_ns = ffmpeg::rescale_q(pts, tb, ffmpeg::NS_TIME_BASE);
 
-    // Frame interval EMA, for the estimate of how many frames a given output
-    // lead parks in the libobs async queue. Measured rather than taken from
+    // Frame interval EMA, for the frame rate the stats line reports and the
+    // lead warning's frame budget. Measured rather than taken from
     // avg_frame_rate, which live SRT/RTMP demuxers routinely leave unset or
     // wrong. Out-of-range deltas (PTS repair, discontinuities, reordering) are
     // skipped rather than smoothed in.
@@ -208,10 +190,6 @@ pub fn handle_frame(
     let measurable = state.prev_pts_ns != 0;
     state.prev_pts_ns = pts_ns;
 
-    {
-        let mut audio = shared.audio_state();
-        audio.latest_video_stream_pts_ns = pts_ns;
-    }
     if measurable {
         let prev = shared.conn.video_frame_interval_ns.load(Relaxed);
         shared

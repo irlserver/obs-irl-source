@@ -35,7 +35,7 @@ use std::sync::OnceLock;
 
 use irl_core::consts::SOURCE_ID;
 use irl_provider::{Catalog, Hooks, Ingest, Level};
-use obs::{ClickAction, ComboType, Data, ModifiedAction, Properties, PropertiesRef, TextType};
+use obs::{ClickAction, Data, ModifiedAction, Properties, PropertiesRef, TextType};
 use parking_lot::Mutex;
 
 use crate::module_text;
@@ -228,7 +228,7 @@ pub fn add_properties(props: &Properties, instance: Option<&IrlSource>) {
     let saved = instance.map(|i| i.handle().settings());
     let saved = saved.as_ref().map(|d| d.data());
 
-    let list = props.add_string_list(KEY_PROVIDER, module_text(c"Provider"), ComboType::List);
+    let list = props.add_string_list(KEY_PROVIDER, module_text(c"Provider"));
     list.add(module_text(c"Provider.Manual"), c"");
     for (i, provider) in catalog().providers().iter().enumerate() {
         list.add(&cstring(&provider.name), &cstring(Slot::Listed(i).value()));
@@ -272,11 +272,7 @@ pub fn add_properties(props: &Properties, instance: Option<&IrlSource>) {
             continue;
         }
         if signed_in {
-            let picker = props.add_string_list(
-                &slot.key(PREFIX_INGEST),
-                module_text(c"Ingest"),
-                ComboType::List,
-            );
+            let picker = props.add_string_list(&slot.key(PREFIX_INGEST), module_text(c"Ingest"));
             picker.add(module_text(c"Ingest.Pick"), c"");
             for ingest in view.iter().flat_map(|v| &v.ingests) {
                 picker.add(&cstring(&label(ingest)), &cstring(&ingest.id));

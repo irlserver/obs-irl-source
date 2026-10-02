@@ -26,14 +26,11 @@ pub fn gettime_ns() -> u64 {
 /// Deliberately `std::thread::sleep` and not libobs's `os_sleep_ms`. On
 /// Windows 8+ that function subtracts one millisecond before calling `Sleep`
 /// to compensate for the scheduler's coarse timer, so `os_sleep_ms(1)` is
-/// `Sleep(0)`: a yield, not a wait. The audio pump's minimum wait is 1 ms,
-/// which turned every idle source into a busy loop pinning a core, and the
-/// last millisecond before an audio deadline into a spin. `std::thread::sleep`
-/// never returns early, and on Windows 10 1803+ it uses a high-resolution
-/// waitable timer, so 1 ms means about 1 ms rather than a 15.6 ms quantum.
-///
-/// Only the waiting moves off libobs; timestamps still come from
-/// [`gettime_ns`].
+/// `Sleep(0)`: a yield, not a wait. With the audio pump's 1 ms minimum wait
+/// that makes every idle source a busy loop pinning a core.
+/// `std::thread::sleep` never returns early, and on Windows 10 1803+ it uses
+/// a high-resolution waitable timer, so 1 ms means about 1 ms rather than a
+/// 15.6 ms quantum. Timestamps still come from [`gettime_ns`].
 pub fn sleep_ms(ms: u32) {
     std::thread::sleep(std::time::Duration::from_millis(u64::from(ms)));
 }

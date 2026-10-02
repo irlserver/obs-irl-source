@@ -2,43 +2,25 @@
 //! video which leaves the sender behind its audio is in hand when the two are
 //! due.
 //!
-//! Plenty of senders hand the transport their audio before the video of the
-//! same instant, both stamped with the capture time. A hardware encoder runs
-//! a few frames behind the microphone, pocketSRT queues its audio about 300 ms
-//! ahead of its deadline, and a phone with video stabilization on sends each
-//! frame a second or more after its sound (#33). At the receiver that shows as
-//! video with PTS `P` arriving long after audio with PTS `P`. Audio plays
-//! Target Buffer plus the output lead after it arrives, so once the skew is
-//! more than that, the picture for a sound is not here yet when the sound
-//! plays. Nothing done to the video schedule can fix it: a frame cannot be
-//! shown before it arrives, and the standing video delay
-//! ([`crate::video_delay`]) only trades the lateness for a fixed lip-sync
-//! error. The audio has to wait for the picture, which is what the media
-//! source does by pacing both streams on their PTS.
+//! Many senders hand the transport their audio before the video of the same
+//! instant (pocketSRT queues audio ~300 ms early, a stabiliser sends video a
+//! second or more late, #33). Once the skew exceeds Target Buffer plus the
+//! output lead, the picture for a sound is not here when the sound plays, and
+//! no video schedule can fix that: the audio has to wait. So the jitter
+//! buffer's target is raised by the uncovered part of the skew plus a margin.
+//! Before priming that only starts audio later; after it the speed controller
+//! builds the cushion at -2 % while the video delay ([`crate::video_delay`])
+//! bridges the gap.
 //!
-//! So the jitter buffer's target is raised by the part of the skew that Target
-//! Buffer and the output lead do not already cover, plus a margin. Before
-//! playback primes that costs nothing audible: audio simply starts later,
-//! together with the picture. After it, the speed controller builds the extra
-//! cushion by playing at its inaudible -2 %, and the video delay bridges the
-//! gap until it has (the video thread hands the delay back as the cushion
-//! grows, so the picture never jumps).
+//! The skew is measured in mux order (each video packet's timestamp against
+//! the newest audio PTS decoded before it), so loss and stalls, which delay
+//! both streams together, leave it alone. The caller measures only once video
+//! is live (`crate::arrival`), which keeps a relay's keyframe replay out.
 //!
-//! The skew is measured in mux order: each video packet's timestamp against
-//! the newest audio PTS decoded before it. Audio and video travel in one mux,
-//! so loss, throttling and a stall delay them together and leave the reading
-//! alone; only the sender, or a relay replaying video from its last keyframe
-//! next to live audio, moves it. The caller keeps the second case out by
-//! measuring only once video is live (`crate::arrival`).
-//!
-//! What is raised and what is released are deliberately different readings.
-//! A raise takes the *sustained* skew, the lowest reading across
-//! [`HoldTuning::raise_window_ns`]: a skew that was there the whole window. A
-//! burst of late video from a hiccup at the sender is short, the video delay
-//! covers it, and paying for it in latency for the rest of the connection
-//! would be the wrong trade. A release takes the *worst* reading across the
-//! much longer [`HoldTuning::relax_window_ns`], so it never undercuts a skew
-//! seen recently, and the hold does not pump up and down with one.
+//! A raise takes the *lowest* reading across `AUDIO_HOLD_RAISE_WINDOW_MS`, so
+//! a short burst of late video stays the video delay's to cover. A release
+//! takes the *worst* reading across the longer `AUDIO_HOLD_RELAX_WINDOW_MS`,
+//! so the hold does not pump up and down.
 
 use std::collections::VecDeque;
 
@@ -57,37 +39,8 @@ pub fn hold_ms(skew_ms: i64, covered_ms: i32, margin_ms: i32, max_ms: i32) -> i3
     need_ms.clamp(0, i64::from(max_ms)) as i32
 }
 
-/// The thresholds a hold is decided with. [`Default`] is the shipped tuning
-/// out of [`crate::consts`].
-#[derive(Debug, Clone, Copy)]
-pub struct HoldTuning {
-    /// How early video should be in hand once the hold is in force.
-    pub margin_ms: i32,
-    /// Ceiling on the hold.
-    pub max_ms: i32,
-    /// How long a skew must have lasted, unbroken, to raise the hold.
-    pub raise_window_ns: u64,
-    /// Raises smaller than this are not made after priming.
-    pub raise_min_ms: i32,
-    /// How long every reading must have needed less than the hold in force
-    /// before it is released down to what they needed.
-    pub relax_window_ns: u64,
-    /// Surplus below this is left alone.
-    pub relax_min_ms: i32,
-}
-
-impl Default for HoldTuning {
-    fn default() -> Self {
-        Self {
-            margin_ms: consts::AUDIO_HOLD_MARGIN_MS,
-            max_ms: consts::AUDIO_HOLD_MAX_MS,
-            raise_window_ns: consts::AUDIO_HOLD_RAISE_WINDOW_MS * 1_000_000,
-            raise_min_ms: consts::AUDIO_HOLD_RAISE_MIN_MS,
-            relax_window_ns: consts::AUDIO_HOLD_RELAX_WINDOW_MS * 1_000_000,
-            relax_min_ms: consts::AUDIO_HOLD_RELAX_MIN_MS,
-        }
-    }
-}
+const RAISE_WINDOW_NS: u64 = consts::AUDIO_HOLD_RAISE_WINDOW_MS * 1_000_000;
+const RELAX_WINDOW_NS: u64 = consts::AUDIO_HOLD_RELAX_WINDOW_MS * 1_000_000;
 
 /// A change of the hold, for the caller to apply and log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +58,6 @@ pub struct HoldChange {
 /// The skew readings of one connection and the decisions they support.
 #[derive(Debug)]
 pub struct AudioHold {
-    tuning: HoldTuning,
     /// When the first reading was taken; the windows only count once they
     /// are full.
     first_ns: Option<u64>,
@@ -116,16 +68,6 @@ pub struct AudioHold {
 }
 
 impl AudioHold {
-    /// No readings yet.
-    pub fn new(tuning: HoldTuning) -> Self {
-        Self {
-            tuning,
-            first_ns: None,
-            lowest: WindowExtreme::new(tuning.raise_window_ns, Extreme::Lowest),
-            highest: WindowExtreme::new(tuning.relax_window_ns, Extreme::Highest),
-        }
-    }
-
     /// Forget every reading: a new connection, or a timeline that broke so
     /// that the old readings no longer compare with the new ones.
     pub fn reset(&mut self) {
@@ -160,22 +102,22 @@ impl AudioHold {
 
     /// Once playback runs and the buffer is regulated by playback speed: a
     /// raise when the skew sustained across the raise window needs at least
-    /// [`HoldTuning::raise_min_ms`] more than `current_ms`, or a release when
+    /// `AUDIO_HOLD_RAISE_MIN_MS` more than `current_ms`, or a release when
     /// the worst reading across the relax window needs less than it by more
-    /// than [`HoldTuning::relax_min_ms`].
+    /// than `AUDIO_HOLD_RELAX_MIN_MS`.
     pub fn regulate(&self, now_ns: u64, current_ms: i32, covered_ms: i32) -> Option<HoldChange> {
         let since_ns = now_ns.saturating_sub(self.first_ns?);
-        if since_ns >= self.tuning.raise_window_ns
+        if since_ns >= RAISE_WINDOW_NS
             && let Some(skew_ns) = self.lowest.value()
             && let Some(change) = self.sized(skew_ns, current_ms, covered_ms)
-            && change.to_ms >= current_ms + self.tuning.raise_min_ms
+            && change.to_ms >= current_ms + consts::AUDIO_HOLD_RAISE_MIN_MS
         {
             return Some(change);
         }
-        if since_ns >= self.tuning.relax_window_ns
+        if since_ns >= RELAX_WINDOW_NS
             && let Some(skew_ns) = self.highest.value()
             && let Some(change) = self.sized(skew_ns, current_ms, covered_ms)
-            && change.to_ms + self.tuning.relax_min_ms < current_ms
+            && change.to_ms + consts::AUDIO_HOLD_RELAX_MIN_MS < current_ms
         {
             return Some(change);
         }
@@ -184,25 +126,26 @@ impl AudioHold {
 
     fn sized(&self, skew_ns: i64, current_ms: i32, covered_ms: i32) -> Option<HoldChange> {
         let skew_ms = skew_ns / 1_000_000;
-        let to_ms = hold_ms(
-            skew_ms,
-            covered_ms,
-            self.tuning.margin_ms,
-            self.tuning.max_ms,
-        );
-        let wanted_ms = skew_ms + i64::from(self.tuning.margin_ms) - i64::from(covered_ms);
+        let (margin_ms, max_ms) = (consts::AUDIO_HOLD_MARGIN_MS, consts::AUDIO_HOLD_MAX_MS);
+        let to_ms = hold_ms(skew_ms, covered_ms, margin_ms, max_ms);
+        let wanted_ms = skew_ms + i64::from(margin_ms) - i64::from(covered_ms);
         (to_ms != current_ms).then_some(HoldChange {
             from_ms: current_ms,
             to_ms,
             skew_ms,
-            capped: wanted_ms > i64::from(self.tuning.max_ms),
+            capped: wanted_ms > i64::from(max_ms),
         })
     }
 }
 
 impl Default for AudioHold {
+    /// No readings yet.
     fn default() -> Self {
-        Self::new(HoldTuning::default())
+        Self {
+            first_ns: None,
+            lowest: WindowExtreme::new(RAISE_WINDOW_NS, Extreme::Lowest),
+            highest: WindowExtreme::new(RELAX_WINDOW_NS, Extreme::Highest),
+        }
     }
 }
 

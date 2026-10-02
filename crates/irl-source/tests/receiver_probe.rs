@@ -1,10 +1,8 @@
 //! Hardware-decode probe order, the forced-NVDEC pixel format decision and the
 //! reconnect countdown (`src/receiver/probe.rs`).
 //!
-//! The module is included by path rather than imported: `crate::receiver` is
-//! private to the plugin crate and an integration test is a separate crate.
-//! `probe.rs` depends on nothing but the `ffmpeg` crate, so the copy behaves
-//! identically to the one the plugin builds.
+//! The module is included by path. It depends on nothing but the `ffmpeg`
+//! crate, so the copy behaves identically to the one the plugin builds.
 
 #[path = "../src/receiver/probe.rs"]
 mod probe;
@@ -93,8 +91,8 @@ fn nvdec_format_selection_skips_software_formats() {
     match cuda_formats(&codec).first().copied() {
         Some(cuda) => {
             // The CUDA format wins even when a software format is offered
-            // first: the C loop returns the first *offered* format that any
-            // CUDA config declares.
+            // first: the first *offered* format that any CUDA config declares
+            // is returned.
             assert_eq!(
                 probe::pick_cuda_format(&codec, &[AVPixelFormat::AV_PIX_FMT_YUV420P, cuda]),
                 cuda

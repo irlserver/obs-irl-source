@@ -2,24 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project overview
+## Project
 
-IRL Source is a third-party OBS Studio plugin (Rust 2024, AGPL-3.0) for receiving live IRL streams over SRT, RTMP, RIST, or any FFmpeg-supported protocol. It solves IRL-specific problems: audio jitter buffering, PTS discontinuity repair, adaptive playback speed, keyframe gating, hardware-accelerated decoding, and mid-stream resolution changes.
+IRL Source is a third-party OBS Studio plugin (Rust 2024, AGPL-3.0) that receives live IRL streams over SRT, RTMP, RIST or any FFmpeg-supported protocol. It handles what IRL feeds need: audio jitter buffering, PTS repair, adaptive playback speed, keyframe gating, hardware decoding, mid-stream resolution changes and lip sync for senders whose video trails their audio.
 
-Version 2.0.0 is a full port of the 1.x C plugin. The C tree is gone; its last commit (`c727912`) is the specification, and `git show c727912:src/<file>.c` is the way to check what the original did. Behaviour is identical apart from the deliberate deviations listed at the bottom of this file.
+Read `docs/architecture.md` before changing threads, timing or A/V sync. Read `docs/audio-timing-pitfalls.md` before touching `crates/irl-core/src/speed.rs`.
 
-## Build commands
+## Build
 
-cargo drives everything; there is no CMake. Two prerequisites:
+cargo drives everything. Two prerequisites:
 
-1. **The bundled media stack.** The plugin statically links its own FFmpeg, libsrt, librist and mbedTLS (see `deps/README.md`), so `./deps/build-deps.sh` runs first. It is incremental, so this is a one-time cost per version bump. It writes `deps/.build/prefix/irl-deps.env`, which `crates/ffmpeg/build.rs` replays as link lines.
-2. **libclang.** `ffmpeg-sys-next` runs bindgen over the bundled headers at build time.
-
-libobs is neither built nor linked. `crates/obs-sys` declares the ~58 functions the plugin uses and the symbols resolve against the host OBS process at load time (`raw-dylib` from `obs.dll` on Windows, undefined symbols elsewhere). `libobs-dev` is only needed to *test*.
-
-### Linux
+1. **The bundled media stack.** The plugin statically links its own FFmpeg, libsrt, librist and mbedTLS (`deps/README.md`). Run `./deps/build-deps.sh` once per version bump. It writes `deps/.build/prefix/irl-deps.env`, which `crates/ffmpeg/build.rs` replays as link lines. On Windows it runs inside MSYS2 with the MSVC environment active; see the `windows-x64` job in `.github/workflows/build.yml`.
+2. **libclang**, for bindgen in `ffmpeg-sys-next`. Set `LIBCLANG_PATH` on Windows and macOS.
 
 ```bash
+# Linux
 sudo apt install build-essential cmake pkg-config nasm meson ninja-build \
     clang libclang-dev libobs-dev libva-dev
 ./deps/build-deps.sh
@@ -27,248 +24,71 @@ cargo build --release
 ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
 ```
 
-### Windows (MSVC)
+libobs is never linked; `libobs-dev` is only needed to run tests. `.cargo/config.toml` sets `FFMPEG_DIR` to `deps/.build/prefix`; override it and `IRL_DEPS_PREFIX` to build against another prefix. `rust-toolchain.toml` pins stable; the plugin must never need nightly.
 
-`deps/build-deps.sh` runs inside MSYS2 with the MSVC environment active (FFmpeg's configure needs a POSIX shell even when driving `cl.exe`); the cargo build runs from a normal MSVC prompt. See the `windows-x64` job in `.github/workflows/build.yml` for the exact setup.
-
-```powershell
-$env:LIBCLANG_PATH = "$env:ProgramFiles\LLVM\bin"
-cargo build --release
-```
-
-### macOS (Apple Silicon)
+`make` runs every gate with an explicit config out of `.config/`, so a machine's global settings cannot change the result:
 
 ```bash
-brew install cmake pkg-config nasm meson ninja
-export LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib
-./deps/build-deps.sh
-cargo build --release
-./scripts/verify-plugin.sh target/release/libobs_irl_source.dylib
-```
-
-### Environment
-
-`FFMPEG_DIR` is set to `deps/.build/prefix` by `.cargo/config.toml` (relative, `force = false`), which keeps ffmpeg-sys-next on its prebuilt-tree branch instead of probing pkg-config. Override it, and `IRL_DEPS_PREFIX`, to build against a prefix produced elsewhere. `rust-toolchain.toml` pins the stable toolchain; the plugin must never need nightly.
-
-### Everything else
-
-```bash
-cargo xlint     # clippy --workspace --all-targets -- -D warnings
-cargo xtest     # test --workspace
-cargo test -p obs-sys --features layout-test   # struct layouts vs real libobs headers
-cargo build --release -p irl-source --features deadlocks
-scripts/package.sh linux target/release dist   # the release archive, locally
-```
-
-`make` wraps the same gates plus the ones cargo does not cover, each with an explicit config out of `.config/` so a machine's global settings cannot change the result. `make style` is the only target that rewrites files; `cargo fmt` on its own picks the wrong width, so always go through the Makefile or pass `--config-path .config/rustfmt.toml`.
-
-```bash
-make style        # cargo fmt
-make style-check
-make lint         # cargo xlint
-make test         # cargo xtest
-make test-shim    # the libobs-dependent tests on macOS, against scripts/libobs-shim/
-make spell-check  # codespell
-make tls-provider # Cargo.lock still resolves rustls onto ring, not aws-lc-rs
 make check        # style-check + lint + test + spell-check + tls-provider, what CI runs
-make sim          # the speed-controller simulation; not a CI target
+make style        # the only target that rewrites files; plain `cargo fmt` picks the wrong width
+make test-shim    # libobs-dependent tests on macOS, against scripts/libobs-shim/
+make sim          # speed controller closed-loop simulation; run it whenever you touch speed.rs
+cargo test -p obs-sys --features layout-test       # struct layouts vs the real libobs headers
+cargo build --release -p irl-source --features deadlocks   # use whenever you touch threading
+scripts/package.sh linux target/release dist       # the release archive, locally
 ```
 
-`--features deadlocks` spawns parking_lot's deadlock detector at module load and logs any cycle with backtraces. It replaces the C build's `IRL_CHECKED_LOCKS`; use it whenever you touch the threading model. Development only.
+`scripts/verify-plugin.sh` asserts what a compile does not prove: no `libav*` dependency, nothing exported but `obs_module_*`, undefined symbols from libobs and libc only, and `#![forbid(unsafe_code)]` still on `irl-core` and `irl-source`. CI runs it on every build.
 
-`cargo build` names the artifact `libobs_irl_source.so` / `obs_irl_source.dll` / `libobs_irl_source.dylib`. `scripts/package.sh` is what renames it to `obs-irl-source.*` and stages the platform's install layout.
+## Layout
 
-`scripts/verify-plugin.sh` is not optional polish. It asserts what a successful compile does not prove: the binary carries no `libav*` dependency, it exports nothing but `obs_module_*`, its undefined symbols are libobs and libc only, and `#![forbid(unsafe_code)]` is still on `irl-core` and `irl-source`. CI runs it (and a `dumpbin` equivalent on Windows) on every build.
+- `crates/obs-sys`: hand-written libobs FFI, checked by `layout-test`.
+- `crates/obs`: the safe libobs API this plugin uses.
+- `crates/ffmpeg` (package `irl-ffmpeg`): RAII over `ffmpeg-sys-next`.
+- `crates/irl-core`: everything pure. Jitter buffer, PTS repair, speed controller, output clock, pacing, video delay, audio hold, stats table, tuning constants.
+- `crates/irl-provider`: the plugin side of `docs/provider-protocol.md`.
+- `crates/irl-source`: the plugin. `source.rs` (lifecycle), `settings.rs` (dialog), `providers.rs`, `config.rs`, `shared.rs` (per-run shared state), `receiver/`, `video/`, `audio/`, `websocket.rs`.
 
-## Architecture
+## Rules
 
-One cdylib, five workspace crates. The rule that shapes the split: **all unsafe code lives in `obs-sys`, `obs` and `ffmpeg`.** `irl-core` and `irl-source` carry `#![forbid(unsafe_code)]`, so no port of C pointer arithmetic can sneak in.
+- **Unsafe** lives only in `obs-sys`, `obs` and `ffmpeg`, and every `unsafe` block carries a `// SAFETY:` comment. If plugin code needs a raw pointer, add a safe wrapper in one of those crates.
+- **Lock order** is `audio_state` → `audio_buf` → `hot.watermarks`. `video.q` is never held together with any of them. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down; parking_lot mutexes are not recursive, so a nested acquire deadlocks.
+- **Clocks.** OBS timestamps come from `obs::time::gettime_ns`, never `std::time::Instant`. FFmpeg-side timers stay in the `av_gettime` microsecond domain. `irl-core` takes both as parameters so they cannot be mixed.
+- **Audio timestamps** submitted to OBS stay contiguous and the submitted sample rate never changes. Speed is applied inside the plugin. See `docs/architecture.md`.
+- **Panics** never cross an FFI boundary: `obs::panic::guard` wraps every `extern "C"` shim and `shared::spawn_worker` wraps every worker thread.
+- **Logging** goes through `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, never `blog` directly.
+- **URLs** never reach the log whole. Plugin lines go through `log::redacted_input_url`, FFmpeg's through `log::redacted_log_line`, because FFmpeg prints the user's URL (with `passphrase=` and `streamid=`) in its own errors.
+- **UI strings** never pass English to `module_text`. A new string goes in the call site and `data/locale/en-US.ini`; `tests/locale_keys.rs` checks both directions.
+- **Stats** are one table: a new stat is one line in `irl_core::stats::FIELDS` plus its `StatsSnapshot` field and `values()`. The proc, the calldata writer and the websocket loop walk the table. Update the README table too. A stat stays only if it diagnoses real issues.
+- **Tuning values** live in `irl_core::consts`, pinned by `consts_are_pinned`. Nothing else hardcodes a threshold.
+- **Frozen interface:** settings keys and defaults, the names of the stats, and the media-control behavior that NOALBS's `!fix` relies on. Log text is free to change.
+- **Source flags:** `OBS_SOURCE_AUDIO | OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_CONTROLLABLE_MEDIA`.
 
-| crate | what it is |
-| --- | --- |
-| `crates/obs-sys` | Hand-written libobs FFI: `#[repr(C)]` structs, `extern` declarations, constants. No safety, no abstraction. A `layout-test` feature runs bindgen over the real headers and asserts every field offset. |
-| `crates/obs` | Safe, plugin-agnostic libobs API: the `Source` trait and registration, `declare_module!`, `Data`/`Properties`/`CallData`/`ProcHandler`, `VideoFrame`/`AudioFrame` builders, scene transforms, the obs-websocket vendor helper, `panic::guard`. Knows nothing about IRL streaming. |
-| `crates/ffmpeg` | RAII over `ffmpeg-sys-next` (package `irl-ffmpeg`, lib name `ffmpeg`): `FormatContext`, `CodecContext`, `Frame`, `Packet`, `HwDeviceContext`, `FramePool`, `Resampler`, `Scaler`, `InterruptWatch`, and `log::route_to`, which hands the bundled FFmpeg's `av_log` to a caller-supplied sink. `build.rs` replays `irl-deps.env`. |
-| `crates/irl-core` | Everything that needs neither libobs nor FFmpeg: the jitter buffer, PTS repair, the speed controller, output-clock arithmetic, video pacing, demuxer options, config derivation, the stats table, every tuning constant. Plain data in, plain data out — and therefore the only crate with a real unit-test suite. |
-| `crates/irl-provider` | The plugin side of `docs/provider-protocol.md`: discovery, OAuth code + PKCE over a loopback redirect, the per-provider state file, the key-free ingest list, the resolve call, and the `Catalog` (the provider list, parsed from the shipped `providers.json`). `#![forbid(unsafe_code)]`, no libobs; the plugin hands it a state directory, a logger and a wake-the-dialogs callback through `init`. Pure parts are tested under `tests/` without a network. |
-| `crates/irl-source` | The plugin itself: module entry points, the source lifecycle and the three worker threads. |
+## Tests
 
-### Data flow
+- `irl-core` and `ffmpeg` have unit tests in each module. Everywhere else, tests live in `tests/`. The link arguments that resolve libobs only reach integration-test targets, so `crates/irl-source` sets `test = false` on its lib and `crates/obs` keeps its lib free of `#[cfg(test)]`. Shared fixtures for irl-source live in `crates/irl-source/tests/common/`.
+- Tests that touch libobs run on Linux. CI skips them on Windows and macOS. `calldata_*` is safe anywhere. On a Mac, `make test-shim` runs the pacing, audio-core and network tests against a four-function stand-in; plain `cargo test -p irl-source` there dies with SIGSEGV before its first assertion.
+- `tests/network_sim.rs` drives the real jitter buffer, PTS repair, speed controller, output clock and packet queue against a synthetic sender on a virtual clock (stall, burst, dropouts, a sender off wall clock, video behind audio). It asserts the design's promises: the OBS clock never jumps except across a declared restart, audio is never skipped once primed, latency does not ratchet, decoded memory does not grow with Target Buffer.
+- Where you read the buffer fill decides the number. It oscillates by one chunk within every cycle: before the pump's read it averages the target, after it a chunk lower. The stats line's `buf=` is a random sample of that oscillation.
+- `tests/video_pipeline.rs` reads the real clock and can flake under parallel load; rerun with `-- --test-threads=1` before suspecting the code.
+- Real-stream validation is manual: run the same feed through this build and a known-good one and compare the 30-second stats line field by field.
 
-```
-[receiver thread]: FFmpeg URL, demux
-  audio: decode, PTS repair, resample, write to jitter buffer
-  video: push the *compressed packet* onto the video queue
+## CI and releases
 
-[video thread]: decode packets as they come due, keyframe gate, HW frame
-                transfer, hold until due, format conversion,
-                OBS async video output
+`.github/workflows/build.yml` builds Linux x64 (Ubuntu 22.04, glibc 2.35, so the artifact loads in the Flatpak sandbox), Windows x64 and macOS ARM64. Each job builds the media stack (cached on `deps/versions.env` plus `deps/build-deps.sh`), then build, clippy, tests and the isolation checks. The Windows job also compiles the Inno Setup installer on every push. The Linux job installs OBS from `ppa:obsproject/obs-studio` only so test binaries have a `libobs.so`.
 
-[audio thread]: drain jitter buffer, speed correction, concealment,
-                OBS audio output
-```
+`api_version` in `declare_module!` is the oldest supported OBS line. libobs gates plugins on major and minor only, so one binary loads there and on every newer release. Raise it only to drop old OBS releases.
 
-### Audio output contract (verified against libobs source)
+Releases are tag driven (`RELEASING.md`). Pushing `vX.Y.Z` checks the tag against `[workspace.package] version`, builds, packages, and creates a draft release whose notes come from `scripts/changelog.sh`, grouped by conventional commit type. Commit subjects are the release notes, so write them as such.
 
-The audio core is built around three facts about libobs:
+## Shipped files
 
-1. OBS timestamps must be contiguous (`ts[n+1] = ts[n] + frames/rate`). Deviations under 70ms are smoothed, 70ms to 2s gaps are zero filled by OBS (audible), larger jumps flush all queued audio. The plugin therefore derives timestamps from a pure sample counter anchored once at prime time and never jumps the clock outside declared restarts.
-2. Changing `samples_per_sec` between submissions makes OBS destroy and recreate its per source resampler with no crossfade (a click per change). Playback speed is instead applied inside the plugin with a persistent swresample compensation, and the rate submitted to OBS never changes.
-3. The OBS mixer consumes 21.3ms ticks against wall clock. A source whose queued audio runs dry gets a tick of silence plus a time shifted splice (crackle), and a source that falls behind the mix window causes OBS to permanently add global audio buffering. After priming, the pump always emits (real audio or shaped concealment silence) and keeps a fixed lead ahead of wall clock.
-
-Buffer regulation happens through playback speed only, asymmetric like IRLToolkit's player: builds at an inaudible -2%, drains post-stall backlog at up to the Catch-Up Speed setting (+5% by default, mild chipmunk). The loop is PI, not P: a slow integral trim under the proportional ramp removes the standing error a sender whose media clock is not wall clock would otherwise leave, and it converges on the sender's rate without measuring it. `docs/audio-timing-pitfalls.md` is why every part of it is shaped the way it is, and is required reading before touching `speed.rs`. Content is never skipped once playback has primed. Backlog beyond a fill ceiling is pushed back into the transport by pausing the read loop (TCP/RTMP backpressure; SRT bounds itself via its latency window), and startup backlog is trimmed only before priming.
-
-### `crates/irl-core`
-
-| module | contents |
-| --- | --- |
-| `consts.rs` | Every tuning constant, with a test pinning the values to the C plugin's. Nothing else may hardcode a threshold. |
-| `audio_buffer.rs` | The jitter buffer: a ring sized in milliseconds with a parallel 256-entry PTS chunk queue. Carries no lock of its own; the caller's mutex is the lock. `resize` grows and never shrinks. |
-| `pts_repair.rs` | Three-tier discontinuity repair plus the relock path: small gaps interpolated, medium gaps get silence, large gaps reset the timeline. |
-| `speed.rs` | The PI playback-speed controller, regulating a ~2.5s EMA of the buffer level rather than the level itself (a batching upstream otherwise makes it modulate playback at the batch period): the proportional ramp (sloped deadband, EMA, asymmetric limits), `SpeedTrim` (the integral term, with its error window and anti-windup), `SpeedCarry` (the fractional output-sample debt that makes sub-0.1% speeds applicable at all) and `DrainWatch`, which notices a buffer that stopped draining. `examples/speed-controller-sim.rs` drives all of it closed-loop. |
-| `pacing.rs` | The video-thread pacing queue: a soft bound (the decode lead, in media time) that stops intake, and hard frame/byte ceilings that emit early; `reschedule` re-derives due times, `due_now` returns Emit / EmitEarly / Wait. |
-| `timing.rs` | Output-clock arithmetic: next timestamp, lead, expected samples, soft compensation, prime threshold. |
-| `dsp.rs` | Fades, shaped concealment silence, last-sample memory. |
-| `video_time.rs` | Mapping video PTS through the audio playout offset, the fallback anchor and its clamps, the frame-interval EMA. |
-| `audio_hold.rs` | `AudioHold`: how much longer than Target Buffer audio waits so that video which arrives behind its audio is in hand when due. Reads the skew in mux order, sizes the hold from the worst reading before priming, raises it afterwards only for a skew sustained across `AUDIO_HOLD_RAISE_WINDOW_MS` and releases it once `AUDIO_HOLD_RELAX_WINDOW_MS` of readings needed less. Pure decisions; `irl-source/src/audio/hold.rs` applies them. |
-| `arrival.rs` | `ArrivalFloor`: whether video is live or still catching up to live, from the floor of arrival minus PTS. Gates the pre-anchor delay measurement, so a relay replaying video from its last keyframe next to live audio does not read as a late sender. |
-| `video_delay.rs` | The standing video delay: sized from the worst shortfall seen so that no frame reaches libobs after its due time, raised at once before the play head is anchored (measured at packet arrival on the newest frame in hand only, with a tick's allowance for decode) and only for lateness that recurs across a window after it (measured at hand-over), capped. It ramps back down at the Catch-Up Speed when a ten-second window of frames all needed less at arrival, so a bad first frame on a poor link does not hold the picture behind the sound for the whole connection. |
-| `url_opts.rs` | The demuxer option table (probe sizes, SRT latency, RIST/UDP buffers, `tls_verify=0`), parsing of the user's FFmpeg Options, and `awaits_caller`, which decides from the URL's query *and* the FFmpeg Options whether the I/O stall deadline applies before a connection exists. |
-| `stats.rs` | `FIELDS`, `StatsSnapshot`, `proc_declaration()`. |
-| `config.rs` | `HwDecode`, `Watermarks::derive`. |
-
-### `crates/irl-source`
-
-| file | ports |
-| --- | --- |
-| `lib.rs` | `plugin.c`: `declare_module!`, load → the FFmpeg log route, `register_source::<IrlSource>()` and `providers::init()`, post_load → `websocket::register()`, the deadlock poller under the feature. |
-| `log.rs` | `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, which bind the `[irl-source]` prefix, plus the redaction (`redacted_input_url`, `redacted_log_line`) and the `[ffmpeg]` sink. |
-| `source.rs` | `irl-source.c`: create/update/tick/activate/deactivate/show/hide/Drop, the media callbacks and the `media_stopped` latch, `start_receiver`/`stop_receiver`, fit-to-canvas, the `get_stats` proc. |
-| `settings.rs` | `settings.c`: defaults and the properties dialog. |
-| `providers.rs` | New in 2.x: the Provider dropdown, one ingest picker per provider and the sign-in buttons. The dropdown lists the `Catalog`, read once from `providers.json` in the module data directory (`obs::module::data_file`); `data/providers.json` is the stock file and ships in every archive, like the locale. Writes into `url` and nothing else; `tests/provider_seam.rs` pins that no file outside it, `settings.rs` and `lib.rs` mentions providers. Its module doc lists the four libobs dialog behaviours that dictate its shape. |
-| `config.rs` | `config_load` / `config_requires_restart` / `config_apply_hot`. |
-| `shared.rs` | The decomposition of the C `struct irl_source` into owners (see below). |
-| `receiver/{mod,stream,decode,audio_in}.rs` | `receiver.c`, `receiver-stream.c`, the audio half of `receiver-decode.c`, and the intake half of `receiver-audio.c`. |
-| `audio/{mod,pump}.rs` | The output half of `receiver-audio.c`: the pump, concealment, speed application, re-anchoring. |
-| `audio/hold.rs` | New in 2.x: the audio hold wired into the plugin. The receiver reads the skew per video packet, the pump waits for the first reading before priming and credits what it builds, and the hold is folded into the published watermarks. |
-| `video/{mod,thread,decode,intake,output}.rs` | `receiver-video.c`, `video-handler.c` and the video half of `receiver-decode.c`. |
-| `websocket.rs` | `websocket-vendor.c`. |
-
-`update` diffs the new settings against the live config: URL, FFmpeg Options, Hardware Decode and Low Latency Audio are latched at stream open and force a reconnect; everything else is swapped in place through `Config::apply_hot`, so a settings tweak neither drops the connection nor clears the stats counters. Retuning Target Buffer live goes through `AudioBuffer::resize`, which grows the ring (never shrinks it) and only then publishes the new watermarks — if the resize fails the old target stays in force, including in the OBS-thread config that the next diff compares against.
-
-`video_tick` runs the one-shot fit-to-canvas: a source created without a URL (so, freshly added rather than restored from a scene collection) applies the same `obs_transform_info` as the frontend's Fit to Screen action to every scene item referencing it, once, as soon as the source reports a non-zero size.
-
-When "Close Stream When Inactive" is enabled, show/activate start the receiver and hide/deactivate stop it; otherwise those callbacks are no-ops and the stream runs from create to destroy. Every "the stream stopped" clear — hide/deactivate, a restart-forcing settings edit, and the disconnect in `receiver/stream.rs` — is gated on "Show Nothing When the Stream Ends" (`clear_on_disconnect`, on by default). Turning it off leaves the last decoded frame frozen on screen until the stream returns.
-
-`OBS_SOURCE_CONTROLLABLE_MEDIA` and its four callbacks exist because that flag is what makes the source addressable through obs-websocket's `TriggerMediaInputAction` / `GetMediaInputStatus`, which is how NOALBS's `!fix` reconnects a stalled feed (it enumerates candidates by media state, so a source reporting `OBS_MEDIA_STATE_NONE` is invisible to it), and it is also what puts the source in the media controls dock. A live stream has nothing to seek or pause, so they reduce to "run the receiver" and "don't", with a `media_stopped` latch that survives show/activate and is cleared by Restart or a settings edit. Note that `!fix` for `ffmpeg_source` works by writing empty settings, relying on `ffmpeg_source_update` restarting unconditionally; that trick deliberately does not work here, because `update` diffs and hot-applies. Restart is the explicit request.
-
-### Threading model and the lock contract
-
-Four threads. The C plugin enforced its lock contract by convention and a debug-only checker; the Rust port enforces most of it by ownership, which is the point of `shared.rs`.
-
-- **OBS thread** — `IrlSource`: create, destroy, update, tick, get_properties, activate/deactivate/show/hide (the last four only matter with "Close Stream When Inactive"). Everything it owns sits in one `Mutex<ObsState>` (config, `fit_pending`, `media_stopped`, the running threads). It is behind a mutex only because the stats proc can arrive on another thread.
-- **`Shared`** — built fresh at every `start_receiver`, which is what replaces the C `reset_runtime_state()`: everything that function zeroed is a field of `Shared` and starts zeroed, and everything it deliberately kept lives in `LifetimeStats`, which is an `Arc` carried across runs.
-- **Receiver thread** — owns demux and the *audio* decoder as a plain struct on its own stack. Writes to the jitter buffer, and pushes video packets onto the video channel without decoding them. Never touches the GPU.
-- **Video thread** — owns the video decoder, handed over by the receiver at stream open (`VideoMsg::Decoder`, ordered ahead of the packets it belongs to). Decodes packets only as they approach their due time, does the HW transfer, paces each frame, converts and calls `obs_source_output_video`. Its pacing queue is a local, lock-free `PacingQueue`; only the counters are mirrored into `LifetimeStats`.
-
-- **Audio thread** — drains the jitter buffer and submits audio, paced against the sample-counter output clock.
-
-Frames are handed to libobs a couple of canvas ticks *before* their due time. libobs is a scheduler too — `ready_async_frame` advances its play head by wall-clock deltas and takes the frame it has just passed — so a frame handed over exactly at its due time is not queued yet when its render tick runs and slips to the next one, which at 30fps on a 60fps canvas is visible judder. The frame keeps its due time as its timestamp, so the lead changes when libobs *receives* it, not when it is shown. The exception is the frame that re-anchors libobs's play head after a start or a clear: `get_closest_frame` displays that one on arrival whatever its timestamp and anchors from it, so a lead there would run the whole connection early. That frame goes at its due time, and the anchor only clears once a frame libobs actually received went out at its real due time. And while an audio stream is present, that frame's due time has to come from the *audio mapping*, not the video-only fallback: the two disagree by ~100 ms (the fallback schedules the first frame one Target Buffer out; the mapping puts it at the first audio chunk, a prime threshold plus a chunk after the first *kept* audio), which way depends on whether the audio warm-up or the first keyframe won, and libobs freezes whichever error the anchor frame carried into the connection's lip sync. So video holds until audio primes (the pump wakes the video thread the moment it publishes the mapping), drops anything the mapping lands more than a canvas tick in the past, and anchors on the first frame that is on time. A stream whose audio never primes is let through on the fallback after `VIDEO_ANCHOR_WAIT_MARGIN_MS` past the expected prime.
-
-The lead only exists for a frame that is in hand a lead before it is due. How early a frame is in hand — its *arrival margin*, due time minus the OBS time its packet reached the video thread (`TimedPacket::received_ns`) — is the sender's to set: video that leaves the encoder later than the audio of the same instant has that much less margin, and once the skew exceeds what Target Buffer plus the audio output lead covers, every frame is late. A late frame goes out on arrival, unpaced, and libobs then drops one whenever two arrive inside a canvas tick, which is what a stream with trailing video looks like: low fps. `irl_core::video_delay` closes that gap with a standing delay on every video due time, sized from the worst shortfall seen so that frames stop reaching libobs late. The bar is "not late", not "a full lead early": the lead is an allowance for the pacing timer oversleeping on a frame the queue holds, and a frame handed over on arrival never sleeps, so demanding the lead of every frame would delay a healthy stream by the lead for nothing (which is exactly what the first version of this did). Before the anchor a shortfall raises it on the spot, measured at packet arrival with one canvas tick of allowance for the decode still to come (nothing has been shown; `VideoThread::settle_anchor_candidate` does this while it also drops the stale backlog). It measures only once video is *live* (`irl_core::arrival`): a relay hands a new subscriber video from its last keyframe next to live audio, so a connection can open with video a second behind its audio and catching up faster than real time, which one frame reads as a late sender on a stream with no skew. The network cannot cause that reading, since both streams share a mux, so the test is whether the floor of arrival minus PTS has stopped falling across `VIDEO_LIVE_LOOKBACK_MS`; a sender that really is late holds a steady offset from its first packet and passes after one lookback, a batching relay passes because the newest frame of each batch lands on the same floor, and `VIDEO_LIVE_MAX_WAIT_MS` bounds the wait. Until then past-due frames go as stale and an on-time frame still anchors. And it measures only the newest frame in hand (a queue of one with the channel empty): the probe backlog reaches the video thread as one burst stamped with a single arrival time, so the older frames in it look late by up to the probe span when they were merely buffered, and even the one that anchors may be on time by buffering alone; measuring them would set a delay of up to a second for nothing. A sender that really is late is caught at hand-over after the anchor. After the anchor the measurement is the hand-over itself, and a raise moves the picture, so it takes `VIDEO_DELAY_MIN_FRAMES` frames handed over past due, spread across `VIDEO_DELAY_WINDOW_MS`, and the delay is capped at `VIDEO_DELAY_MAX_MS`. It is not permanent: every frame handed over also reports its *arrival* margin, and when a whole `VIDEO_DELAY_RELAX_WINDOW_MS` of them needed less than the delay in force by more than `VIDEO_DELAY_RELAX_MIN_MS`, it ramps down to what the window needed plus a tick (`VideoDelay::note_arrival`, `ramp`, `VideoThread::step_delay_ramp`). The pre-anchor measurement is one frame at connection start, and on a poor link that moment is a burst followed by catch-up, so it can read more than a second late on a stream with no skew; a delay that never shrank held on-time video that far behind its audio until the stream dropped. The ramp moves every due time a little earlier per cycle at the Catch-Up Speed, so video plays a few percent fast and nothing jumps or is dropped. A raise cancels it. It is a lip-sync error in return for a smooth picture, and `video_delay_ms` reports it. A clear and a decoder handover reset it. The video-only fallback schedules its first frame at arrival, so a stream without audio always carries a delay of exactly one tick.
-
-The video delay is a bridge, not the answer to a sender whose video trails its audio: a frame cannot be shown before it arrives, so the only way to put such a stream back in sync is for the audio to wait. That is the audio hold (`irl_core::audio_hold`, `audio/hold.rs`). The receiver reads the skew as it pushes each video packet: its decode timestamp against the newest audio PTS decoded before it. Mux order is what makes the reading trustworthy, since loss and stalls delay both streams together; a relay's catch-up replay is kept out by an `ArrivalFloor` of its own. The part of the skew that Target Buffer and the output lead do not cover, plus `AUDIO_HOLD_MARGIN_MS`, is folded into the published watermarks, so their target is Target Buffer plus the hold and every reader of the target follows it. `Config::apply_hot` composes a Target Buffer edit with it. Before priming, the pump waits up to `AUDIO_HOLD_PRIME_WAIT_MS` for the first reading, so a sender that is always late starts in sync. After priming the hold moves only while the speed controller regulates the buffer (not in low-latency mode, not with Adaptive Latency Control off): a skew sustained across `AUDIO_HOLD_RAISE_WINDOW_MS` raises it, and the controller builds it at -2 %. The pump credits that growth of the playout offset to `AudioState::hold_built_ns`, and `VideoThread::absorb_audio_hold` takes the same amount out of the video delay (`VideoDelay::absorb`), so due times stay put while the lip-sync error drains. The offset re-anchor nets the hold out of its drift for the same reason. Low-latency mode has no target to fold the hold into: the pump primes on the hold's worth of audio and keeps that much queued. Shorter bursts stay the video delay's, and the delay's warnings stop suggesting a Sync Offset where the hold can move, since the two would correct the same skew twice.
-
-Video decode is on the video thread and not the receiver for two reasons, and the second is the load-bearing one. Decoding eagerly would mean holding the stream's whole latency as decoded frames — 8s of 4K60 is ~6GB — where the same 8s of packets is ~20MB. And the receiver spends a network stall blocked in `av_read_frame`, which is exactly when video must keep draining the buffer it already has, so the thread that decodes cannot be the thread that reads.
-
-Lock order, and the whole of it: **`audio_state` → `audio_buf` → `hot.watermarks`.** `video.q` is never held together with any of them. The audio pump takes `audio_state` exactly once per iteration and passes `&mut AudioState` down, so nothing below it can take it again — parking_lot mutexes are not recursive, and a nested acquire would hang the audio thread and then the video thread behind it.
-
-Hot config (`reconnect_delay_s`, `adaptive_speed`, `catchup_percent`, `wait_for_keyframe`, `clear_on_disconnect`) is atomics, read with `Relaxed` on the worker threads. `catchup_percent` is read once per controller cycle and passed down as a speed, because the ramp, the anti-windup, the actuator clamp and the stuck-drain watch all have to agree on the same ceiling within a cycle. The three watermarks publish together under a mutex because they must never be read torn mid-resize. Stat counters are relaxed atomics: unsynchronised in C, explicitly relaxed here, same values.
-
-Panics never cross an FFI boundary. `obs::panic::guard` wraps every `extern "C"` shim (source callbacks, proc handlers, enumeration trampolines, vendor requests, module exports) and `shared::spawn_worker` wraps every worker thread: a panic is logged, `thread_active` is cleared (which also trips the FFmpeg interrupt watch, so a receiver blocked in `av_read_frame` unblocks), the video sleeper is woken, and the normal stop path takes over.
-
-### Conventions
-
-- **Unsafe.** Only in `obs-sys`, `obs` and `ffmpeg`, and every `unsafe` block there carries a `// SAFETY:` comment. If a port needs a raw pointer, the answer is a new safe wrapper in one of those crates, not an `unsafe` block in `irl-source`.
-- **Logging.** `irl_info!("…")`, never `blog` directly; the macros bind the `[irl-source]` prefix. Log strings are part of the interface people grep for — keep them byte-identical to the C where the C had one.
-- **Credentials in the log.** A URL never reaches the log whole. The plugin's own lines go through `log::redacted_input_url` (protocol, host and port; the C `irl_log_input_url`), and FFmpeg's go through `log::redacted_log_line`, because FFmpeg prints `h->filename` — the user's `srt://…?passphrase=…&streamid=…` — for its own connect failures. Anything new that logs a URL, or a string that might contain one, belongs behind one of the two.
-- **Clocks.** OBS timestamps come from `obs::time::gettime_ns` (`os_gettime_ns`), never `std::time::Instant`. FFmpeg-side timers stay in the `av_gettime` microsecond domain. `irl-core` takes both as parameters so the two can never be mixed by accident.
-- **UI strings.** Never pass English text to `module_text`. A new string belongs in two places: the call site and `data/locale/en-US.ini`, keyed by a short identifier. The version in the About block is substituted with `str::replace` on a `%1` token rather than a format string, so a bad translation renders oddly instead of failing.
-- **Stats.** A new stat is *one line* in `irl_core::stats::FIELDS` plus its field in `StatsSnapshot` and `values()`. The proc declaration, the calldata writer (`source.rs`) and the websocket copy loop (`websocket.rs`) all walk that table, so they cannot drift. The README table is the only other place to update.
-- **Tuning values.** Every threshold lives in `irl_core::consts`, pinned by a test.
-- **Source flags.** `OBS_SOURCE_AUDIO | OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_CONTROLLABLE_MEDIA`.
-
-### Tests
-
-`irl-core` has unit tests (`#[cfg(test)]` in each module) derived from the C plugin's thresholds; they are the regression net for the port.
-
-Everywhere else, tests live in `tests/`, never inside the lib. The link arguments that make a test binary resolve libobs (`cargo::rustc-link-arg-tests`) only reach integration-test targets, so `crates/irl-source` sets `test = false` on the lib (its `cdylib` half must not gain test harness code either) and `crates/obs` keeps its lib free of `#[cfg(test)]`. A test that touches libobs runs on Linux (with `libobs-dev`) and is skipped in CI on Windows and macOS, where there is no libobs for the binary to load against. `calldata_*` is the exception that is safe to call anywhere: it is pure bookkeeping over libobs's allocator and needs no `obs_startup`. On a Mac, `make test-shim` runs the pacing, audio-core and network-simulation tests anyway: they reach only four libobs functions (`os_gettime_ns`, `blog`, `obs_get_frame_interval_ns`, `video_format_get_parameters_for_format`), and `scripts/test-with-libobs-shim.sh` links the stand-in in `scripts/libobs-shim/` into those binaries, refusing to run one that imports a libobs symbol the shim lacks. Without it a libobs call on macOS is a jump to address zero, so `cargo test -p irl-source` there dies with SIGSEGV before its first assertion, which is not a failure of the code under test.
-
-`crates/irl-source/tests/network_sim.rs` is the end-to-end harness for the conditions the plugin exists to survive: a stall, a burst, repeated dropouts, a sender whose media clock is not wall clock, one too fast to ever catch. It drives the real jitter buffer, PTS repair, speed controller, output clock and packet queue against a synthetic sender on a virtual clock, and asserts what the design promises — the OBS clock never jumps except across a *declared* restart or re-anchor, audio is never skipped once primed, latency does not ratchet across dropouts, and decoded memory does not grow with Target Buffer. It does not cover the demuxer or the video decoder: the bundled FFmpeg carries only the decoders the plugin needs (no rawvideo), so there is no packet a decoder here would accept, and video is driven at the two ends of the decoder instead.
-
-Note the sampling point in it. The jitter buffer's level oscillates by one whole chunk within every cycle, so *where* you read the fill decides what number you get: before the pump's read (what the controller regulates) it averages the target, and after it, a chunk lower. The stats line's `buf=` is a random sample of that oscillation, which is why it reads low as often as not.
-
-`crates/irl-source/tests/locale_keys.rs` is the mechanical half of the "a new UI string belongs in two places" rule: it scans `settings.rs`, `source.rs` and `providers.rs` for `module_text` keys and fails if one has no `data/locale/en-US.ini` entry, or if the ini carries a string nothing uses. `module_text` falls back to returning the key, so without it a missing string is only noticed by opening the properties dialog.
-
-The speed controller has one more check that is not a test, because a controller that limit-cycles still passes every assertion you would think to write about one sample of it:
-
-```bash
-cargo run -p irl-core --example speed-controller-sim
-```
-
-It runs the real `irl_core::speed` closed-loop against a simulated sender and exits non-zero if the loop fails to settle at any buffer target or if a requested speed is not applied faithfully. Not a CI target; run it by hand whenever you touch `speed.rs`, and read `docs/audio-timing-pitfalls.md` first.
-
-Real-stream validation is manual: run the same feed through this build and a known-good one and compare the 30-second stats line field by field.
-
-## CI
-
-GitHub Actions (`.github/workflows/build.yml`) builds on Linux x64 (Ubuntu 22.04 — glibc 2.35, so the artifact loads in the Flatpak sandbox; see #29), Windows x64 (VS 2026) and macOS ARM64 (macos-15). Every job builds the bundled media stack first (cached on the hash of `deps/versions.env` plus `deps/build-deps.sh`), then runs `cargo build --release --workspace`, clippy with `-D warnings`, the tests, and the isolation checks. `Swatinem/rust-cache@v2` caches the cargo build. No job builds libobs any more: the Linux job installs OBS from `ppa:obsproject/obs-studio` purely so the test binaries have a `libobs.so` to link and run against — 22.04's own `libobs-dev` is 27.x and predates `video_format_get_parameters_for_format`. `layout-test` reads the `OBS_VERSION` source headers instead, so the hand-written structs stay pinned to the declared floor rather than to whatever the runner happens to have.
-
-`OBS_VERSION` at the top of the workflow documents the oldest supported OBS line; the value that actually reaches libobs is `api_version` in the `declare_module!` call. `obs_init_module` gates a plugin on `(mod.ver() & 0xFFFF0000) <= LIBOBS_API_VER` — major and minor only — and looks up nothing but `obs_module_*` symbols, so declaring the oldest supported line yields one binary that loads there and on every newer release. Raise it only to drop support for older OBS releases, never to chase a newer one.
-
-Releases are tag driven (`.github/workflows/release.yml`, see `RELEASING.md`). Pushing `vX.Y.Z` verifies the tag against `[workspace.package] version` in `Cargo.toml`, runs the build workflow, calls `scripts/package.sh` once per platform, generates `sha256sums.txt`, and creates a draft GitHub release whose body is `.github/release-notes-header.md` plus a changelog. Publishing the draft is manual, after testing the artifacts.
-
-`scripts/changelog.sh` builds that changelog by grouping the commits since the previous `v*` tag on their conventional commit type. Commit subjects are the release notes, so write them as such. Run `scripts/changelog.sh HEAD` to preview.
-
-## Deliberate deviations from the C plugin
-
-The port is behaviour-identical except for these, which are intentional:
-
-1. The dead `network_buffer_mb` setting is gone. Nothing read it; the transport buffer is `irl_core::consts::NETWORK_BUFFER_MB`.
-2. The `video_decoder_flushes` stat is gone (it was always 0 after the video decoder stopped being flushed). 27 stat fields remained; deviation 16 adds `video_delay_ms` and `av_skew_ms`, and deviation 17 adds `audio_hold_ms`, making 30.
-3. `irl-stats.lua` finds the source by its plugin id instead of by display name, and takes source names as script properties.
-4. The vestigial `hw_map_ok` flag is not ported.
-5. `w32-pthreads.dll` is no longer shipped on Windows: Rust never calls `pthread_*`, so the librist shim hazard that `include/irl-threading.h` existed for is gone. The installer deletes a stale copy.
-6. `obs_get_video_info` and `obs_sceneitem_set_info2` go through slack wrappers with 64 trailing bytes, since libobs reads and writes those structs by *its* size.
-7. Two latent races where the stats snapshot read unlocked video-thread writes are closed by mirroring the anchors into atomics. Same values.
-8. The stats field list is one table (`irl_core::stats::FIELDS`) instead of three hand-synchronised copies.
-9. Version 2.0.0. The artifact is built by cargo, and CI no longer builds libobs.
-10. The speed-controller simulation **links** the controller instead of replicating it. `tools/speed-controller-sim.c` copy-pasted the constants and both update rules, because the real controller read `struct irl_source`; `crates/irl-core/examples/speed-controller-sim.rs` calls `irl_core::speed` directly, so the C file's standing caveat — "change them there and you must change them here too, or this quietly starts simulating a controller that no longer exists" — does not apply. `tools/` is gone with it.
-11. The UI strings are checked against `data/locale/en-US.ini` by a test rather than by convention (`crates/irl-source/tests/locale_keys.rs`).
-12. The I/O stall deadline is not armed while a listener URL waits to be called, and once connected it is measured from the last byte that arrived rather than from the start of the call (master `6d09dea`). `InterruptWatch` therefore tracks the `AVFormatContext` so the callback can read `pb->bytes_read`; `FormatContext` clears that pointer on a failed open and in `Drop`, which cannot wait for the watch's own `Drop` because the receiver holds the same `Arc` across connections.
-13. Video is decoded on the video thread, just before each frame is due, and the receiver → video queue carries compressed packets instead of decoded frames. The C decoded eagerly on the receiver thread, which made the Target Buffer cost decoded-frame memory: 1 GiB of pacing budget is 5.7s of 1080p60 but only 1.4s of 4K60 and 0.7s of 4K60 10-bit, and past that frames were emitted early and dropped. Decoded memory is now bounded by `VIDEO_DECODE_LEAD_MS` regardless of the target. `PacingQueue` gained the matching soft/hard bound split: holding the decode lead is normal and must not emit early, while the byte and frame ceilings are memory limits that still do. The stats line reports `pktq=` instead of `pinned_peak=`, since no decoded frame pins a decoder surface any more.
-14. PTS repair treats a gap of at most one time-base tick, in either direction, as the sender being on time rather than as a discontinuity. The C tested only `< 1 ms` and only forwards, which is a threshold a 90 kHz clock cannot express a 44.1 kHz frame against: 1024 samples is 2089.795 ticks and `duration` can carry only 2090, so the stream landed a tick *early* every few frames, fell into the leading-edge rule for backward jumps (which deliberately freezes the baseline), and the next frame was then interpolated onto the frozen baseline. The repaired timeline stayed one frame short from there on. Since the audio→video mapping is derived from those PTS, every 44.1 kHz stream — which is what phone encoders send — carried a standing ~23 ms lip-sync error, and its `norm=` counter climbed at the frame rate. 48 kHz divides 90 kHz exactly and was never affected.
-15. Video does not anchor libobs's play head on a fallback-scheduled frame when an audio stream is present. The C handed over whichever frame came due first, fallback or mapped, and libobs — which anchors to that frame's *arrival* and never moves the anchor — then played the whole connection with the ~100 ms disagreement between the two schedules baked in, in whichever direction the warm-up/keyframe race went. In the port the race was almost always lost the same way (the video thread decodes the keyframe while the receiver is still working through the probe backlog, so the warm-up has drained and the fallback runs ~100 ms early), which surfaced as audio consistently lagging on phone encoders. Video now waits for the mapping, drops frames it lands in the past, and anchors on the first on-time frame (`VideoThread::awaiting_audio_mapping`, `settle_anchor_candidate`). Deviation 16 is what keeps this from dropping a stream whose frames are *all* in the past.
-16. Video that arrives too late to be paced is delayed by a measured, standing amount instead of played unpaced. The C mapped each frame through the audio playout and handed over whatever was past due on arrival, so a sender whose video trailed its audio by more than Target Buffer covered — 120 ms by default, against phone hardware encoders that routinely run 100 to 300 ms behind their audio — played the whole connection with zero lead: every frame handed to libobs at or after its due time, and one dropped by `ready_async_frame` whenever two arrived inside a canvas tick. That is the "low fps" such a stream showed, and the delivery lead (master `964f74b`) could not help it, because a lead needs a frame in hand early. After deviation 15 the same stream was dropped forever instead, since no frame was ever on time. The port measures each frame's arrival margin and adds the shortfall to the schedule as `irl_core::video_delay` (see the threading section); `video_delay_ms` reports it and the warning that sets it tells the user how much Target Buffer restores lip sync. A stream without audio is affected too: the video-only fallback scheduled its first frame at arrival, with no lead for any frame that followed it on time, and now carries a delay of one tick.
-
-17. Audio waits for video that trails it. The C played audio as soon as its buffer held the target, so a sender whose video reached the plugin later than its audio (pocketSRT queues its audio about 300 ms early; a stabiliser sends video a second and more late) played with the sound that far ahead of the picture. Deviation 16 made the picture smooth, but left that error standing for the user to find and fix by hand with Target Buffer or a Sync Offset (#34). The audio hold measures the skew and raises the jitter buffer's target by what Target Buffer does not cover (see the threading section); `audio_hold_ms` reports it.
+- `data/locale/en-US.ini` must ship: the lookup falls back to the key, so a package without it shows bare identifiers in the dialog.
+- `data/providers.json` is the Provider dropdown's list; a deployment edits it to show only its own provider. `crates/irl-provider/tests/catalog.rs` parses the repo copy.
+- `THIRD_PARTY_NOTICES.md` ships in every archive, because LGPLv3 FFmpeg wants its notices conveyed with the object code.
+- `installer/obs-irl-source.iss` resolves the OBS folder from the registry and requires OBS 32.1 or newer (a minimum, not an exact match).
+- `irl-stats.lua` is an example overlay script that reads the stats proc.
 
 ## Contributing
 
-If you wish to contribute PRs to this project, please understand what you are changing. You should be able to write any replies to reviews/PRs yourself — don't copy and paste replies directly from AI.
-
-This plugin was heavily built with LLM assistance, including the Rust port. The author (datagutt) has experience with video and SRT(LA) protocols but is less familiar with the OBS Studio codebase. Tagged releases are fully tested; individual commits may not be.
-
-## Other files
-
-- **`irl-stats.lua`** — Example OBS Lua script that reads plugin stats via `proc_handler` and updates a text source overlay.
-- **`installer/obs-irl-source.iss`** — Inno Setup script for the Windows setup .exe. It resolves the OBS folder from the registry (`Uninstall\OBS Studio` in HKLM64 then HKCU, then `HKLM\SOFTWARE\OBS Studio`), validates it by finding `bin\64bit\obs64.exe`, and installs the same payload as the release zip. The OBS version check is a *minimum* (32.1), not an exact match, because nothing binds the plugin to one OBS line. The Windows job in `build.yml` compiles it on every push, not just at tag time, so a broken `.iss` fails a normal build instead of a release.
-- **`data/providers.json`** — The Provider dropdown's list: names, base URLs, priorities and whether Custom provider is offered. Shipped next to `locale/` in every archive and by the installer; a deployment edits it to show only its own provider. `crates/irl-provider/tests/catalog.rs` parses the repo copy so a broken one fails CI. Format in `docs/provider-protocol.md`.
-- **`data/locale/en-US.ini`** — UI strings, loaded by `declare_module!`'s locale exports. Shipping it is not optional: the lookup falls back to returning the key, so a package built without it renders the dialog as bare identifiers like `AudioBufferHelp`. All three release archives and the installer place it where `obs_module_file()` looks (`data/locale/` next to the binary on Linux, `data/obs-plugins/obs-irl-source/locale/` on Windows, `Contents/Resources/locale/` inside the macOS bundle).
-- **`THIRD_PARTY_NOTICES.md`** — Licenses for the statically linked stack and the Rust crates, shipped inside every release archive rather than only living in the repo, because LGPLv3 FFmpeg wants its notices conveyed with the object code. `deps/README.md` has the reasoning behind the license choices; this file is the artifact-facing copy.
-- **`docs/audio-pipeline.md`** — Deep dive on the buffered vs low-latency audio paths, jitter buffer, adaptive latency control, PTS repair tiers, and timestamp handling.
-- **`docs/viewer-quality-plan.md`** — The viewer-quality policy and the recovery/diagnostics behavior that implements it (what stats to watch and what healthy looks like).
-- **`docs/provider-protocol.md`** — The contract a service implements to appear in the Provider dropdown: discovery document, OAuth sign-in, the key-free ingest list and the resolve call. The plugin side of it lives in `crates/irl-provider`.
-- **`docs/audio-timing-pitfalls.md`** — What was built wrong first in the audio timing path, and the media-clock estimator that was built, measured and deleted. Required reading before changing `crates/irl-core/src/speed.rs`; most of it is re-inventable.
-- **`Makefile`**, **`.config/`** — The quality gates and their explicit configs (`rustfmt.toml`, `codespellrc`), so `make check` gives the same answer everywhere.
-- **`AGENTS.md`**, **`GEMINI.md`** — Symlinks to this file (`CLAUDE.md`).
+If you contribute PRs, understand what you are changing, and write review replies yourself rather than pasting them from an AI. This plugin was built with heavy LLM assistance. The author (datagutt) knows video and SRT(LA) well but is less familiar with the OBS codebase. Tagged releases are fully tested; individual commits may not be.

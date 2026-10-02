@@ -1,12 +1,19 @@
 //! Small sample-domain helpers: fades, silence shaping, last-sample memory.
 //!
-//! Ports `remember_last_sample`, `audio_apply_fade_in`,
-//! `shape_silence_from_last` (`receiver-audio.c:210-265`), the fade-in ramp in
-//! `irl_pump_audio_once` (`receiver-audio.c:861-883`) and the fade of
-//! `audio_buffer_read_with_fade_out`. Everything works on interleaved `f32`,
-//! which is the only format the plugin ever hands to OBS.
+//! Everything works on interleaved `f32`, the only format the plugin hands to
+//! OBS; [`FloatEdit`] and [`LastSample::remember_bytes`] bridge to the byte
+//! buffers it travels in.
 
 use crate::consts::{self, AUDIO_MAX_CHANNELS};
+
+/// Bytes one interleaved float sample occupies (`sizeof(float)`).
+pub const SAMPLE_BYTES: usize = 4;
+
+fn read_f32(bytes: &[u8]) -> f32 {
+    let mut raw = [0u8; SAMPLE_BYTES];
+    raw.copy_from_slice(bytes);
+    f32::from_le_bytes(raw)
+}
 
 /// The last emitted sample per channel, for silence shaping.
 #[derive(Debug, Clone, Copy, Default)]
@@ -35,15 +42,63 @@ impl LastSample {
         self.valid = true;
     }
 
+    /// [`Self::remember`] over an interleaved-float byte buffer: only the last
+    /// frame is needed, so no whole-chunk decode happens here.
+    pub fn remember_bytes(&mut self, samples: &[u8], channels: usize) {
+        let mut values = [0.0f32; AUDIO_MAX_CHANNELS];
+        let take = channels.min(AUDIO_MAX_CHANNELS);
+        let frame_bytes = channels * SAMPLE_BYTES;
+        if channels == 0 || samples.len() < frame_bytes {
+            self.remember(&[], channels);
+            return;
+        }
+
+        let start = samples.len() - samples.len() % frame_bytes - frame_bytes;
+        for (ch, value) in values[..take].iter_mut().enumerate() {
+            let off = start + ch * SAMPLE_BYTES;
+            *value = read_f32(&samples[off..off + SAMPLE_BYTES]);
+        }
+        // `channels > 8` reaches `remember` with a short slice, which clears
+        // the memory.
+        self.remember(&values[..take], channels);
+    }
+
     /// Forget the remembered frame; the next concealment chunk is pure
-    /// silence (`ctx->audio_out_last_valid = false` after the first one).
+    /// silence.
     pub fn forget(&mut self) {
         self.valid = false;
     }
 }
 
+/// The helpers here edit interleaved float in place, while the audio path
+/// carries bytes (what swresample and libobs both take) and the plugin crates
+/// forbid the unsafe cast between the two views. The rare in-place edits
+/// (concealment shaping and the splice fades) therefore decode into a reusable
+/// `f32` scratch, run the helper, and write the result back. A normal chunk is
+/// emitted untouched, so the steady state pays no extra copy.
+#[derive(Debug, Default)]
+pub struct FloatEdit {
+    scratch: Vec<f32>,
+}
+
+impl FloatEdit {
+    /// Run `edit` over `bytes` viewed as interleaved `f32`.
+    pub fn edit(&mut self, bytes: &mut [u8], edit: impl FnOnce(&mut [f32])) {
+        self.scratch.clear();
+        self.scratch
+            .extend(bytes.chunks_exact(SAMPLE_BYTES).map(read_f32));
+        edit(&mut self.scratch);
+        for (dst, value) in bytes
+            .chunks_exact_mut(SAMPLE_BYTES)
+            .zip(self.scratch.iter())
+        {
+            dst.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
 /// Frames the concealment fade covers: `AUDIO_CONCEAL_FADE_MS` worth, never
-/// more than the chunk (`audio_conceal_fade_frames`).
+/// more than the chunk.
 fn conceal_fade_frames(rate: i32, max_frames: usize) -> usize {
     if rate <= 0 || max_frames == 0 {
         return 0;
@@ -75,11 +130,8 @@ pub fn apply_fade_in(samples: &mut [f32], channels: usize, rate: i32) {
     }
 }
 
-/// Fill `samples` with silence that decays from `last` to zero.
-///
-/// The C caller memsets the scratch buffer before calling
-/// `shape_silence_from_last`; both steps live here, so the whole buffer is
-/// silence and only its head carries the decay.
+/// Fill `samples` with silence that decays from `last` to zero: the whole
+/// buffer is silence and only its head carries the decay.
 pub fn shape_silence_from_last(samples: &mut [f32], channels: usize, rate: i32, last: &LastSample) {
     samples.fill(0.0);
     if channels == 0 {
@@ -95,24 +147,6 @@ pub fn shape_silence_from_last(samples: &mut [f32], channels: usize, rate: i32, 
         let gain = 1.0 - (f + 1) as f32 / fade_frames as f32;
         for ch in 0..channels {
             samples[f * channels + ch] = last.values[ch] * gain;
-        }
-    }
-}
-
-/// Linear 1→0 gain across the whole buffer (disconnect fade-out).
-pub fn apply_linear_fade_out(samples: &mut [f32], channels: usize) {
-    if channels == 0 {
-        return;
-    }
-    let total_frames = samples.len() / channels;
-    if total_frames == 0 {
-        return;
-    }
-
-    for f in 0..total_frames {
-        let gain = 1.0 - f as f32 / total_frames as f32;
-        for ch in 0..channels {
-            samples[f * channels + ch] *= gain;
         }
     }
 }
@@ -159,6 +193,32 @@ mod tests {
         assert!(last.valid);
         assert_eq!(last.channels, 2);
         assert_eq!(&last.values[..2], &[0.5, 0.6]);
+    }
+
+    #[test]
+    fn remember_bytes_keeps_the_last_whole_frame() {
+        let bytes: Vec<u8> = [0.1f32, 0.2, 0.3, 0.4, 0.5]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut last = LastSample::default();
+        last.remember_bytes(&bytes, 2);
+        assert!(last.valid);
+        assert_eq!(&last.values[..2], &[0.3, 0.4]);
+
+        last.remember_bytes(&bytes[..4], 2);
+        assert!(!last.valid);
+    }
+
+    #[test]
+    fn float_edit_round_trips_through_bytes() {
+        let mut bytes: Vec<u8> = [1.0f32, -2.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        FloatEdit::default().edit(&mut bytes, |pcm| pcm.iter_mut().for_each(|v| *v *= 0.5));
+        assert_eq!(&bytes[..4], &0.5f32.to_le_bytes());
+        assert_eq!(&bytes[4..], &(-1.0f32).to_le_bytes());
     }
 
     #[test]
@@ -247,18 +307,6 @@ mod tests {
         let mut samples = vec![7.0f32; 64];
         shape_silence_from_last(&mut samples, 2, RATE, &last);
         assert!(samples.iter().all(|&s| s == 0.0));
-    }
-
-    #[test]
-    fn fade_out_ends_at_zero() {
-        let mut samples = vec![1.0f32; 4 * 2];
-        apply_linear_fade_out(&mut samples, 2);
-        assert_eq!(samples, vec![1.0, 1.0, 0.75, 0.75, 0.5, 0.5, 0.25, 0.25]);
-
-        // A one-frame read is a single unattenuated frame, as in C.
-        let mut samples = vec![1.0f32; 2];
-        apply_linear_fade_out(&mut samples, 2);
-        assert_eq!(samples, vec![1.0, 1.0]);
     }
 
     #[test]

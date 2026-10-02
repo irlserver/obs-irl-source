@@ -1,4 +1,4 @@
-//! `blog` bridge. Plugins bind their prefix once with [`log!`]-style macros of
+//! `blog` bridge. Plugins bind their prefix once with `log!`-style macros of
 //! their own (see `irl-source/src/log.rs`); this module owns the single
 //! `blog(level, "%s", msg)` call and the level constants.
 
@@ -15,7 +15,7 @@ pub enum Level {
 
 /// Emit one log line through libobs. `msg` is passed as the `%s` argument, so
 /// it may contain anything (including `%`).
-pub fn blog(level: Level, msg: &str) {
+pub(crate) fn blog(level: Level, msg: &str) {
     // An interior NUL would truncate the line at best and, via CString's
     // error path, drop it entirely. Replacing keeps the message readable and
     // keeps this function infallible, which matters because it is the last

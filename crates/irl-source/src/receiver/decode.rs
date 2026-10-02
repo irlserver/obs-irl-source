@@ -1,45 +1,52 @@
-//! Packet → decoder plumbing (port of `src/receiver-decode.c`). W2-A.
+//! Packet routing: audio packets into the audio decoder, video packets onto
+//! the video channel.
 
 use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::{CodecContext, Frame, Rational};
-use irl_core::consts;
+use irl_core::{consts, timing};
 
 use crate::audio;
 use crate::receiver::audio_in::AudioIntake;
 use crate::receiver::{Receiver, ReceiverFlags};
 use crate::shared::{Shared, TimedPacket};
 
-/// Nanosecond time base packet PTS is rescaled into for the video queue's
-/// duration bound.
-const NS_TIME_BASE: Rational = Rational::new(1, 1_000_000_000);
-
-fn should_log_decoder_warning(last_warning_time_us: &mut u64, now_us: u64) -> bool {
-    if *last_warning_time_us != 0
-        && now_us - *last_warning_time_us < consts::DECODER_WARNING_INTERVAL_US
-    {
-        return false;
+/// Count one audio decode error. At a burst, log it (rate limited) and flush
+/// the decoder unless a flush is cooling down; returns when it flushed.
+fn audio_error_burst(
+    dec: &mut CodecContext,
+    flags: &mut ReceiverFlags,
+    stage: &str,
+    flushing: &str,
+    cooling: &str,
+) -> Option<u64> {
+    flags.audio_decode_errors += 1;
+    if flags.audio_decode_errors < consts::DECODER_ERROR_BURST {
+        return None;
     }
-    *last_warning_time_us = now_us;
-    true
-}
-
-fn should_flush_decoder(last_flush_time_us: &mut u64, now_us: u64) -> bool {
-    if *last_flush_time_us != 0 && now_us - *last_flush_time_us < consts::DECODER_FLUSH_COOLDOWN_US
-    {
-        return false;
+    let now_us = ffmpeg::gettime_us() as u64;
+    let do_flush = timing::throttle(
+        &mut flags.audio_last_decoder_flush_time_us,
+        now_us,
+        consts::DECODER_FLUSH_COOLDOWN_US,
+    );
+    if timing::throttle(
+        &mut flags.audio_last_decoder_warning_time_us,
+        now_us,
+        consts::DECODER_WARNING_INTERVAL_US,
+    ) {
+        irl_warn!(
+            "Audio decoder{stage}: corruption burst ({} consecutive errors){}",
+            flags.audio_decode_errors,
+            if do_flush { flushing } else { cooling }
+        );
     }
-    *last_flush_time_us = now_us;
-    true
-}
-
-/// `reinit_audio_pts_repair`: the repair state machine restarts on the same
-/// time base after a decoder flush.
-fn reinit_audio_pts_repair(audio_in: &mut AudioIntake, shared: &Shared, audio_tb: Rational) {
-    if let Some(repair) = audio_in.pts_repair() {
-        repair.reset();
+    flags.audio_decode_errors = 0;
+    if !do_flush {
+        return None;
     }
-    audio_in.init_pts_repair(&shared.cfg, audio_tb);
+    dec.flush();
+    Some(now_us)
 }
 
 /// Drain everything the audio decoder has ready.
@@ -55,40 +62,26 @@ fn drain_audio_frames(
         match dec.receive_frame(frame) {
             Err(err) if err.is_eagain() || err.is_eof() => return,
             Err(_) => {
-                flags.audio_decode_errors += 1;
-                if flags.audio_decode_errors >= consts::DECODER_ERROR_BURST {
-                    let now_us = ffmpeg::gettime_us() as u64;
-                    let do_flush =
-                        should_flush_decoder(&mut flags.audio_last_decoder_flush_time_us, now_us);
-                    if should_log_decoder_warning(
-                        &mut flags.audio_last_decoder_warning_time_us,
-                        now_us,
-                    ) {
-                        irl_warn!(
-                            "Audio decoder receive: corruption burst ({} consecutive errors){}",
-                            flags.audio_decode_errors,
-                            if do_flush {
-                                ", resetting audio state"
-                            } else {
-                                ", reset cooldown active"
-                            }
+                if let Some(now_us) = audio_error_burst(
+                    dec,
+                    flags,
+                    " receive",
+                    ", resetting audio state",
+                    ", reset cooldown active",
+                ) {
+                    {
+                        let mut state = shared.audio_state();
+                        if let Some(buf) = shared.audio_buf().as_mut() {
+                            buf.flush();
+                        }
+                        audio::reset_audio_timing_state(&mut state);
+                        audio::mark_audio_recovery(
+                            &mut state,
+                            now_us,
+                            consts::AUDIO_RESET_RECOVERY_HOLD_US,
                         );
                     }
-                    if do_flush {
-                        dec.flush();
-                        shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
-                        shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                        {
-                            let mut state = shared.audio_state();
-                            if let Some(buf) = shared.audio_buf().as_mut() {
-                                buf.flush();
-                            }
-                            audio::reset_audio_timing_state(shared, &mut state);
-                            audio::mark_audio_recovery(&mut state, now_us, 2_500_000);
-                        }
-                        reinit_audio_pts_repair(audio_in, shared, audio_tb);
-                    }
-                    flags.audio_decode_errors = 0;
+                    audio_in.init_pts_repair(audio_tb);
                 }
                 return;
             }
@@ -102,20 +95,14 @@ fn drain_audio_frames(
 }
 
 /// The video decoder is never flushed on a corruption burst, unlike the audio
-/// one. `avcodec_flush_buffers` empties the reference picture buffer and clears
-/// the decoder's recovery state, and neither the H.264 nor the HEVC decoder can
-/// produce a real picture again until the next IDR/CRA: h264dec paints every
-/// frame gray until it sees a recovery point, and the HEVC decoder synthesizes
-/// each missing reference as a flat mid-gray frame that every later P-frame is
-/// predicted from. So the flush turned "a few damaged frames" into a whole GOP
-/// of gray — one to two seconds at the keyframe intervals IRL encoders use — on
-/// exactly the lossy streams it was meant to help. A decoder error on a live
-/// stream is a property of the packet, not of the decoder's state; the next
-/// intact packet decodes fine without any reset, and the reference chain heals
-/// at the next keyframe either way. The burst is still counted and logged so it
-/// shows up in diagnostics.
+/// one. `avcodec_flush_buffers` empties the reference picture buffer, and
+/// neither the H.264 nor the HEVC decoder produces a real picture again until
+/// the next IDR/CRA (h264dec paints gray until a recovery point; the HEVC
+/// decoder synthesizes each missing reference as flat mid-gray). A flush
+/// would turn a few damaged frames into one to two seconds of gray. The next
+/// intact packet decodes fine without a reset, and the reference chain heals
+/// at the next keyframe either way.
 impl Receiver {
-    /// `irl_handle_audio_packet`.
     pub(super) fn handle_audio_packet(&mut self) {
         let audio_tb = self.audio_tb;
         let Self {
@@ -146,32 +133,7 @@ impl Receiver {
 
         match &result {
             Err(err) if !err.is_eagain() && !err.is_eof() => {
-                flags.audio_decode_errors += 1;
-                if flags.audio_decode_errors >= consts::DECODER_ERROR_BURST {
-                    let now_us = ffmpeg::gettime_us() as u64;
-                    let do_flush =
-                        should_flush_decoder(&mut flags.audio_last_decoder_flush_time_us, now_us);
-                    if should_log_decoder_warning(
-                        &mut flags.audio_last_decoder_warning_time_us,
-                        now_us,
-                    ) {
-                        irl_warn!(
-                            "Audio decoder: corruption burst ({} consecutive errors){}",
-                            flags.audio_decode_errors,
-                            if do_flush {
-                                ", flushing"
-                            } else {
-                                ", suppressing repeated flush"
-                            }
-                        );
-                    }
-                    if do_flush {
-                        dec.flush();
-                        shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
-                        shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                    }
-                    flags.audio_decode_errors = 0;
-                }
+                audio_error_burst(dec, flags, "", ", flushing", ", suppressing repeated flush");
             }
             _ => flags.audio_decode_errors = 0,
         }
@@ -181,17 +143,13 @@ impl Receiver {
 
     /// The video half of the read loop: hand the packet to the video thread.
     ///
-    /// Nothing is decoded here. The stream's latency is held as compressed
-    /// packets and decoded just before display, which is what makes a deep
-    /// Target Buffer affordable at 4K — and it has to be the video thread that
-    /// decodes, because this one spends a stall blocked in `av_read_frame`.
+    /// Nothing is decoded here; see [`crate::shared::VideoChannel`] for why.
     pub(super) fn push_video_packet(&mut self) {
         // Only used to bound the queue by media duration; output timing comes
         // from the decoded frame's own PTS, after repair.
-        let pts_ns = self
-            .pkt
-            .pts_or_dts()
-            .map_or(0, |pts| ffmpeg::rescale_q(pts, self.video_tb, NS_TIME_BASE));
+        let pts_ns = self.pkt.pts_or_dts().map_or(0, |pts| {
+            ffmpeg::rescale_q(pts, self.video_tb, ffmpeg::NS_TIME_BASE)
+        });
         let bytes = self.pkt.size().max(0) as usize;
         self.shared.conn.video_arrival_pts_ns.store(pts_ns, Relaxed);
         let received_ns = obs::time::gettime_ns();
@@ -199,7 +157,7 @@ impl Receiver {
         // Where the audio hold reads the sender's skew: this packet against
         // the newest audio decoded before it, in mux order.
         if let Some(dts) = self.pkt.dts_or_pts() {
-            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, NS_TIME_BASE);
+            let dts_ns = ffmpeg::rescale_q(dts, self.video_tb, ffmpeg::NS_TIME_BASE);
             crate::audio::hold::observe_video_packet(&self.shared, received_ns, dts_ns);
         }
 

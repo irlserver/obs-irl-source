@@ -3,10 +3,7 @@
 //! Without this the plugin's media stack is silent. The FFmpeg it links is
 //! static and hidden behind the module's symbol map, so the host OBS's own
 //! `av_log` callback can never see it, and FFmpeg's default callback writes to
-//! a stderr a Windows OBS does not have. Every libavformat/libsrt failure —
-//! the handshake error, the "no TS sync" probe warning, the reason a URL would
-//! not open — went nowhere at all. Port of the C `irl_ffmpeg_log`
-//! (master f06d705).
+//! a stderr a Windows OBS does not have.
 //!
 //! The sink receives a *formatted* line and nothing else: this module owns the
 //! `va_list`, and the caller never sees FFmpeg's format string or its

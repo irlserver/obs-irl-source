@@ -1,6 +1,6 @@
 //! Module entry points.
 //!
-//! [`declare_module!`] expands to the `obs_module_*` exports libobs looks up
+//! [`declare_module!`](crate::declare_module) expands to the `obs_module_*` exports libobs looks up
 //! (`obs_module_load`, `obs_module_set_pointer` and `obs_module_ver` are
 //! required; the rest optional) and the locale helpers that
 //! `OBS_MODULE_USE_DEFAULT_LOCALE` provides in C. The macro bodies only call
@@ -30,7 +30,7 @@ pub fn set_pointer(module: *mut obs_sys::obs_module_t) {
 
 /// The pointer stored by [`set_pointer`] (the C `obs_current_module()`).
 #[must_use]
-pub fn current_module() -> *mut obs_sys::obs_module_t {
+pub(crate) fn current_module() -> *mut obs_sys::obs_module_t {
     MODULE.load(Ordering::Acquire)
 }
 

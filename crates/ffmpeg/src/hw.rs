@@ -6,7 +6,7 @@ use crate::{AVHWDeviceType, AVPixelFormat, Error, Result, ffalign};
 /// Plane alignment for pooled transfer destinations; what
 /// `av_frame_get_buffer()` would pick on a modern x86 (AVX-512 stores), and
 /// what lets FFmpeg's uncached-copy fast path engage on D3D11VA.
-pub const XFER_PLANE_ALIGN: i32 = 64;
+const XFER_PLANE_ALIGN: i32 = 64;
 
 /// Surface dimensions are padded to this before allocating a transfer
 /// destination: hardware backends copy in aligned blocks, and every one of
@@ -26,7 +26,7 @@ unsafe impl Send for HwDeviceContext {}
 impl HwDeviceContext {
     /// Try `av_hwdevice_ctx_create(type, NULL, NULL, 0)` for each type in
     /// order; the first success wins. `on_fail` is called for each failure so
-    /// the caller can log it the way the C plugin does.
+    /// the caller can log it.
     pub fn probe(
         types: &[AVHWDeviceType],
         on_fail: &mut dyn FnMut(AVHWDeviceType, Error),
@@ -61,8 +61,7 @@ impl HwDeviceContext {
         self.kind
     }
 
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *mut ffmpeg_sys_next::AVBufferRef {
+    pub(crate) fn as_ptr(&self) -> *mut ffmpeg_sys_next::AVBufferRef {
         self.ptr
     }
 }
@@ -85,7 +84,6 @@ pub struct FramePool {
     fmt: AVPixelFormat,
     width: i32,
     height: i32,
-    size: usize,
 }
 
 // SAFETY: an AVBufferPool is internally synchronised (it is designed to be
@@ -112,7 +110,6 @@ impl FramePool {
                 fmt,
                 width,
                 height,
-                size,
             },
             size,
         ))
@@ -151,8 +148,8 @@ impl FramePool {
             }
         };
 
-        // SAFETY: `frame` is a blank frame we own; `buf->data` points at
-        // `self.size` bytes, which is exactly what av_image_get_buffer_size
+        // SAFETY: `frame` is a blank frame we own; `buf->data` points at the
+        // pool's buffer size, which is exactly what av_image_get_buffer_size
         // reported for these format/dimensions/alignment in `new`.
         let ret = unsafe {
             let raw = frame.as_mut_ptr();
@@ -179,11 +176,6 @@ impl FramePool {
         // of the pool reference here; av_frame_unref returns it to the pool.
         unsafe { (*frame.as_mut_ptr()).buf[0] = buf };
         Ok(frame)
-    }
-
-    /// Bytes per pooled buffer.
-    pub fn buffer_size(&self) -> usize {
-        self.size
     }
 }
 
@@ -252,7 +244,6 @@ mod tests {
         );
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_YUV420P, 1920, 1080));
         assert!(!pool.matches(AVPixelFormat::AV_PIX_FMT_NV12, 1280, 720));
-        assert_eq!(size, pool.buffer_size());
         assert!(size >= 1920 * 1088 * 3 / 2);
 
         let first = pool.acquire().unwrap();

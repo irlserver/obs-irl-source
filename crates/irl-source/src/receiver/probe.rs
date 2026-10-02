@@ -1,6 +1,5 @@
 //! Hardware-decode probe tables and the two receiver helpers that are pure
-//! enough to test on their own (port of the tables and `nvdec_get_format`
-//! in `src/receiver-stream.c`).
+//! enough to test on their own.
 //!
 //! Nothing here touches plugin state, so `crates/irl-source/tests/receiver_*.rs`
 //! includes this file directly with `#[path]` — `crate::receiver` is private,
@@ -14,7 +13,7 @@ use ffmpeg::{AVHWDeviceType, AVPixelFormat, Codec};
 ///
 /// Windows D3D11VA → CUDA, macOS VideoToolbox, everything else VAAPI → CUDA.
 /// The first device that is created wins; `HwDeviceContext::probe` reports
-/// each failure so the caller can log it the way the C plugin does.
+/// each failure so the caller can log it.
 #[cfg(windows)]
 pub const HW_DEVICE_TYPES: &[AVHWDeviceType] = &[
     AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,

@@ -1,6 +1,5 @@
-//! Audio output side (port of the audio-thread half of `receiver-audio.c`).
-//! W2-B owns this module. The functions here are the ones the other threads
-//! call; their signatures are frozen.
+//! Audio output side: the audio thread and the functions the other threads
+//! call into it.
 
 pub mod hold;
 pub mod pump;
@@ -15,8 +14,8 @@ use crate::shared::{AudioState, Shared};
 
 pub use pump::AudioPump;
 
-/// Audio thread body: 16 pump iterations per wakeup, 1 ms sleep, until the
-/// run is stopped (`receiver.c: irl_audio_thread`).
+/// Audio thread body: up to `AUDIO_PUMP_BURST` pump iterations per wakeup,
+/// until the run is stopped.
 pub fn audio_thread(shared: Arc<Shared>) {
     let mut pump = AudioPump::new(shared.clone());
 
@@ -63,18 +62,17 @@ impl AudioSink for obs::SourceHandle {
     }
 }
 
-/// `irl_audio_output_claim`: reserve `frames` on the sample-counter clock and
-/// return the OBS timestamp for them. Caller holds `audio_state`.
+/// Reserve `frames` on the sample-counter clock and return the OBS timestamp
+/// for them. Caller holds `audio_state`.
 pub fn output_claim(state: &mut AudioState, frames: u32, rate: u32) -> u64 {
     let ts = timing::output_next_ts(state.anchor_ns, state.samples, rate);
     state.samples += frames as u64;
     ts
 }
 
-/// `irl_reset_audio_timing_state`: output clock, playout mapping, fades and
-/// concealment back to the not-yet-primed state, including the per-chunk
-/// stats mirrored in `ConnStats`. Caller holds `audio_state`.
-pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
+/// Output clock, playout mapping, fades and concealment back to the
+/// not-yet-primed state. Caller holds `audio_state`.
+pub fn reset_audio_timing_state(state: &mut AudioState) {
     state.primed = false;
     state.anchor_ns = 0;
     state.samples = 0;
@@ -95,55 +93,37 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
     state.startup_warmup_remaining_ms = 0;
     state.drain = irl_core::DrainWatch::default();
 
-    // The output-side stats the C's audio reset zeroed, now in `ConnStats`.
-    shared.conn.last_obs_lead_ns.store(0, Relaxed);
-    shared.conn.last_chunk_stream_ns.store(0, Relaxed);
-    shared.conn.last_chunk_obs_ns.store(0, Relaxed);
-    shared.conn.last_frames_out.store(0, Relaxed);
-    shared.conn.last_samples_per_sec.store(0, Relaxed);
-    // The receiver-thread half of the C function (decode-error counters,
-    // last-sample memory) lives in `ReceiverFlags` / `AudioIntake`, cleared
-    // by their owners at the same call sites.
+    // The receiver-thread half (decode-error counters, last-sample memory)
+    // lives in `ReceiverFlags` / `AudioIntake`, cleared by their owners at the
+    // same call sites.
 }
 
-/// `irl_reset_stream_timing_state`: the audio reset plus the video-side
-/// mirrors in `ConnStats` and the stream PTS trackers. Caller holds
-/// `audio_state`.
+/// The audio reset plus the video-side mirrors in `ConnStats` and the stream
+/// PTS trackers. Caller holds `audio_state`.
 pub fn reset_stream_timing_state(shared: &Shared, state: &mut AudioState) {
-    reset_audio_timing_state(shared, state);
+    reset_audio_timing_state(state);
 
     // The trim is a property of the sender, so it deliberately survives the
     // audio-only reset above (a throttled decoder flush must not cost two
     // minutes of relearning). It does not survive this one: a PTS-repair reset
     // means the timeline broke badly enough that the level no longer maps to
     // the sender's clock, and a reconnect may not even be the same encoder.
-    // Relearning costs nothing worse than the behaviour before the trim
-    // existed.
     state.speed_trim.reset();
     // The skew readings straddle the break; the hold they sized stays, and a
     // release window takes it back if the sender no longer needs it.
     hold::forget_readings(state);
 
-    state.latest_video_stream_pts_ns = 0;
-
-    // State, not counters: the interval has to be re-measured for the new
-    // stream, and a stale lead would be reported until the first frame
-    // arrives. video_lead_excess is cumulative for the source, like the other
-    // quality counters.
+    // The fallback clock re-anchors, and the frame interval is re-measured
+    // for the new stream.
     shared.conn.video_ts_init.store(false, Relaxed);
-    shared.conn.video_sys_base.store(0, Relaxed);
-    shared.conn.video_pts_base.store(0, Relaxed);
     shared.conn.video_frame_interval_ns.store(0, Relaxed);
-    shared.conn.video_lead_ns.store(0, Relaxed);
 
-    // Every C call site set `current_speed = 1.0f` immediately after this
-    // call (`irl-source.c:234-235`, `receiver-stream.c:671-678`); the
-    // controller itself lives on the audio thread and re-arms from 1.0 while
-    // playback is unprimed, which is exactly the window a reset opens.
+    // The controller on the audio thread re-arms from 1.0 while playback is
+    // unprimed, which is exactly the window a reset opens.
     shared.conn.set_current_speed(1.0);
 }
 
-/// `irl_mark_audio_recovery`: hold recovery for `duration_us` from now.
+/// Extend recovery to at least `duration_us` from now.
 pub fn mark_audio_recovery(state: &mut AudioState, now_us: u64, duration_us: u64) {
     let until_us = now_us + duration_us;
     if until_us > state.recovery_until_us {
@@ -151,7 +131,6 @@ pub fn mark_audio_recovery(state: &mut AudioState, now_us: u64, duration_us: u64
     }
 }
 
-/// `irl_audio_recovery_active`.
 pub fn audio_recovery_active(state: &AudioState, now_us: u64) -> bool {
     state.recovery_until_us != 0 && now_us < state.recovery_until_us
 }

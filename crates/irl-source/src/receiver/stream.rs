@@ -1,4 +1,4 @@
-//! Stream open/close, reconnection, stats line (port of `src/receiver-stream.c`). W2-A.
+//! Stream open/close, reconnection, stats line.
 
 use std::ffi::CString;
 use std::sync::atomic::Ordering::Relaxed;
@@ -10,8 +10,8 @@ use crate::audio;
 use crate::receiver::{Receiver, probe};
 use crate::shared::{AudioState, Shared, VideoDecoder};
 
-/// `nvdec_get_format`. Installed only for forced NVDEC, where a software
-/// fallback is exactly what must not happen.
+/// Installed only for forced NVDEC, where a software fallback is exactly what
+/// must not happen.
 fn nvdec_get_format(codec: &Codec, offered: &[AVPixelFormat]) -> AVPixelFormat {
     let picked = probe::pick_cuda_format(codec, offered);
     if picked == AVPixelFormat::AV_PIX_FMT_NONE {
@@ -20,7 +20,7 @@ fn nvdec_get_format(codec: &Codec, offered: &[AVPixelFormat]) -> AVPixelFormat {
     picked
 }
 
-/// Open one decoder for `stream` (port of `open_decoder`).
+/// Open one decoder for `stream`.
 ///
 /// `hw_device` is the connection's shared device slot: the video decoder
 /// creates it, and the software-fallback path releases it. `using_hw_decode`
@@ -203,7 +203,6 @@ impl Receiver {
         for (key, value) in irl_core::url_opts::demuxer_options(
             &url_str,
             self.shared.cfg.ffmpeg_options.as_deref(),
-            consts::NETWORK_BUFFER_MB,
             fast_probe,
         ) {
             let (Ok(key), Ok(value)) = (CString::new(key.as_ref()), CString::new(value.as_ref()))
@@ -227,9 +226,9 @@ impl Receiver {
             irl_info!("Listening for the sender to call in; no I/O deadline until it does");
         }
 
-        // Unrecognised options are dropped without a word, as `av_dict_free`
-        // does in the C: FFmpeg option names differ per protocol, so the
-        // table above deliberately sets keys most inputs ignore.
+        // Unrecognised options are dropped silently: FFmpeg option names
+        // differ per protocol, so the table above deliberately sets keys most
+        // inputs ignore.
         let fmt = match ffmpeg::FormatContext::open(&url, opts, self.shared.interrupt.clone()) {
             Ok((fmt, _unrecognised)) => fmt,
             Err(err) => {
@@ -273,11 +272,7 @@ impl Receiver {
         );
 
         if self.audio_stream_idx >= 0 {
-            let tb = self.audio_tb;
-            let Self {
-                audio_in, shared, ..
-            } = self;
-            audio_in.init_pts_repair(&shared.cfg, tb);
+            self.audio_in.init_pts_repair(self.audio_tb);
         }
 
         true
@@ -370,8 +365,8 @@ impl Receiver {
         }
     }
 
-    /// `irl_open_stream`: fast probe when the previous session on this thread
-    /// showed what the stream carries, full probe otherwise.
+    /// Fast probe when the previous session on this thread showed what the
+    /// stream carries, full probe otherwise.
     ///
     /// The short probe can miss a stream some encoders advertise late, so a
     /// result thinner than the previous session is thrown away and re-probed
@@ -403,9 +398,8 @@ impl Receiver {
         true
     }
 
-    /// `irl_close_ffmpeg`. The hardware device goes with the connection it was
-    /// created for; the software scaler belongs to the video thread and is not
-    /// touched here.
+    /// The hardware device goes with the connection it was created for; the
+    /// software scaler belongs to the video thread and is not touched here.
     pub(super) fn close_ffmpeg(&mut self) {
         self.audio_dec = None;
         // The video decoder belongs to the video thread; it drops it on the
@@ -425,7 +419,6 @@ impl Receiver {
         self.flags.reset();
     }
 
-    /// `irl_prepare_new_connection`.
     pub(super) fn prepare_new_connection(&mut self) {
         self.shared.flags.reconnecting.store(false, Relaxed);
         self.shared.video_flags.first_keyframe.store(false, Relaxed);
@@ -441,10 +434,9 @@ impl Receiver {
         crate::audio::hold::reset_connection(&self.shared, &mut state);
     }
 
-    /// `irl_wait_for_reconnect`. Returns whether the run is still active.
+    /// Returns whether the run is still active.
     pub(super) fn wait_for_reconnect(&mut self) -> bool {
         self.shared.flags.reconnecting.store(true, Relaxed);
-        self.shared.lifetime.reconnect_count.fetch_add(1, Relaxed);
         // Sampled once: a delay edited mid-wait should apply to the next
         // attempt, not stretch or truncate the one already counting down.
         let delay_s = self.shared.hot.reconnect_delay_s.load(Relaxed);
@@ -454,9 +446,9 @@ impl Receiver {
         self.shared.is_active()
     }
 
-    /// `irl_handle_stream_read_error`: log, tear the connection down, blank
-    /// the source, fade the buffered audio out and reset the per-connection
-    /// counters. The read loop reconnects immediately afterwards.
+    /// Log, tear the connection down, blank the source, fade the buffered
+    /// audio out and reset the per-connection counters. The read loop
+    /// reconnects immediately afterwards.
     pub(super) fn handle_stream_read_error(&mut self, err: ffmpeg::Error) {
         let shared = self.shared.clone();
         shared.flags.reconnecting.store(true, Relaxed);
@@ -491,9 +483,12 @@ impl Receiver {
                 buf.flush();
             }
             audio::reset_stream_timing_state(&shared, &mut state);
-            audio::mark_audio_recovery(&mut state, ffmpeg::gettime_us() as u64, 2_500_000);
+            audio::mark_audio_recovery(
+                &mut state,
+                ffmpeg::gettime_us() as u64,
+                consts::AUDIO_RESET_RECOVERY_HOLD_US,
+            );
             state.fade_in_pending = true;
-            shared.conn.video_corrupt_frames.store(0, Relaxed);
             shared.conn.video_corrupt_held.store(0, Relaxed);
         }
 
@@ -501,17 +496,8 @@ impl Receiver {
         conn.set_current_speed(1.0);
         conn.audio_output_restarts.store(0, Relaxed);
         conn.audio_underruns.store(0, Relaxed);
-        conn.audio_resync_skipped_chunks.store(0, Relaxed);
-        conn.audio_hidden_trimmed_chunks.store(0, Relaxed);
-        conn.audio_quality_events.store(0, Relaxed);
-        conn.audio_decoder_flushes.store(0, Relaxed);
-        conn.pts_repairs.store(0, Relaxed);
-        conn.pts_normalizations.store(0, Relaxed);
-        conn.pts_interpolations.store(0, Relaxed);
-        conn.pts_resets.store(0, Relaxed);
-        conn.pts_last_gap_ms.store(0, Relaxed);
+        conn.audible_skipped_chunks.store(0, Relaxed);
         conn.pts_max_gap_ms.store(0, Relaxed);
-        conn.silence_insertions.store(0, Relaxed);
         conn.total_audio_frames.store(0, Relaxed);
         conn.total_video_frames.store(0, Relaxed);
         self.last_stats_time = 0;
@@ -535,24 +521,22 @@ impl Receiver {
         // from separate reads: its three inputs are only meaningful against
         // each other, and the audio thread updates them together.
         //
-        // The rest of what other threads write are atomics, so unlike the C
-        // they need no lock at all — and the stats line is the last place the
-        // audio_state / video queue lock edge should be introduced.
+        // The rest of what other threads write are atomics and need no lock,
+        // and the stats line must not introduce an audio_state / video queue
+        // lock edge.
         let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
             let skew = crate::source::av_skew_ms(shared, &state);
-            let drift = if state.offset_baseline_set
-                && state.latest_obs_end_ts_ns != 0
-                && state.latest_buffered_end_pts_ns > 0
-            {
+            let drift = match state.playout_mapping() {
                 // Net of the audio hold, which moves the offset on purpose.
-                (state.latest_obs_end_ts_ns as i64
-                    - state.latest_buffered_end_pts_ns
-                    - state.offset_baseline_ns
-                    - crate::audio::hold::moved_since_baseline_ns(&state))
-                    / 1_000_000
-            } else {
-                0
+                Some((obs_end, buffered_end)) if state.offset_baseline_set => {
+                    (obs_end as i64
+                        - buffered_end
+                        - state.offset_baseline_ns
+                        - crate::audio::hold::moved_since_baseline_ns(&state))
+                        / 1_000_000
+                }
+                _ => 0,
             };
             (drift, skew)
         };
@@ -561,67 +545,43 @@ impl Receiver {
         let buffer_fill_ms = self.audio_fill_ms();
 
         irl_info!(
-            "Stats: video={} audio={} \
-             buf={}ms peak={}ms target={}ms speed={:.3} ctrl={} pts_repairs={} \
-             norm={} interp={} silence={} resets={} \
-             last_gap={}ms max_gap={}ms underruns={} resync_skips={} \
-             hidden_trims={} quality_events={} \
-             audio_flushes={} corrupt={} held={} vq_drops={} \
-             obs_lead={}ms chunk={}@{} \
-             stream_chunk={}ms obs_chunk={}ms \
-             restarts={} av_drift={}ms av_skew={}ms hold={}ms reanchors={} \
-             vlead={}ms peak={}ms excess={} vdelay={}ms vfps={:.1} \
-             pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
+            "Stats: video={} audio={} buf={}ms peak={}ms target={}ms speed={:.3} ll={}{} \
+             max_gap={}ms underruns={} restarts={} av_drift={}ms av_skew={}ms hold={}ms \
+             vdelay={}ms vfps={:.1} vq_drops={} \
+             pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
             conn.total_audio_frames.load(Relaxed),
             buffer_fill_ms,
             lifetime.audio_fill_peak_ms.load(Relaxed),
             shared.hot.watermarks().target_ms,
             f64::from(conn.current_speed()),
-            if shared.hot.adaptive_speed.load(Relaxed) {
+            if shared.cfg.low_latency_audio {
                 "on"
             } else {
                 "off"
             },
-            conn.pts_repairs.load(Relaxed),
-            conn.pts_normalizations.load(Relaxed),
-            conn.pts_interpolations.load(Relaxed),
-            conn.silence_insertions.load(Relaxed),
-            conn.pts_resets.load(Relaxed),
-            conn.pts_last_gap_ms.load(Relaxed),
+            // Only the unusual setting is spelled out.
+            if shared.hot.adaptive_speed.load(Relaxed) {
+                ""
+            } else {
+                " ctrl=off"
+            },
             conn.pts_max_gap_ms.load(Relaxed),
             conn.audio_underruns.load(Relaxed),
-            conn.audio_resync_skipped_chunks.load(Relaxed),
-            conn.audio_hidden_trimmed_chunks.load(Relaxed),
-            conn.audio_quality_events.load(Relaxed),
-            conn.audio_decoder_flushes.load(Relaxed),
-            conn.video_corrupt_frames.load(Relaxed),
-            conn.video_corrupt_held.load(Relaxed),
-            lifetime.video_queue_drops.load(Relaxed),
-            conn.last_obs_lead_ns.load(Relaxed) / 1_000_000,
-            conn.last_frames_out.load(Relaxed),
-            conn.last_samples_per_sec.load(Relaxed),
-            conn.last_chunk_stream_ns.load(Relaxed) / 1_000_000,
-            conn.last_chunk_obs_ns.load(Relaxed) / 1_000_000,
             conn.audio_output_restarts.load(Relaxed),
             av_drift_ms,
             av_skew_ms,
             conn.audio_hold_ms.load(Relaxed),
-            lifetime.audio_offset_reanchors.load(Relaxed),
-            conn.video_lead_ns.load(Relaxed) / 1_000_000,
-            lifetime.video_lead_peak_ns.load(Relaxed) / 1_000_000,
-            lifetime.video_lead_excess.load(Relaxed),
             conn.video_delay_ns.load(Relaxed) / 1_000_000,
             if video_frame_interval_ns > 0 {
                 1_000_000_000.0 / video_frame_interval_ns as f64
             } else {
                 0.0
             },
-            // The compressed video queue: where the stream's latency is
-            // actually held. Its duration should track the Target Buffer, and
-            // its size is what a deep buffer costs at this bitrate — the
-            // decoded side is bounded by VIDEO_DECODE_LEAD_MS whatever this
-            // says.
+            lifetime.video_queue_drops.load(Relaxed),
+            // The compressed video queue holds the stream's latency: its
+            // duration should track the Target Buffer, and its size is what a
+            // deep buffer costs at this bitrate.
             shared.video.len(),
             lifetime.video_queue_peak.load(Relaxed),
             shared.video.bytes() / 1024,
@@ -629,7 +589,6 @@ impl Receiver {
             lifetime.pacing_now.load(Relaxed),
             lifetime.pacing_peak.load(Relaxed),
             lifetime.pacing_bytes.load(Relaxed) / (1024 * 1024),
-            lifetime.pacing_overflows.load(Relaxed),
             lifetime.video_pkt_eagain.load(Relaxed),
             lifetime.audio_pkt_eagain.load(Relaxed),
             lifetime.video_pkt_dropped.load(Relaxed),

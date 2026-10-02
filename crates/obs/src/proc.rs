@@ -3,7 +3,7 @@
 //! `calldata_init`, `calldata_free` and every typed `calldata_set_*` /
 //! `calldata_get_*` are `static inline` in `callback/calldata.h`; they are
 //! reimplemented here over the three exported functions (`calldata_set_data`,
-//! `calldata_get_data`, `calldata_get_string`) with the C widths: `long long`
+//! `calldata_get_data`, `calldata_get_string`) with libobs's widths: `long long`
 //! = 8, `double` = 8, `bool` = 1, pointer = `size_of::<*mut c_void>()`, string
 //! = `strlen + 1`.
 
@@ -24,7 +24,7 @@ pub struct ProcHandler<'a>(NonNull<obs_sys::proc_handler_t>, PhantomData<&'a ()>
 impl ProcHandler<'_> {
     /// # Safety
     /// `ptr` must be a live proc handler for `'a`.
-    pub unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::proc_handler_t>) -> ProcHandler<'a> {
+    pub(crate) unsafe fn from_raw<'a>(ptr: NonNull<obs_sys::proc_handler_t>) -> ProcHandler<'a> {
         ProcHandler(ptr, PhantomData)
     }
 
@@ -107,8 +107,7 @@ pub struct CallData(obs_sys::calldata_t);
 impl CallData {
     #[must_use]
     pub fn new() -> Self {
-        // `calldata_init` is a memset to zero; the C callers that build one on
-        // the stack write `calldata_t cd = {0, 0, 0, 0}` instead, same thing.
+        // `calldata_init` is a memset to zero.
         Self(obs_sys::calldata_t {
             stack: core::ptr::null_mut(),
             size: 0,
@@ -119,7 +118,7 @@ impl CallData {
 
     /// # Safety
     /// `ptr` must be a live `calldata_t` for the returned borrow.
-    pub unsafe fn from_raw_mut<'a>(ptr: *mut obs_sys::calldata_t) -> &'a mut Self {
+    pub(crate) unsafe fn from_raw_mut<'a>(ptr: *mut obs_sys::calldata_t) -> &'a mut Self {
         // CallData is #[repr(transparent)]-equivalent over calldata_t.
         unsafe { &mut *(ptr as *mut Self) }
     }
@@ -133,14 +132,14 @@ impl CallData {
     }
 
     /// The shared body of every typed getter. `false` means "absent, or a
-    /// different type", exactly as in C.
+    /// different type", as with the header's own getters.
     fn get_data(&self, name: &CStr, out: *mut c_void, size: usize) -> bool {
         // SAFETY: as above; libobs writes at most `size` bytes into `out`.
         unsafe { obs_sys::calldata_get_data(&raw const self.0, name.as_ptr(), out, size) }
     }
 
     pub fn set_i64(&mut self, name: &CStr, value: i64) {
-        // C stores a `long long`, which is 8 bytes on every target OBS builds
+        // libobs stores a `long long`, which is 8 bytes on every target OBS builds
         // for; a getter asking for a different width reads nothing.
         let v: i64 = value;
         self.set_data(name, (&raw const v).cast(), size_of::<i64>());
@@ -207,7 +206,7 @@ impl CallData {
             .then_some(v)
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut obs_sys::calldata_t {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut obs_sys::calldata_t {
         &mut self.0
     }
 }

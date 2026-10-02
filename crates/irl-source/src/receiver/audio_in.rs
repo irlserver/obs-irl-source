@@ -1,5 +1,4 @@
-//! Decoded audio intake on the receiver thread (port of
-//! `irl_handle_audio_frame`, `receiver-audio.c:906-1127`). W2-B.
+//! Decoded audio intake on the receiver thread.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -7,46 +6,23 @@ use ffmpeg::{AVSampleFormat, Rational, Resampler};
 use irl_core::{LastSample, PtsAction, PtsRepair, consts, dsp, timing};
 
 use crate::receiver::ReceiverFlags;
-use crate::shared::{Shared, StreamConfig};
-
-/// Bytes one interleaved float sample occupies (`sizeof(float)`).
-const BYTES_PER_SAMPLE: i32 = 4;
-
-/// Nanosecond time base.
-const NS_TB: Rational = Rational::new(1, 1_000_000_000);
+use crate::shared::Shared;
 
 /// Receiver-thread audio state: the input resampler, its scratch buffer, the
 /// PTS repair state machine and the last-sample memory used for silence
 /// shaping.
+#[derive(Default)]
 pub struct AudioIntake {
     swr: Option<Resampler>,
     scratch: Vec<u8>,
     pts: Option<PtsRepair>,
     last_sample: LastSample,
-    small_gap_ms: i32,
-    large_gap_ms: i32,
-    /// Byte ⇄ float view for the silence shaping and the post-silence fade;
-    /// see the note on `audio::pump::FloatEdit` (this crate forbids the
-    /// unsafe cast, and both edits are off the steady-state path).
-    float: Vec<f32>,
+    /// Byte ⇄ float view for the silence shaping and the post-silence fade.
+    float: dsp::FloatEdit,
 }
 
 impl AudioIntake {
-    /// Fresh intake for a run; PTS-repair thresholds come from `cfg`.
-    pub fn new(cfg: &StreamConfig) -> Self {
-        Self {
-            swr: None,
-            scratch: Vec::new(),
-            pts: None,
-            last_sample: LastSample::default(),
-            small_gap_ms: cfg.small_gap_ms,
-            large_gap_ms: cfg.large_gap_ms,
-            float: Vec::new(),
-        }
-    }
-
-    /// Per-connection reset (`irl_prepare_new_connection` for the audio
-    /// fields): drops the resampler, resets PTS repair.
+    /// Per-connection reset: drops the resampler, resets PTS repair.
     pub fn reset(&mut self) {
         self.swr = None;
         if let Some(pts) = self.pts.as_mut() {
@@ -55,23 +31,15 @@ impl AudioIntake {
         self.last_sample = LastSample::default();
     }
 
-    /// (Re)initialise PTS repair for the audio stream's time base
-    /// (`pts_repair_init` at decoder open and after a decoder flush).
-    pub fn init_pts_repair(&mut self, cfg: &StreamConfig, tb: ffmpeg::Rational) {
-        self.small_gap_ms = cfg.small_gap_ms;
-        self.large_gap_ms = cfg.large_gap_ms;
+    /// (Re)initialise PTS repair for the audio stream's time base, at decoder
+    /// open and after a decoder flush.
+    pub fn init_pts_repair(&mut self, tb: ffmpeg::Rational) {
         self.pts = Some(PtsRepair::new(
-            cfg.small_gap_ms,
-            cfg.large_gap_ms,
+            consts::SMALL_GAP_MS,
+            consts::LARGE_GAP_MS,
             tb.num,
             tb.den,
         ));
-    }
-
-    /// The PTS repair state (the decode path calls `reset` on it after a
-    /// decoder flush).
-    pub fn pts_repair(&mut self) -> Option<&mut PtsRepair> {
-        self.pts.as_mut()
     }
 
     /// One decoded frame: format change handling, PTS repair, warm-up
@@ -96,7 +64,6 @@ impl AudioIntake {
         let Some((verdict, pts_tb, duration)) = self.evaluate_pts(frame, out_rate, tb) else {
             return;
         };
-        let mut inserted_silence = false;
 
         // ── Startup warm-up ──
         let frame_ms = audio_frame_duration_ms(frame.nb_samples(), out_rate);
@@ -112,13 +79,11 @@ impl AudioIntake {
         }
 
         // ── PTS repair dispatch ──
+        let mut inserted_silence = false;
         match verdict.action {
             PtsAction::Silence if verdict.silence_ms > 0 => {
-                if self.insert_silence(shared, verdict.corrected_pts, verdict.silence_ms, pts_tb) {
-                    shared.conn.silence_insertions.fetch_add(1, Relaxed);
-                    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                    inserted_silence = true;
-                }
+                inserted_silence =
+                    self.insert_silence(shared, verdict.corrected_pts, verdict.silence_ms, pts_tb);
             }
             PtsAction::Reset => {
                 let mut state = shared.audio_state();
@@ -131,10 +96,8 @@ impl AudioIntake {
                     ffmpeg::gettime_us() as u64,
                     consts::AUDIO_RECOVERY_HOLD_US,
                 );
-                shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 drop(state);
-                // The video half of `irl_reset_stream_timing_state`. Video
-                // decode runs on its own thread now, so this is a request
+                // Video decode runs on its own thread, so this is a request
                 // rather than a write: it picks it up on its next cycle.
                 shared.video_flags.corrupted.store(false, Relaxed);
                 shared.video_flags.timeline_reset.store(true, Relaxed);
@@ -146,23 +109,10 @@ impl AudioIntake {
         }
 
         if verdict.action != PtsAction::Pass {
-            let gap_ms = verdict.gap_ms;
-            shared.conn.pts_last_gap_ms.store(gap_ms, Relaxed);
-            shared.conn.pts_max_gap_ms.fetch_max(gap_ms, Relaxed);
-
-            let frame_sized_normalization =
-                verdict.action == PtsAction::Interpolate && frame_ms > 0 && gap_ms <= frame_ms + 2;
-            if frame_sized_normalization {
-                shared.conn.pts_normalizations.fetch_add(1, Relaxed);
-            } else {
-                shared.conn.pts_repairs.fetch_add(1, Relaxed);
-                if verdict.action == PtsAction::Interpolate {
-                    shared.conn.pts_interpolations.fetch_add(1, Relaxed);
-                }
-            }
-            if verdict.action == PtsAction::Reset {
-                shared.conn.pts_resets.fetch_add(1, Relaxed);
-            }
+            shared
+                .conn
+                .pts_max_gap_ms
+                .fetch_max(verdict.gap_ms, Relaxed);
         }
 
         // ── Convert to interleaved float ──
@@ -178,9 +128,8 @@ impl AudioIntake {
                 None => return,
             }
         } else if inserted_silence {
-            // The C faded the decoder's own buffer in place; a decoded frame
-            // is borrowed immutably here, so the (rare) fade path copies it
-            // into the scratch first.
+            // A decoded frame is borrowed immutably, so the (rare) fade path
+            // copies it into the scratch first.
             let Some(bytes) = frame.interleaved_f32_bytes() else {
                 return;
             };
@@ -189,14 +138,14 @@ impl AudioIntake {
             in_scratch = true;
         }
 
-        let data_bytes = out_samples as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
+        let data_bytes = out_samples as usize * out_channels as usize * dsp::SAMPLE_BYTES;
         if data_bytes == 0 {
             return;
         }
 
         if inserted_silence {
             let channels = out_channels as usize;
-            edit_floats(&mut self.float, &mut self.scratch[..data_bytes], |pcm| {
+            self.float.edit(&mut self.scratch[..data_bytes], |pcm| {
                 dsp::apply_fade_in(pcm, channels, out_rate)
             });
         }
@@ -217,18 +166,18 @@ impl AudioIntake {
             }
         };
 
-        let frame_pts_ns = ffmpeg::rescale_q(verdict.corrected_pts, pts_tb, NS_TB);
+        let frame_pts_ns = ffmpeg::rescale_q(verdict.corrected_pts, pts_tb, ffmpeg::NS_TIME_BASE);
         if let Some(buf) = shared.audio_buf().as_mut() {
             buf.write_pts(data, frame_pts_ns);
         }
-        remember_last_sample(&mut self.last_sample, data, out_channels as usize);
+        self.last_sample.remember_bytes(data, out_channels as usize);
 
         let mut state = shared.audio_state();
         state.latest_audio_stream_pts_ns = frame_pts_ns;
         state.decoded_frame_samples = out_samples;
     }
 
-    /// The PTS half of `irl_handle_audio_frame`: the frame's timestamp (or an
+    /// The PTS half of [`Self::handle_frame`]: the frame's timestamp (or an
     /// extrapolated one), its duration, and the repair verdict. `None` drops
     /// the frame.
     fn evaluate_pts(
@@ -263,7 +212,7 @@ impl AudioIntake {
         Some((verdict, Rational::new(tb_num, tb_den), duration))
     }
 
-    /// The format-change half of `irl_handle_audio_frame`: (re)build the
+    /// The format-change half of [`Self::handle_frame`]: (re)build the
     /// jitter buffer and restart the output clock. Returns false when the
     /// buffer could not be configured (the frame is then dropped).
     fn ensure_buffer_format(&mut self, shared: &Shared, out_rate: i32, out_channels: i32) -> bool {
@@ -280,19 +229,17 @@ impl AudioIntake {
         let reconfigured = {
             let mut guard = shared.audio_buf();
             match guard.as_mut() {
-                Some(buf) => buf.reconfigure(out_rate, out_channels, BYTES_PER_SAMPLE),
+                Some(buf) => buf.reconfigure(out_rate, out_channels, dsp::SAMPLE_BYTES as i32),
                 None => {
-                    let buf = irl_core::AudioBuffer::new(
+                    *guard = Some(irl_core::AudioBuffer::new(
                         out_rate,
                         out_channels,
-                        BYTES_PER_SAMPLE,
+                        dsp::SAMPLE_BYTES as i32,
                         watermarks.target_ms,
                         watermarks.min_ms,
                         watermarks.max_ms,
-                    );
-                    let ok = buf.is_some();
-                    *guard = buf;
-                    ok
+                    ));
+                    true
                 }
             }
         };
@@ -308,7 +255,7 @@ impl AudioIntake {
         reconfigured
     }
 
-    /// The `PTS_ACTION_SILENCE` branch: shaped silence, timestamped to end
+    /// The [`PtsAction::Silence`] branch: shaped silence, timestamped to end
     /// where the repaired frame begins.
     fn insert_silence(
         &mut self,
@@ -336,12 +283,12 @@ impl AudioIntake {
             self.scratch.resize(silence_bytes, 0);
         }
         let last = self.last_sample;
-        edit_floats(&mut self.float, &mut self.scratch[..silence_bytes], |pcm| {
+        self.float.edit(&mut self.scratch[..silence_bytes], |pcm| {
             dsp::shape_silence_from_last(pcm, channels, rate, &last)
         });
 
-        let mut silence_pts_ns =
-            ffmpeg::rescale_q(corrected_pts, pts_tb, NS_TB) - silence_ms as i64 * 1_000_000;
+        let mut silence_pts_ns = ffmpeg::rescale_q(corrected_pts, pts_tb, ffmpeg::NS_TIME_BASE)
+            - silence_ms as i64 * 1_000_000;
         if silence_pts_ns < 0 {
             silence_pts_ns = 0;
         }
@@ -383,7 +330,7 @@ impl AudioIntake {
         }
 
         let max_out = swr.out_samples(frame.nb_samples()) + soft_comp_samples.abs() + 32;
-        let need = max_out as usize * out_channels as usize * BYTES_PER_SAMPLE as usize;
+        let need = max_out as usize * out_channels as usize * dsp::SAMPLE_BYTES;
         if self.scratch.len() < need {
             self.scratch.resize(need, 0);
         }
@@ -399,46 +346,10 @@ impl AudioIntake {
     }
 }
 
-/// `audio_frame_duration_ms`.
 fn audio_frame_duration_ms(samples: i32, sample_rate: i32) -> i32 {
     if samples <= 0 || sample_rate <= 0 {
         return 0;
     }
     let ms = samples as i64 * 1000 / sample_rate as i64;
     if ms <= 0 { 1 } else { ms as i32 }
-}
-
-/// `remember_last_sample` over an interleaved-float byte buffer.
-fn remember_last_sample(last: &mut LastSample, samples: &[u8], channels: usize) {
-    let mut values = [0.0f32; consts::AUDIO_MAX_CHANNELS];
-    let take = channels.min(consts::AUDIO_MAX_CHANNELS);
-    let frame_bytes = channels * BYTES_PER_SAMPLE as usize;
-    if channels == 0 || samples.len() < frame_bytes {
-        last.remember(&[], channels);
-        return;
-    }
-
-    let start = samples.len() - samples.len() % frame_bytes - frame_bytes;
-    for (ch, value) in values[..take].iter_mut().enumerate() {
-        let off = start + ch * BYTES_PER_SAMPLE as usize;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&samples[off..off + 4]);
-        *value = f32::from_le_bytes(raw);
-    }
-    last.remember(&values[..take], channels);
-}
-
-/// Run an `irl_core::dsp` edit over an interleaved-float byte buffer through a
-/// reusable float scratch (this crate forbids the unsafe view cast).
-fn edit_floats(scratch: &mut Vec<f32>, bytes: &mut [u8], edit: impl FnOnce(&mut [f32])) {
-    scratch.clear();
-    scratch.extend(bytes.chunks_exact(4).map(|chunk| {
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(chunk);
-        f32::from_le_bytes(raw)
-    }));
-    edit(scratch);
-    for (dst, value) in bytes.chunks_exact_mut(4).zip(scratch.iter()) {
-        dst.copy_from_slice(&value.to_le_bytes());
-    }
 }
