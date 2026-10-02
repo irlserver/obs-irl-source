@@ -246,7 +246,6 @@ impl AudioPump {
                 return false;
             }
 
-            state.hold_unbuilt_ns = 0;
             state.clock.restart(now + chunk_ns);
             // Reads and writes are both whole decoded chunks, so the residual
             // can only ever be a multiple of one: a 120ms target is not a
@@ -443,11 +442,6 @@ Video stays in sync with it; check the sender's frame rate and clock",
         ));
 
         state.out_last.remember_bytes(emitted, channels);
-        super::hold::credit_build(
-            state,
-            timing::frames_to_ns(u64::from(frames_out), fmt.rate as u32),
-            stream_duration_ns,
-        );
         let first_mapping = !state.mapping.has_output();
         finalize_audio_output(
             shared,

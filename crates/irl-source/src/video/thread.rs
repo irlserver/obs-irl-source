@@ -15,7 +15,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
-use irl_core::arrival::ArrivalFloor;
 use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacingQueue};
 use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
@@ -27,10 +26,14 @@ use crate::video::intake::{self, DecodeState};
 
 /// A frame waiting for its due time. `received_ns` is when the packet it was
 /// decoded from reached this thread, which is what its arrival margin is
-/// measured from.
+/// measured from. `base_ns` is its due time before the video delay: mapped
+/// through the audio playout, or on the video-only fallback when there is no
+/// mapping to re-derive it from.
 pub struct Paced {
     frame: Frame,
+    pts_ns: i64,
     received_ns: u64,
+    base_ns: u64,
 }
 
 impl Paced {
@@ -41,6 +44,12 @@ impl Paced {
     /// OBS clock at which the packet behind this frame arrived.
     pub fn received_ns(&self) -> u64 {
         self.received_ns
+    }
+
+    /// The frame's undelayed due time minus its PTS: the offset the video
+    /// delay is measured against.
+    fn offset_ns(&self) -> i64 {
+        self.base_ns as i64 - self.pts_ns
     }
 }
 
@@ -105,17 +114,19 @@ pub struct VideoThread {
     /// Where the wait for the audio playout mapping stands. See
     /// [`Self::awaiting_audio_mapping`].
     anchor_wait: AnchorWait,
-    /// The standing delay on the video schedule, so that video which reaches
-    /// this thread too late to be paced against the audio playout still can
-    /// be. See [`Self::settle_anchor_candidate`].
+    /// The floor under the video schedule, so that video which reaches this
+    /// thread too late to be paced against the audio playout still can be.
+    /// See [`Self::settle_anchor_candidate`].
     pub(crate) delay: VideoDelay,
-    /// Whether video arriving now is live or still catching up to live, which
-    /// decides whether a frame may size the delay before the anchor.
-    arrival: ArrivalFloor,
-    /// The audio pump's running total of hold built (`AudioState::
-    /// hold_built_ns`) as of the last cycle; `None` until the first read after
-    /// a reset. See [`Self::absorb_audio_hold`].
-    hold_built_seen_ns: Option<u64>,
+    /// The offset the schedule runs at: the audio playout offset this cycle,
+    /// or the newest frame's on the fallback. The delay it implies is what
+    /// the stats report.
+    offset_ns: Option<i64>,
+    /// The floor moved this cycle, and its own log line said so.
+    floor_moved: bool,
+    /// Whether the last published delay was above zero, so the line that
+    /// says the audio playout moved past the floor is edge-triggered.
+    delay_shown: bool,
     /// The OBS clock, read for every timing decision this thread makes.
     /// Injectable so tests can step it; production reads `os_gettime_ns`.
     now_ns: Box<dyn Fn() -> u64 + Send>,
@@ -161,8 +172,9 @@ impl VideoThread {
             anchor_pending: true,
             anchor_wait: AnchorWait::Idle,
             delay: VideoDelay::default(),
-            arrival: ArrivalFloor::default(),
-            hold_built_seen_ns: None,
+            offset_ns: None,
+            floor_moved: false,
+            delay_shown: false,
             now_ns: Box::new(obs::time::gettime_ns),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
@@ -210,8 +222,9 @@ impl VideoThread {
             // to 0, so the next frame re-anchors the play head.
             self.anchor_pending = true;
             self.anchor_wait = AnchorWait::Idle;
-            // The delay was sized for the connection that just ended.
+            // The floor was sized for the connection that just ended.
             self.reset_delay();
+            self.publish_delay();
             self.sink.output_video_none();
             return Duration::ZERO;
         }
@@ -221,20 +234,24 @@ impl VideoThread {
         let slack_ns = self.emit_slack_ns();
 
         self.decode_intake();
-        self.absorb_audio_hold();
         // Before both the emit and the sleep below, so each cycle schedules
         // against the offset as it is now rather than as it was when the
         // frames were decoded.
         self.pacing_reschedule();
+        if !self.anchor_pending {
+            self.tend_floor(now_ns);
+        }
         if self.anchor_pending && self.awaiting_audio_mapping(now_ns) {
             // Nothing goes out until audio has published where video belongs.
             // The audio pump wakes this thread the moment it does; the sleep
             // is only the backstop.
             self.publish_counters();
+            self.publish_delay();
             return Duration::from_millis(consts::VIDEO_PACING_MAX_WAIT_MS);
         }
         self.pacing_emit_due(now_ns, slack_ns);
         self.publish_counters();
+        self.publish_delay();
         // Fresh clock for the sleep: the emit above may have taken long
         // enough to make the next frame due already.
         self.sleep_hint(self.now_ns(), slack_ns)
@@ -262,6 +279,8 @@ impl VideoThread {
         let shared = self.shared.clone();
         if shared.video_flags.timeline_reset.swap(false, Relaxed) {
             self.state.reset_timeline();
+            // The floor and the liveness history carry the old PTS epoch.
+            self.reset_delay();
         }
         // A decoder handover is taken even with no room: it produces nothing
         // by itself, and leaving it behind the queue would strand a reconnect
@@ -325,26 +344,30 @@ impl VideoThread {
     /// `decode_intake`.
     pub fn pace_decoded(&mut self, frame: Frame, received_ns: u64) {
         let sysmem = self.to_sysmem(&frame);
-        let due_ns = match &sysmem {
-            Some(f) => self.due_time(f),
+        let base_ns = match &sysmem {
+            Some(f) => self.base_due(f),
             None => 0,
         };
         // Releases the decoder's surface before the next packet is sent.
         drop(frame);
         if let Some(f) = sysmem {
             let pts_ns = f.pts();
-            self.arrival.note(received_ns, pts_ns);
+            self.delay.note_packet(received_ns, pts_ns);
+            self.offset_ns = Some(base_ns as i64 - pts_ns);
+            let due_ns = self.delay.due_ns(pts_ns, base_ns);
             let bytes = f.image_buffer_size().unwrap_or(0);
             let paced = Paced {
                 frame: f,
+                pts_ns,
                 received_ns,
+                base_ns,
             };
             self.pacing.push(paced, pts_ns, bytes, due_ns);
         }
     }
 
     /// Re-derive every queued frame's due time from the offset as it stands
-    /// now.
+    /// now and the floor as it stands now.
     ///
     /// The audio side reclaims playout latency two ways, and both would leave
     /// paced video behind for the depth of this queue. The speed controller
@@ -352,18 +375,44 @@ impl VideoThread {
     /// its residence late for the whole drain; a re-anchor steps the offset
     /// outright. Rescheduling against one offset per cycle preserves the
     /// spacing between frames and moves the whole queue with the audio it is
-    /// mapped to.
+    /// mapped to. Without a mapping each frame keeps the fallback due time it
+    /// was given at intake, and only the floor is re-applied.
     fn pacing_reschedule(&mut self) {
-        if self.pacing.is_empty() {
-            return;
+        let offset_ns = self.playout_offset();
+        if offset_ns.is_some() {
+            self.offset_ns = offset_ns;
         }
-        let Some(offset_ns) = self.playout_offset() else {
+        let delay = &self.delay;
+        self.pacing.reschedule(|pts_ns, paced| {
+            if let Some(offset_ns) = offset_ns {
+                paced.base_ns = (pts_ns + offset_ns).max(0) as u64;
+            }
+            delay.due_ns(pts_ns, paced.base_ns)
+        });
+    }
+
+    /// The floor's per-cycle work once the play head is anchored: a slew in
+    /// progress steps on, and a window of late frames that ran its course is
+    /// judged.
+    fn tend_floor(&mut self, now_ns: u64) {
+        let Some(offset_ns) = self.offset_ns else {
             return;
         };
-        self.pacing.reschedule(|pts_ns| {
-            let due = pts_ns + offset_ns;
-            if due > 0 { due as u64 } else { 0 }
-        });
+        let mut moved = false;
+        if let Some(step) = self.delay.ramp(now_ns, self.delay_ramp_rate(), offset_ns) {
+            moved = true;
+            if step.done {
+                irl_info!("Video delay settled at {}ms", step.delay_ns / 1_000_000);
+            }
+        }
+        if let Some(raise) = self.delay.expire(now_ns, offset_ns, self.canvas_tick_ns()) {
+            moved = true;
+            self.announce_delay_raise(raise, false);
+        }
+        if moved {
+            self.floor_moved = true;
+            self.pacing_reschedule();
+        }
     }
 
     /// Emit every frame whose moment has arrived. Over the ceilings the head
@@ -373,11 +422,6 @@ impl VideoThread {
         let tick_ns = self.canvas_tick_ns();
         if self.anchor_pending {
             self.settle_anchor_candidate(now_ns, tick_ns);
-        } else {
-            self.step_delay_ramp(now_ns);
-            if let Some(raise) = self.delay.expire(now_ns) {
-                self.apply_delay_raise(raise, false);
-            }
         }
         loop {
             // While the play head needs anchoring, a hard ceiling must not
@@ -396,18 +440,25 @@ impl VideoThread {
                 return;
             };
             if !self.anchor_pending {
+                let offset_ns = paced.offset_ns();
                 // Measured at hand-over: a frame that reaches libobs before its
                 // due time is shown on time, whether or not it had the full
                 // delivery lead (that lead is an oversleep allowance for frames
                 // the queue holds, and this one may never have waited).
-                let handover_margin_ns = due_ns as i64 - now_ns as i64;
-                if let Some(raise) = self.delay.note(now_ns, handover_margin_ns, 0, tick_ns) {
-                    self.apply_delay_raise(raise, false);
+                if let Some(raise) = self.delay.note(now_ns, paced.pts_ns, offset_ns, tick_ns) {
+                    self.floor_moved = true;
+                    self.pacing_reschedule();
+                    self.announce_delay_raise(raise, false);
                 }
-                // And at arrival, which is what says whether the delay in
-                // force is more than this stream needs.
-                let arrival_margin_ns = due_ns as i64 - paced.received_ns() as i64;
-                if let Some(relax) = self.delay.note_arrival(now_ns, arrival_margin_ns, tick_ns) {
+                // And at arrival, which is what says whether the floor is
+                // higher than this stream needs.
+                if let Some(relax) = self.delay.note_arrival(
+                    now_ns,
+                    paced.received_ns,
+                    paced.pts_ns,
+                    offset_ns,
+                    tick_ns,
+                ) {
                     self.announce_delay_relax(relax);
                 }
             }
@@ -480,13 +531,13 @@ impl VideoThread {
     ///
     /// First its arrival margin. Nothing has been shown yet, so a frame whose
     /// packet reached this thread less than a canvas tick before it is due
-    /// raises the standing video delay on the spot
-    /// ([`VideoDelay::before_anchor`]) and the queue moves with it. The
-    /// allowance is a tick for the decode still to come, not the delivery
-    /// lead: the lead covers the pacing timer oversleeping, and a frame handed
-    /// over on arrival never sleeps. This keeps a sender whose video trails its
-    /// audio by more than Target Buffer covers from playing unpaced, with
-    /// libobs dropping a frame whenever two arrive inside one canvas tick.
+    /// raises the video floor on the spot ([`VideoDelay::before_anchor`]) and
+    /// the queue is rescheduled onto it. The allowance is a tick for the
+    /// decode still to come, not the delivery lead: the lead covers the pacing
+    /// timer oversleeping, and a frame handed over on arrival never sleeps.
+    /// This keeps a sender whose video trails its audio by more than Target
+    /// Buffer covers from playing unpaced, with libobs dropping a frame
+    /// whenever two arrive inside one canvas tick.
     ///
     /// Only the newest frame in hand is measured (nothing queued behind it and
     /// the channel empty, so its arrival is a live one). The receiver pushes
@@ -514,25 +565,25 @@ impl VideoThread {
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
         let mut dropped = 0u32;
         let mut raised: Option<DelayRaise> = None;
-        while let (Some(due_ns), Some(received_ns)) = (
-            self.pacing.next_due(),
-            self.pacing.head().map(Paced::received_ns),
-        ) {
+        while let (Some(due_ns), Some(head)) = (self.pacing.next_due(), self.pacing.head()) {
+            let (received_ns, pts_ns, offset_ns) =
+                (head.received_ns, head.pts_ns, head.offset_ns());
             let on_time = now_ns as i64 - due_ns as i64 <= tick_ns as i64;
             let newest_in_hand = self.pacing.len() == 1 && self.shared.video.is_empty();
             // With audio to be in sync with, only live video says anything
             // about the sender: video still catching up to live (a relay
             // replaying from its last keyframe next to live audio) is behind
             // its audio for now, not for good.
-            let measurable = newest_in_hand && (!audio_present || self.arrival.live(now_ns));
+            let measurable = newest_in_hand && (!audio_present || self.delay.live(now_ns));
             let raise = if measurable {
                 self.delay
-                    .before_anchor(due_ns as i64 - received_ns as i64, tick_ns, tick_ns)
+                    .before_anchor(received_ns, pts_ns, offset_ns, tick_ns)
             } else {
                 None
             };
             if let Some(raise) = raise {
-                self.pacing.shift(raise.to_ns - raise.from_ns);
+                self.floor_moved = true;
+                self.pacing_reschedule();
                 // One line for the whole settlement, from the first delay to
                 // the last.
                 raised = Some(match raised {
@@ -550,14 +601,14 @@ impl VideoThread {
             // Late past the delay ceiling on the newest frame: no delay makes
             // this stream on time, so it anchors as it is rather than dropping
             // every frame while waiting for one that is (#33).
-            if newest_in_hand && self.delay.at_ceiling() {
+            if newest_in_hand && self.delay.at_ceiling(offset_ns) {
                 break;
             }
             self.pacing.pop();
             dropped += 1;
         }
         if let Some(raise) = raised {
-            self.apply_delay_raise(raise, true);
+            self.announce_delay_raise(raise, true);
         }
         if dropped > 0 {
             irl_info!(
@@ -566,16 +617,9 @@ impl VideoThread {
         }
     }
 
-    /// Publish a raised delay: mirror it for the stats and say why, with what
-    /// the user can do about it. The queue itself is moved by the caller
-    /// (before the anchor, inside the settling loop) or is already scheduled
-    /// on the new delay (after it, the next reschedule carries it; the frames
-    /// queued now are shifted here).
-    fn apply_delay_raise(&mut self, raise: DelayRaise, at_anchor: bool) {
-        if !at_anchor {
-            self.pacing.shift(raise.to_ns - raise.from_ns);
-        }
-        self.shared.conn.video_delay_ns.store(raise.to_ns, Relaxed);
+    /// Say why the floor rose, with what the user can do about it. The queue
+    /// has already been rescheduled onto it.
+    fn announce_delay_raise(&self, raise: DelayRaise, at_anchor: bool) {
         let to_ms = raise.to_ns / 1_000_000;
         let by_ms = (raise.to_ns - raise.from_ns) / 1_000_000;
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
@@ -586,23 +630,24 @@ impl VideoThread {
         // cannot move.
         let hold_follows =
             !self.shared.cfg.low_latency_audio && self.shared.hot.adaptive_speed.load(Relaxed);
+        let remedy = if hold_follows {
+            format!(
+                "Audio is held back to match if the sender keeps its video this far behind; if the video delay stays, raise Target Buffer by at least {to_ms}ms"
+            )
+        } else {
+            format!(
+                "If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms"
+            )
+        };
         match (at_anchor, audio_present) {
-            (true, true) if hold_follows => irl_warn!(
-                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. Audio is held back to match if the sender keeps its video this far behind; if the video delay stays, raise Target Buffer by at least {to_ms}ms"
-            ),
             (true, true) => irl_warn!(
-                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms"
+                "Video reaches the plugin too late to be shown in time with its audio; delaying video by {to_ms}ms. {remedy}"
             ),
             (true, false) => {
                 irl_info!("Video reaches the plugin as it falls due; delaying video by {to_ms}ms")
             }
-            (false, true) if hold_follows => irl_warn!(
-                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. Audio is held back to match if the sender keeps its video this far behind; if the video delay stays, raise Target Buffer by at least {to_ms}ms",
-                raise.frames,
-                consts::VIDEO_DELAY_WINDOW_MS
-            ),
             (false, true) => irl_warn!(
-                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. If the sound runs ahead of the picture, set Sync Offset to +{to_ms}ms in Advanced Audio Properties, or raise Target Buffer by at least {to_ms}ms",
+                "Video ran late on {} frames in the last {}ms; delaying video by {by_ms}ms more, {to_ms}ms in all. {remedy}",
                 raise.frames,
                 consts::VIDEO_DELAY_WINDOW_MS
             ),
@@ -620,9 +665,13 @@ impl VideoThread {
         }
     }
 
-    /// A whole window of frames needed less delay than is in force: say so.
-    /// The ramp itself runs from [`Self::step_delay_ramp`].
-    fn announce_delay_relax(&self, relax: DelayRelax) {
+    /// A whole window of frames needed less than the floor: say so when that
+    /// is on screen. The slew itself runs from [`Self::tend_floor`].
+    fn announce_delay_relax(&mut self, relax: DelayRelax) {
+        if relax.to_ns >= relax.from_ns {
+            return;
+        }
+        self.floor_moved = true;
         irl_info!(
             "No frame in the last {}s needed more than {}ms of the {}ms video delay; playing video {:.0}% fast until it is back in step with its audio",
             consts::VIDEO_DELAY_RELAX_WINDOW_MS / 1000,
@@ -632,60 +681,49 @@ impl VideoThread {
         );
     }
 
-    /// How fast a ramp takes the delay back: the Catch-Up Speed, the same
+    /// How fast a slew takes the delay back: the Catch-Up Speed, the same
     /// promise the audio side makes about a backlog. Video has no pitch, so
     /// the rate is far less noticeable here than it is there.
     fn delay_ramp_rate(&self) -> f64 {
         f64::from(self.shared.hot.max_speed() - 1.0).max(0.0)
     }
 
-    /// Advance a delay ramp in progress: every due time, queued frames
-    /// included, moves earlier by this cycle's share, so the picture plays
-    /// slightly fast instead of jumping.
-    fn step_delay_ramp(&mut self, now_ns: u64) {
-        let Some(step) = self.delay.ramp(now_ns, self.delay_ramp_rate()) else {
-            return;
-        };
-        self.pacing.shift_earlier(step.moved_ns);
-        self.shared
-            .conn
-            .video_delay_ns
-            .store(step.delay_ns, Relaxed);
-        if step.done {
-            irl_info!("Video delay settled at {}ms", step.delay_ns / 1_000_000);
-        }
-    }
-
-    /// Take what the audio hold built since the last cycle out of the
-    /// standing delay.
-    ///
-    /// The hold grows the audio playout offset, and with it every video due
-    /// time. Video late enough to need a delay was late against the old
-    /// offset, so each millisecond the offset grows is a millisecond of delay
-    /// it no longer needs. Taking it back keeps due times where they were: the
-    /// picture neither jumps nor changes speed while the lip-sync error drains.
-    fn absorb_audio_hold(&mut self) {
-        let built_ns = self.shared.audio_state().hold_built_ns;
-        let Some(seen_ns) = self.hold_built_seen_ns.replace(built_ns) else {
-            return;
-        };
-        let grown_ns = built_ns.saturating_sub(seen_ns);
-        if grown_ns == 0 || self.delay.absorb(grown_ns) == 0 {
-            return;
-        }
-        let delay_ns = self.delay.delay_ns();
+    /// Mirror the delay the schedule carries for the stats, and say so once
+    /// when the audio playout moving (not the floor) takes it to or from
+    /// zero: an audio hold that finished building, or a re-anchor that put
+    /// the playout back below what video needs.
+    fn publish_delay(&mut self) {
+        let delay_ns = self
+            .offset_ns
+            .map_or(0, |offset_ns| self.delay.delay_ns(offset_ns));
         self.shared.conn.video_delay_ns.store(delay_ns, Relaxed);
-        if delay_ns == 0 {
-            irl_info!("Audio is held back far enough for its video; video delay back to 0ms");
+        let floor_moved = std::mem::take(&mut self.floor_moved);
+        let shown = delay_ns >= 1_000_000;
+        if shown == self.delay_shown {
+            return;
+        }
+        self.delay_shown = shown;
+        if floor_moved {
+            return;
+        }
+        if shown {
+            irl_info!(
+                "The audio playout moved earlier than video can be shown; video now runs {}ms behind its audio",
+                delay_ns / 1_000_000
+            );
+        } else {
+            irl_info!(
+                "The audio playout now waits long enough for video; video back in step with its audio"
+            );
         }
     }
 
-    /// Forget the delay: a new connection or a cleared source sizes its own.
+    /// Forget the floor: a new connection, a cleared source or a broken
+    /// timeline sizes its own.
     fn reset_delay(&mut self) {
-        self.arrival.reset();
         self.delay.reset();
-        self.hold_built_seen_ns = None;
-        self.shared.conn.video_delay_ns.store(0, Relaxed);
+        self.offset_ns = None;
+        self.floor_moved = true;
     }
 
     pub(crate) fn now_ns(&self) -> u64 {

@@ -287,7 +287,8 @@ pub const VIDEO_PACING_MAX_WAIT_MS: u64 = 50;
 /// fallback anyway.
 pub const VIDEO_ANCHOR_WAIT_MARGIN_MS: i64 = 1000;
 
-/// Ceiling on the standing video delay (`irl_core::video_delay`).
+/// Ceiling on the video delay (`irl_core::video_delay`): the video floor less
+/// the audio playout offset.
 ///
 /// A late frame is shown on arrival with or without the delay, which only
 /// lets it be paced, so the ceiling is not a latency bound but a stop on a
@@ -315,12 +316,12 @@ pub const VIDEO_LIVE_TOLERANCE_MS: u64 = 16;
 /// A stream that never stops catching up is measured anyway after this.
 pub const VIDEO_LIVE_MAX_WAIT_MS: u64 = 2000;
 /// How long every frame handed over must have needed less than the video
-/// delay in force before it ramps back down. Long enough that one quiet
-/// stretch on a link that really is late does not start a ramp a raise then
-/// has to undo.
+/// floor before it slews back down; the window slides. Long enough that one
+/// quiet stretch on a link that really is late does not start a slew a raise
+/// then has to undo.
 pub const VIDEO_DELAY_RELAX_WINDOW_MS: u64 = 10_000;
-/// Surplus delay below this is left alone: a ramp is not worth starting for
-/// a couple of canvas ticks.
+/// A floor higher than frames need by less than this is left alone: a slew
+/// is not worth starting for a couple of canvas ticks.
 pub const VIDEO_DELAY_RELAX_MIN_MS: u64 = 50;
 /// How early, against its due time, video stamped exactly the measured skew
 /// behind its audio should be in hand once the audio hold

@@ -499,7 +499,6 @@ struct StatSample {
     video_delay_ms: u64,
     audio_hold_ms: i32,
     av_skew_ms: i64,
-    reanchors: u64,
     fill_ms: i32,
     target_ms: i32,
 }
@@ -623,7 +622,6 @@ impl Sim {
             video_delay_ms: self.shared.conn.video_delay_ns.load(Relaxed) / MS,
             audio_hold_ms: self.shared.conn.audio_hold_ms.load(Relaxed),
             av_skew_ms: av_skew_ms(&self.shared, &state),
-            reanchors: self.shared.lifetime.audio_offset_reanchors.load(Relaxed),
             fill_ms: self
                 .shared
                 .audio_buf()
@@ -960,10 +958,35 @@ impl Report {
         lo..=hi
     }
 
-    /// The stats sample just before the first re-anchor.
-    fn before_first_reanchor(&self) -> Option<StatSample> {
-        let i = self.stats.iter().position(|s| s.reanchors > 0)?;
-        Some(self.stats[i.checked_sub(1)?])
+    /// The stats sample taken at or just before `at_s` after the open.
+    fn stats_at(&self, at_s: f64) -> StatSample {
+        let at = START_NS + (at_s * SEC as f64) as u64;
+        let i = self.stats.partition_point(|s| s.at_ns <= at);
+        self.stats[i.saturating_sub(1)]
+    }
+
+    /// Seconds after `from_s` until picture and sound are back in sync for
+    /// good: the hand-over time of the first frame after which every frame
+    /// shown up to `to_s` is measurable, within [`SYNC_TOLERANCE_NS`] and on
+    /// time.
+    fn resynced_after(&self, from_s: f64, to_s: f64) -> f64 {
+        let from = START_NS + (from_s * SEC as f64) as u64;
+        let to = START_NS + (to_s * SEC as f64) as u64;
+        let tol = SYNC_TOLERANCE_NS as f64 / 1e6;
+        let frames: Vec<&Shown> = self
+            .shown
+            .iter()
+            .filter(|f| (from..to).contains(&f.handed_ns))
+            .collect();
+        let last_bad = frames.iter().rposition(|f| {
+            let off = self.offset_ms(f);
+            off.is_none_or(|o| o.abs() > tol) || f.late_ns() > consts::VIDEO_PACING_SLACK_NS
+        });
+        let synced_ns = match last_bad {
+            None => from,
+            Some(i) => frames.get(i + 1).map_or(to, |f| f.handed_ns),
+        };
+        (synced_ns - from) as f64 / SEC as f64
     }
 }
 
@@ -1095,10 +1118,11 @@ fn a_skew_that_rises_and_recovers_is_followed_both_ways() {
 }
 
 /// Both streams stall for three seconds while the hold for a new 600 ms skew
-/// is being built. Audio conceals, the backlog lands at once and drains at
-/// the Catch-Up Speed, the inflated latency is re-anchored away, and the
-/// standing delay relaxes: in sync within about twenty seconds of the stall,
-/// and back where the connection started.
+/// is being built, with the picture still delayed behind the sound. Audio
+/// conceals, which grows the playout by the stall, and the backlog lands at
+/// once and drains at the Catch-Up Speed. The delay is the video floor less
+/// the playout, so the stall itself takes it away: in sync within a second
+/// of the stall ending, and back where the connection started.
 #[test]
 fn a_full_stall_during_a_hold_build_recovers_sync() {
     let report = Scenario::new(120)
@@ -1106,21 +1130,33 @@ fn a_full_stall_during_a_hold_build_recovers_sync() {
         .stall(30.0, 3000, Streams::Both)
         .run();
 
+    let at_stall = report.stats_at(29.9);
+    assert!(
+        at_stall.video_delay_ms > 0,
+        "the delay had gone before the stall: {at_stall:?}"
+    );
     let before = report.assert_settled(0.0, 20.0);
-    report.assert_settled(55.0, 120.0);
+    let resynced_s = report.resynced_after(33.0, 120.0);
+    assert!(
+        resynced_s <= 1.0,
+        "in sync {resynced_s:.2}s after the stall"
+    );
+    report.assert_settled(34.0, 120.0);
     let after = report.window(100.0, 120.0);
     report.print("stall during build", &after);
+    println!("stall during build: in sync {resynced_s:.2}s after the stall");
 
     report.assert_no_drift(&before, &after);
-    assert_eq!(report.video_delay_ms(100.0), 0..=0);
+    assert_eq!(report.video_delay_ms(34.0), 0..=0);
     report.assert_latency_settled();
     report.assert_healthy();
 }
 
 /// A loss while the delay stands (a hold build in progress) leaves audio
-/// latency inflated by its concealment, which the pump re-anchors away while
-/// the video delay is still in force. Video follows the new playout and the
-/// delay relaxes: in sync within half a minute, with no lasting offset.
+/// latency inflated by its concealment, which the pump re-anchors away once
+/// the buffer is back at its target, under a video floor sized for the skew. Video
+/// follows the playout down only as far as the floor: in sync within a few
+/// seconds of the loss, with no lasting offset.
 #[test]
 fn a_reanchor_while_the_video_delay_stands_recovers_sync() {
     let report = Scenario::new(120)
@@ -1128,19 +1164,22 @@ fn a_reanchor_while_the_video_delay_stands_recovers_sync() {
         .loss(26.0, 1500)
         .run();
 
-    let at_reanchor = report.before_first_reanchor().expect("a re-anchor");
+    let at_loss = report.stats_at(25.9);
     assert!(
-        at_reanchor.video_delay_ms > 0,
-        "the delay had gone by the re-anchor: {at_reanchor:?}"
+        at_loss.video_delay_ms > 0,
+        "the delay had gone before the loss: {at_loss:?}"
     );
     assert_eq!(report.reanchors, 1);
 
     let before = report.assert_settled(0.0, 20.0);
-    let after = report.assert_settled(60.0, 120.0);
+    let resynced_s = report.resynced_after(27.5, 120.0);
+    assert!(resynced_s <= 3.0, "in sync {resynced_s:.2}s after the loss");
+    let after = report.assert_settled(30.0, 120.0);
     report.print("re-anchor under delay", &after);
+    println!("re-anchor under delay: in sync {resynced_s:.2}s after the loss");
 
     report.assert_no_drift(&before, &after);
-    assert_eq!(report.video_delay_ms(70.0), 0..=0);
+    assert_eq!(report.video_delay_ms(28.0), 0..=0);
     report.assert_latency_settled();
     report.assert_healthy();
 }
@@ -1166,17 +1205,16 @@ fn a_target_buffer_edit_during_a_hold_build_recomposes_the_hold() {
     report.assert_healthy();
 }
 
-/// The same edit must also end in sync. It does not: once the delay has
-/// relaxed part of the way, a remainder within `VIDEO_DELAY_RELAX_MIN_MS` plus
-/// a tick of what frames need never relaxes, and the hold credit, which only
-/// counts the hold's own growth, never absorbs it. Measured: the delay stands
-/// at 66 ms and the picture trails the sound by 83 ms for good.
+/// The same edit must also end in sync: the effective target is unchanged,
+/// so the playout still grows past the video floor, and the delay, which is
+/// the floor less the playout, goes with it. Within the anchoring frame's
+/// tick of where the connection started.
 #[test]
-#[ignore = "known gap: a video delay left within the relax hysteresis after a Target Buffer edit never drains"]
 fn a_target_buffer_edit_during_a_hold_build_ends_in_sync() {
     let report = target_edit_during_build();
     let after = report.assert_settled(90.0, 120.0);
     report.print("target edit during build", &after);
+    report.assert_in_sync(&after, (report.tick_ns + 2 * MS) as i64);
     assert_eq!(report.video_delay_ms(90.0), 0..=0);
 }
 

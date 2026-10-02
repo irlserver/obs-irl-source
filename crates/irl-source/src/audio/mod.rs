@@ -71,9 +71,6 @@ pub fn reset_audio_timing_state(state: &mut AudioState) {
     state.recovery_until_us = 0;
     state.speed_carry.reset();
     state.align_read_pending = false;
-    // Priming waits for the whole target, hold included, so nothing is left
-    // to build once it re-primes.
-    state.hold_unbuilt_ns = 0;
     state.latest_audio_stream_pts_ns = 0;
     state.decoded_frame_samples = 0;
     state.startup_warmup_remaining_ms = 0;

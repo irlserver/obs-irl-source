@@ -159,12 +159,6 @@ pub struct AudioState {
     /// The hold in force, in ms. Outside low-latency mode it is folded into
     /// the published watermarks: their target is Target Buffer plus this.
     pub hold_ms: i32,
-    /// How much of the raises made since priming the buffer has yet to build.
-    pub hold_unbuilt_ns: u64,
-    /// Running total of what it has built, which is how far the playout
-    /// offset grew for the hold. The video thread takes the growth out of its
-    /// standing delay.
-    pub hold_built_ns: u64,
     /// When the pump first waited on a skew reading to prime; zero while it
     /// has not.
     pub hold_wait_since_ns: u64,
@@ -198,7 +192,8 @@ pub struct ConnStats {
     pub video_corrupt_held: AtomicU64,
     /// `f32::to_bits` of the smoothed playback speed.
     pub current_speed_bits: AtomicU32,
-    /// Mirror of the video thread's standing delay, for the stats.
+    /// The video delay the video thread's schedule carries (its floor less
+    /// the audio playout offset), republished every cycle for the stats.
     pub video_delay_ns: AtomicU64,
     /// Mirror of `AudioState::hold_ms`, for the stats and the video thread.
     pub audio_hold_ms: AtomicI32,

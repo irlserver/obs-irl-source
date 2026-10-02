@@ -642,7 +642,10 @@ fn audio_starts_without_a_skew_reading_once_the_wait_runs_out() {
 /// covers it; after the raise window the hold rises to match, and the speed
 /// controller builds it by playing slower until video is back on time. The
 /// growth is the hold the user did not have to ask for, so it must not be
-/// mistaken for concealment drift and thrown away by a re-anchor.
+/// mistaken for concealment drift and thrown away by a re-anchor. Built, the
+/// playout leaves video a canvas tick in hand on top of the tick it needs to
+/// decode: the floor any delay was sized to sits under the offset, and the
+/// delay it implies is zero.
 #[test]
 fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     let mut sim = Sim::new(120).with_video_trailing_by(50);
@@ -661,10 +664,16 @@ fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     // target: about a minute for 600 ms.
     sim.run(70.0, Link::Up);
     sim.assert_in_lip_sync();
-    let built_ms = sim.shared.audio_state().hold_built_ns / 1_000_000;
+    let built_ms = sim.mean_fill_ms(10.0);
     assert!(
-        (590..=600).contains(&built_ms),
-        "credited {built_ms}ms of a 600ms raise to the video thread"
+        (built_ms - f64::from(120 + 600)).abs() <= 25.0,
+        "the buffer holds {built_ms:.1}ms against a 720ms target"
+    );
+    let tick_ms = (consts::VIDEO_CANVAS_TICK_DEFAULT_NS / 1_000_000) as i64;
+    assert!(
+        sim.video_margin_now_ms() >= 2 * tick_ms,
+        "video arriving now is {}ms early: a floor sized from this skew would still delay it",
+        sim.video_margin_now_ms()
     );
     assert_eq!(sim.reanchors(), 0, "the hold building was read as drift");
     sim.assert_healthy();

@@ -117,8 +117,6 @@ impl Config {
                 // Target Buffer can leave less room under for the hold.
                 let hold_ms = next.target_ms - user_next.target_ms;
                 if hold_ms < folded_ms {
-                    let cut_ns = u64::from(folded_ms.abs_diff(hold_ms)) * 1_000_000;
-                    state.hold_unbuilt_ns = state.hold_unbuilt_ns.saturating_sub(cut_ns);
                     state.hold_ms = hold_ms;
                     shared.conn.audio_hold_ms.store(hold_ms, Relaxed);
                 }

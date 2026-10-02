@@ -1327,10 +1327,11 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
         run_at(&mut thread, &clock, t0 + (frames + k) * FRAME);
     }
 
-    // Untouched for the ten-second window, then down to a tick of headroom,
-    // gradually: 5% takes back 1.3 s in about 26 s.
+    // Untouched for the ten-second window, then down to what frames need,
+    // gradually: 5% takes back 1.3 s in about 26 s. 100 ms in hand covers the
+    // tick of decode and the tick of headroom, so nothing is left.
     assert_eq!(delays[8 * 30], set, "inside the window the delay stands");
-    assert_eq!(*delays.last().unwrap(), TICK, "settled on what frames need");
+    assert_eq!(*delays.last().unwrap(), 0, "settled on what frames need");
     let halfway = delays[(10 + 13) * 30];
     assert!(
         halfway > set / 3 && halfway < set * 2 / 3,
@@ -1357,11 +1358,11 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
 /// Once the audio hold rises for video that trails its audio, the speed
 /// controller builds it by playing slower, and the audio playout offset (with
 /// every due time mapped through it) grows until video is on time again. The
-/// standing delay covered that same lateness in the meantime, so each
-/// millisecond of growth is one it no longer needs: it hands it back as the
-/// hold builds. Due times stay exactly where they were, so the picture
-/// neither jumps nor changes speed while the lip-sync error the delay stood
-/// for drains to nothing.
+/// delay covered that same lateness in the meantime, and it is the floor less
+/// the offset, so each millisecond of growth is one it no longer carries. Due
+/// times stay exactly where they were, so the picture neither jumps nor
+/// changes speed while the lip-sync error the delay stood for drains to
+/// nothing.
 #[test]
 fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
     let shared = shared_with_audio();
@@ -1377,15 +1378,13 @@ fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
     let set = shared.conn.video_delay_ns.load(Relaxed);
     assert_eq!(set, (late + TICK).div_ceil(TICK) * TICK);
 
-    // The hold builds at -2 %: the offset grows by 2 % of each frame, and the
-    // pump credits the same growth as built.
+    // The hold builds at -2 %: the offset grows by 2 % of each frame.
     let growth_per_frame = FRAME / 50;
     let frames = 30 * 30u64;
     let mut delays = Vec::new();
     for i in 1..=frames {
         let grown = i * growth_per_frame;
         publish_mapping(&shared, t0 - late + grown, 10_000_000_000);
-        shared.audio_state().hold_built_ns = grown;
         let arrival = t0 + i * FRAME;
         feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
         run_at(&mut thread, &clock, arrival);

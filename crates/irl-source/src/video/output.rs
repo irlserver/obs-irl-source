@@ -165,14 +165,21 @@ impl VideoThread {
 
     /* ── Timestamp mapping ────────────────────────────────── */
 
-    /// The OBS timestamp a freshly transferred frame is scheduled for.
+    /// The OBS timestamp a freshly transferred frame is scheduled for: its
+    /// [`Self::base_due`] plus the video delay that implies.
+    pub fn due_time(&mut self, frame: &Frame) -> u64 {
+        let base_ns = self.base_due(frame);
+        self.delay.due_ns(frame.pts(), base_ns)
+    }
+
+    /// The OBS timestamp a frame is due at before the video delay.
     ///
     /// While audio is playing, queued audio is the master playout clock: video
     /// PTS maps through the same stream-PTS → OBS-clock offset as the latest
     /// chunk handed to OBS, which keeps lip sync stable across buffering and
     /// speed changes. Without that mapping it falls back to the video-only
     /// wall-clock anchor.
-    pub fn due_time(&mut self, frame: &Frame) -> u64 {
+    pub fn base_due(&mut self, frame: &Frame) -> u64 {
         // `frame.pts()` is already in nanoseconds: intake rescales it with the
         // time base captured at stream open, because the video thread must not
         // touch the format context (it can be freed mid-reconnect).
@@ -186,12 +193,8 @@ impl VideoThread {
 
         // No audio-stream test: a published mapping already implies the pump
         // handed OBS a real chunk, so it implies the audio stream.
-        // Both schedules carry the standing video delay; see
-        // `VideoThread::settle_anchor_candidate`.
-        let delay_ns = self.delay.delay_ns();
-
         if let Some(mapped) = mapping.map(pts_ns) {
-            return mapped.saturating_add(delay_ns);
+            return mapped;
         }
 
         // `conn.video_ts_init` is the authority here: it is cleared on a
@@ -207,26 +210,20 @@ impl VideoThread {
             self.shared.conn.video_ts_init.store(true, Relaxed);
         }
 
-        let mut computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now)
-            .saturating_add(delay_ns);
+        let computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now);
 
-        // Startup fallback before the audio playout mapping exists. The
-        // mapping cannot stand in for "there is audio" here, so this reads the
-        // flag the receiver publishes.
-        if self.shared.flags.audio_present.load(Relaxed) {
-            let mut audio_lead_ns = 0;
-            if !mapping.has_output() {
-                audio_lead_ns = startup_warmup_ms as i64 * 1_000_000;
-                if !self.shared.cfg.low_latency_audio {
-                    audio_lead_ns += self.shared.hot.watermarks().target_ms as i64 * 1_000_000;
-                }
-            }
-            if audio_lead_ns > 0 {
-                computed += audio_lead_ns as u64;
-            }
+        // Audio that is coming but not mapped yet will play its Target
+        // Buffer (and whatever is left of the warm-up) after it arrives. The
+        // mapping cannot stand in for "there is audio" here, so this reads
+        // the flag the receiver publishes.
+        if !self.shared.flags.audio_present.load(Relaxed) {
+            return computed;
         }
-
-        computed
+        let mut audio_lead_ms = i64::from(startup_warmup_ms);
+        if !self.shared.cfg.low_latency_audio {
+            audio_lead_ms += i64::from(self.shared.hot.watermarks().target_ms);
+        }
+        computed + audio_lead_ms.max(0) as u64 * 1_000_000
     }
 
     /// Whether audio has published a playout mapping at all — the same test
@@ -243,11 +240,10 @@ impl VideoThread {
     ///
     /// Free of the side effects in [`Self::due_time`]: the fallback anchor
     /// belongs to a frame arriving, and running it for every queued frame
-    /// would report the queue rather than the stream.
-    /// `None` when there is no audio to slave to, or when the mapping has been
-    /// gone long enough that holding it would be a guess; the caller then
-    /// keeps the due times the frames arrived with. The standing video delay
-    /// rides on the offset, so a reschedule keeps it.
+    /// would report the queue rather than the stream. `None` when there is no
+    /// audio to slave to, or when the mapping has been gone long enough that
+    /// holding it would be a guess; the caller then keeps the due times the
+    /// frames arrived with.
     pub fn playout_offset(&mut self) -> Option<i64> {
         let offset_ns = self.shared.audio_state().playout_mapping().offset_ns();
         let now = self.now_ns();
@@ -261,7 +257,7 @@ impl VideoThread {
             return None;
         }
 
-        Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
+        Some(self.playout_offset_ns)
     }
 
     /* ── Output ───────────────────────────────────────────── */
