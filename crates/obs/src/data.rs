@@ -19,8 +19,7 @@ impl Data<'_> {
         self.0.as_ptr()
     }
 
-    /// `obs_data_get_string`; `None` when the value is empty, matching the C
-    /// idiom `if (url && *url)`.
+    /// `obs_data_get_string`; `None` when the value is missing or empty.
     pub fn get_str(&self, key: &CStr) -> Option<String> {
         // SAFETY: live handle; libobs returns a NUL-terminated string owned by
         // the obs_data_t, valid until the item is overwritten or released —

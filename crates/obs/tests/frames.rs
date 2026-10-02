@@ -87,7 +87,7 @@ fn audio_frame_is_single_plane_interleaved() {
 
 #[test]
 fn speaker_layout_matches_the_c_cast() {
-    // The C plugin casts the channel count straight to `enum speaker_layout`,
+    // A channel count maps to the `enum speaker_layout` with the same value,
     // which is only meaningful for the values libobs defines.
     assert_eq!(SpeakerLayout::from_channels(1), SpeakerLayout::Mono);
     assert_eq!(SpeakerLayout::from_channels(2), SpeakerLayout::Stereo);
@@ -115,8 +115,7 @@ fn speaker_layout_matches_the_c_cast() {
         );
     }
 
-    // Every mapped value must land on the numeric layout libobs defines, since
-    // that is what the C cast produced.
+    // Every mapped value must land on the numeric layout libobs defines.
     for channels in [1u32, 2, 3, 4, 5, 6, 8] {
         assert_eq!(
             SpeakerLayout::from_channels(channels).to_sys() as u32,

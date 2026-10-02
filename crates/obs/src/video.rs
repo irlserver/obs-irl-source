@@ -126,15 +126,11 @@ impl<'a> VideoFrame<'a> {
     }
 
     /// Fill `color_matrix`, `color_range_min/max` and `full_range` through
-    /// `video_format_get_parameters_for_format` (the C `setup_color_params`).
-    /// Falls back to BT.709 when libobs rejects the colour space, and to
-    /// BT.709 limited range when it rejects the range as well.
-    ///
-    /// The C version ignores the return value, which leaves an all-zero matrix
-    /// behind for a combination libobs does not know. That is harmless for an
-    /// RGB frame (no conversion shader reads the matrix) but black for a YUV
-    /// one, so the retries are added here; `full_range` is kept consistent
-    /// with whichever range actually produced the matrix.
+    /// `video_format_get_parameters_for_format`. Falls back to BT.709 when
+    /// libobs rejects the colour space, and to BT.709 limited range when it
+    /// rejects the range as well: a combination libobs does not know leaves
+    /// an all-zero matrix, which renders a YUV frame black. `full_range`
+    /// follows whichever range produced the matrix.
     #[must_use]
     pub fn colorimetry(mut self, cs: ColorSpace, range: ColorRange) -> Self {
         self.inner.full_range = range == ColorRange::Full;

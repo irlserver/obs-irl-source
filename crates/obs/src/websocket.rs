@@ -106,7 +106,7 @@ impl Vendor {
 
         // Leaked on purpose: the API has no unregister that could tell us when
         // obs-websocket has stopped holding the record, and registrations last
-        // for the life of the process. This mirrors the C plugin exactly.
+        // for the life of the process.
         let boxed: Box<BoxedRequest> = Box::new(callback);
         let priv_data = Box::into_raw(boxed).cast::<c_void>();
 
