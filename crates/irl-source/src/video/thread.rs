@@ -20,10 +20,10 @@ use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacingQueue};
 use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
 
-use crate::shared::{Shared, VideoDecoder, VideoMsg};
+use crate::shared::{Shared, TimedPacket, VideoDecoder, VideoMsg};
 use crate::video::VideoSink;
 use crate::video::decode;
-use crate::video::intake::DecodeState;
+use crate::video::intake::{self, DecodeState};
 
 /// A frame waiting for its due time. `received_ns` is when the packet it was
 /// decoded from reached this thread, which is what its arrival margin is
@@ -43,6 +43,11 @@ impl Paced {
         self.received_ns
     }
 }
+
+/// Turns a queued packet into the frame it decodes to, in place of a decoder:
+/// stamped in nanoseconds, it then goes through the same intake a decoded
+/// H.264 frame does.
+pub type DecodeStub = Box<dyn FnMut(&TimedPacket) -> Option<Frame> + Send>;
 
 /// The video thread's wait for the audio playout mapping before it anchors
 /// libobs's play head; see [`VideoThread::awaiting_audio_mapping`].
@@ -66,6 +71,8 @@ pub struct VideoThread {
     /// The video decoder, handed over by the receiver when a connection opens.
     /// Owned here because *when* a packet is decoded is this thread's decision.
     decoder: Option<VideoDecoder>,
+    /// Stands in for the decoder in tests; see [`Self::with_decode_stub`].
+    decode_stub: Option<DecodeStub>,
     /// Reusable destination for `receive_frame`.
     scratch: Frame,
     /// Reusable output list for one packet's frames.
@@ -133,6 +140,7 @@ impl VideoThread {
         Self {
             shared,
             decoder: None,
+            decode_stub: None,
             scratch: Frame::new().expect("frame allocation"),
             decoded: Vec::new(),
             state: DecodeState::default(),
@@ -284,6 +292,16 @@ impl VideoThread {
                             &packet.packet,
                             &mut produced,
                         );
+                    } else if let Some(frame) =
+                        self.decode_stub.as_mut().and_then(|stub| stub(&packet))
+                    {
+                        produced.extend(intake::handle_frame(
+                            &shared,
+                            &mut self.state,
+                            &frame,
+                            ffmpeg::NS_TIME_BASE,
+                            ffmpeg::AVCodecID::AV_CODEC_ID_H264,
+                        ));
                     }
                     for frame in produced.drain(..) {
                         self.pace_decoded(frame, received_ns);
@@ -753,6 +771,14 @@ impl VideoThread {
     #[must_use]
     pub fn with_canvas_tick(mut self, tick: Box<dyn Fn() -> Option<u64> + Send>) -> Self {
         self.canvas_tick_ns = tick;
+        self
+    }
+
+    /// Decode packets with `stub` while no decoder is installed (tests only:
+    /// the bundled FFmpeg carries no decoder a synthetic packet could feed).
+    #[must_use]
+    pub fn with_decode_stub(mut self, stub: DecodeStub) -> Self {
+        self.decode_stub = Some(stub);
         self
     }
 

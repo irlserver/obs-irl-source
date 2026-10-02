@@ -461,7 +461,7 @@ fn fit_to_canvas(source: SourceHandle) {
 /// the sender's skew before any buffering here. The decoded-frame PTS would
 /// trail arrival by the queue depth and read the video delay as skew. Zero
 /// until both streams have delivered something.
-pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
+pub fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     let video_pts_ns = shared.conn.video_arrival_pts_ns.load(Relaxed);
     if video_pts_ns == 0 || audio.latest_audio_stream_pts_ns == 0 {
         return 0;

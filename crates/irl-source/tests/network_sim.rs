@@ -31,7 +31,7 @@ use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
 use obs_irl_source::shared::Shared;
 
-use common::{CHANNELS, CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
+use common::{CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
 
 // ── The simulated plugin ──────────────────────────────────────
 
@@ -191,35 +191,6 @@ impl Sim {
             .map_or(0, irl_core::AudioBuffer::fill_ms)
     }
 
-    /// One decoded audio chunk of constant-valued PCM, as the decoder would
-    /// hand it to the intake.
-    fn decoded_chunk(pts_ns: i64, value: f32) -> ffmpeg::Frame {
-        let mut frame = ffmpeg::Frame::new().unwrap();
-        // SAFETY: setting the audio parameters before av_frame_get_buffer is
-        // the documented allocation sequence; the buffer is then written
-        // through its own data pointer for exactly nb_samples * channels
-        // samples.
-        unsafe {
-            let raw = frame.as_mut_ptr();
-            (*raw).format = ffmpeg::AVSampleFormat::AV_SAMPLE_FMT_FLT as core::ffi::c_int;
-            (*raw).nb_samples = CHUNK_FRAMES;
-            (*raw).sample_rate = RATE;
-            ffmpeg::sys::av_channel_layout_default(&raw mut (*raw).ch_layout, CHANNELS);
-            assert_eq!(ffmpeg::sys::av_frame_get_buffer(raw, 0), 0);
-            (*raw).pts = pts_ns;
-            // In the frame's time base, which here is nanoseconds — not a
-            // sample count. PTS repair sizes its expected gap from this.
-            (*raw).duration = CHUNK_NS as i64;
-
-            let dst = (*raw).data[0];
-            for i in 0..(CHUNK_FRAMES * CHANNELS) as usize {
-                let bytes = value.to_le_bytes();
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(i * 4), 4);
-            }
-        }
-        frame
-    }
-
     /// Advance one chunk of wall clock. `link` says whether the sender's output
     /// reaches us; while it is `Down` the receiver is blocked, so nothing is
     /// ingested at all.
@@ -236,7 +207,7 @@ impl Sim {
         if link == Link::Up && self.since_delivery >= self.burst_ticks {
             self.since_delivery = 0;
             for pts in std::mem::take(&mut self.pending) {
-                let frame = Self::decoded_chunk(pts, 0.25);
+                let frame = common::decoded_audio(pts, CHUNK_NS as i64, CHUNK_FRAMES, |_, _| 0.25);
                 self.intake.handle_frame(
                     &self.shared,
                     &mut self.flags,
