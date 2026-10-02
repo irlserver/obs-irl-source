@@ -16,34 +16,15 @@ fn distinct_snapshot() -> StatsSnapshot {
     StatsSnapshot {
         buffer_fill_ms: 101,
         current_speed: 1.05,
-        adaptive_latency_control: true,
-        reconnecting: true,
         total_audio_frames: 102,
         total_video_frames: 103,
-        pts_repairs: 104,
-        pts_normalizations: 105,
-        pts_interpolations: 106,
-        pts_resets: 107,
-        pts_last_gap_ms: 108,
-        pts_max_gap_ms: 109,
-        silence_insertions: 110,
-        audio_underruns: 111,
-        audio_resync_skipped_chunks: 112,
-        audio_hidden_trimmed_chunks: 113,
-        audio_quality_events: 114,
-        audio_output_restarts: 115,
-        obs_lead_ms: 116,
-        audio_decoder_flushes: 117,
-        video_corrupt_frames: 118,
-        video_corrupt_held: 119,
-        video_lead_ms: 120,
-        video_lead_excess: 121,
-        video_delay_ms: 124,
-        av_skew_ms: 125,
-        audio_hold_ms: 126,
-        stream_delay_ms: 122,
-        low_latency_audio: true,
-        reconnect_count: 123,
+        pts_max_gap_ms: 104,
+        audio_underruns: 105,
+        audio_output_restarts: 106,
+        video_delay_ms: 107,
+        av_skew_ms: 108,
+        audio_hold_ms: 109,
+        reconnecting: true,
     }
 }
 
@@ -101,6 +82,6 @@ fn the_declaration_names_exactly_what_is_written() {
             "{name} is not in the declaration"
         );
     }
-    // The dropped stat is gone from every surface, not just the table.
-    assert!(!decl.contains("video_decoder_flushes"));
+    // A dropped stat is gone from every surface, not just the table.
+    assert!(!decl.contains("reconnect_count"));
 }

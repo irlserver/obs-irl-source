@@ -127,9 +127,6 @@ pub fn handle_frame(
     // until the next IDR/CRA.
     let frame_corrupt = frame.is_corrupt();
     let frame_damaged = frame_corrupt || frame.decode_error_flags() != 0;
-    if frame_damaged {
-        shared.conn.video_corrupt_frames.fetch_add(1, Relaxed);
-    }
 
     // HEVC has no error concealment: a reference that never arrived is
     // synthesized as a flat mid-gray picture (hevc/refs.c
@@ -193,8 +190,8 @@ pub fn handle_frame(
     // this thread does not own.
     let pts_ns = ffmpeg::rescale_q(pts, tb, ffmpeg::NS_TIME_BASE);
 
-    // Frame interval EMA, for the estimate of how many frames a given output
-    // lead parks in the libobs async queue. Measured rather than taken from
+    // Frame interval EMA, for the frame rate the stats line reports and the
+    // lead warning's frame budget. Measured rather than taken from
     // avg_frame_rate, which live SRT/RTMP demuxers routinely leave unset or
     // wrong. Out-of-range deltas (PTS repair, discontinuities, reordering) are
     // skipped rather than smoothed in.
@@ -202,10 +199,6 @@ pub fn handle_frame(
     let measurable = state.prev_pts_ns != 0;
     state.prev_pts_ns = pts_ns;
 
-    {
-        let mut audio = shared.audio_state();
-        audio.latest_video_stream_pts_ns = pts_ns;
-    }
     if measurable {
         let prev = shared.conn.video_frame_interval_ns.load(Relaxed);
         shared

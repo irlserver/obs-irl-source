@@ -439,7 +439,6 @@ impl Receiver {
     /// `irl_wait_for_reconnect`. Returns whether the run is still active.
     pub(super) fn wait_for_reconnect(&mut self) -> bool {
         self.shared.flags.reconnecting.store(true, Relaxed);
-        self.shared.lifetime.reconnect_count.fetch_add(1, Relaxed);
         // Sampled once: a delay edited mid-wait should apply to the next
         // attempt, not stretch or truncate the one already counting down.
         let delay_s = self.shared.hot.reconnect_delay_s.load(Relaxed);
@@ -492,7 +491,6 @@ impl Receiver {
                 consts::AUDIO_RESET_RECOVERY_HOLD_US,
             );
             state.fade_in_pending = true;
-            shared.conn.video_corrupt_frames.store(0, Relaxed);
             shared.conn.video_corrupt_held.store(0, Relaxed);
         }
 
@@ -500,17 +498,8 @@ impl Receiver {
         conn.set_current_speed(1.0);
         conn.audio_output_restarts.store(0, Relaxed);
         conn.audio_underruns.store(0, Relaxed);
-        conn.audio_resync_skipped_chunks.store(0, Relaxed);
-        conn.audio_hidden_trimmed_chunks.store(0, Relaxed);
-        conn.audio_quality_events.store(0, Relaxed);
-        conn.audio_decoder_flushes.store(0, Relaxed);
-        conn.pts_repairs.store(0, Relaxed);
-        conn.pts_normalizations.store(0, Relaxed);
-        conn.pts_interpolations.store(0, Relaxed);
-        conn.pts_resets.store(0, Relaxed);
-        conn.pts_last_gap_ms.store(0, Relaxed);
+        conn.audible_skipped_chunks.store(0, Relaxed);
         conn.pts_max_gap_ms.store(0, Relaxed);
-        conn.silence_insertions.store(0, Relaxed);
         conn.total_audio_frames.store(0, Relaxed);
         conn.total_video_frames.store(0, Relaxed);
         self.last_stats_time = 0;
@@ -558,62 +547,40 @@ impl Receiver {
         let buffer_fill_ms = self.audio_fill_ms();
 
         irl_info!(
-            "Stats: video={} audio={} \
-             buf={}ms peak={}ms target={}ms speed={:.3} ctrl={} pts_repairs={} \
-             norm={} interp={} silence={} resets={} \
-             last_gap={}ms max_gap={}ms underruns={} resync_skips={} \
-             hidden_trims={} quality_events={} \
-             audio_flushes={} corrupt={} held={} vq_drops={} \
-             obs_lead={}ms chunk={}@{} \
-             stream_chunk={}ms obs_chunk={}ms \
-             restarts={} av_drift={}ms av_skew={}ms hold={}ms reanchors={} \
-             vlead={}ms peak={}ms excess={} vdelay={}ms vfps={:.1} \
-             pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) early={} eagain={}/{} pktdrop={}/{} res={}x{}",
+            "Stats: video={} audio={} buf={}ms peak={}ms target={}ms speed={:.3} ll={}{} \
+             max_gap={}ms underruns={} restarts={} av_drift={}ms av_skew={}ms hold={}ms \
+             vdelay={}ms vfps={:.1} vq_drops={} \
+             pktq={}/{}({}KB,{}ms) paced={}/{}({}MB) eagain={}/{} pktdrop={}/{} res={}x{}",
             conn.total_video_frames.load(Relaxed),
             conn.total_audio_frames.load(Relaxed),
             buffer_fill_ms,
             lifetime.audio_fill_peak_ms.load(Relaxed),
             shared.hot.watermarks().target_ms,
             f64::from(conn.current_speed()),
-            if shared.hot.adaptive_speed.load(Relaxed) {
+            if shared.cfg.low_latency_audio {
                 "on"
             } else {
                 "off"
             },
-            conn.pts_repairs.load(Relaxed),
-            conn.pts_normalizations.load(Relaxed),
-            conn.pts_interpolations.load(Relaxed),
-            conn.silence_insertions.load(Relaxed),
-            conn.pts_resets.load(Relaxed),
-            conn.pts_last_gap_ms.load(Relaxed),
+            // Only the unusual setting is spelled out.
+            if shared.hot.adaptive_speed.load(Relaxed) {
+                ""
+            } else {
+                " ctrl=off"
+            },
             conn.pts_max_gap_ms.load(Relaxed),
             conn.audio_underruns.load(Relaxed),
-            conn.audio_resync_skipped_chunks.load(Relaxed),
-            conn.audio_hidden_trimmed_chunks.load(Relaxed),
-            conn.audio_quality_events.load(Relaxed),
-            conn.audio_decoder_flushes.load(Relaxed),
-            conn.video_corrupt_frames.load(Relaxed),
-            conn.video_corrupt_held.load(Relaxed),
-            lifetime.video_queue_drops.load(Relaxed),
-            conn.last_obs_lead_ns.load(Relaxed) / 1_000_000,
-            conn.last_frames_out.load(Relaxed),
-            conn.last_samples_per_sec.load(Relaxed),
-            conn.last_chunk_stream_ns.load(Relaxed) / 1_000_000,
-            conn.last_chunk_obs_ns.load(Relaxed) / 1_000_000,
             conn.audio_output_restarts.load(Relaxed),
             av_drift_ms,
             av_skew_ms,
             conn.audio_hold_ms.load(Relaxed),
-            lifetime.audio_offset_reanchors.load(Relaxed),
-            conn.video_lead_ns.load(Relaxed) / 1_000_000,
-            lifetime.video_lead_peak_ns.load(Relaxed) / 1_000_000,
-            lifetime.video_lead_excess.load(Relaxed),
             conn.video_delay_ns.load(Relaxed) / 1_000_000,
             if video_frame_interval_ns > 0 {
                 1_000_000_000.0 / video_frame_interval_ns as f64
             } else {
                 0.0
             },
+            lifetime.video_queue_drops.load(Relaxed),
             // The compressed video queue: where the stream's latency is
             // actually held. Its duration should track the Target Buffer, and
             // its size is what a deep buffer costs at this bitrate — the
@@ -626,7 +593,6 @@ impl Receiver {
             lifetime.pacing_now.load(Relaxed),
             lifetime.pacing_peak.load(Relaxed),
             lifetime.pacing_bytes.load(Relaxed) / (1024 * 1024),
-            lifetime.pacing_overflows.load(Relaxed),
             lifetime.video_pkt_eagain.load(Relaxed),
             lifetime.audio_pkt_eagain.load(Relaxed),
             lifetime.video_pkt_dropped.load(Relaxed),

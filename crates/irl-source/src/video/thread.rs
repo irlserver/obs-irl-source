@@ -744,9 +744,6 @@ impl VideoThread {
             .pacing_peak
             .store(self.pacing.peak() as i32, Relaxed);
         lifetime.pacing_bytes.store(self.pacing.bytes(), Relaxed);
-        lifetime
-            .pacing_overflows
-            .store(self.pacing.overflows(), Relaxed);
     }
 
     /// How long to sleep: until the head frame is due, capped at

@@ -15,7 +15,6 @@ use crate::shared::{Shared, TimedPacket};
 /// the decoder unless a flush is cooling down; returns when it flushed.
 fn audio_error_burst(
     dec: &mut CodecContext,
-    shared: &Shared,
     flags: &mut ReceiverFlags,
     stage: &str,
     flushing: &str,
@@ -47,8 +46,6 @@ fn audio_error_burst(
         return None;
     }
     dec.flush();
-    shared.conn.audio_decoder_flushes.fetch_add(1, Relaxed);
-    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
     Some(now_us)
 }
 
@@ -67,7 +64,6 @@ fn drain_audio_frames(
             Err(_) => {
                 if let Some(now_us) = audio_error_burst(
                     dec,
-                    shared,
                     flags,
                     " receive",
                     ", resetting audio state",
@@ -78,7 +74,7 @@ fn drain_audio_frames(
                         if let Some(buf) = shared.audio_buf().as_mut() {
                             buf.flush();
                         }
-                        audio::reset_audio_timing_state(shared, &mut state);
+                        audio::reset_audio_timing_state(&mut state);
                         audio::mark_audio_recovery(
                             &mut state,
                             now_us,
@@ -143,14 +139,7 @@ impl Receiver {
 
         match &result {
             Err(err) if !err.is_eagain() && !err.is_eof() => {
-                audio_error_burst(
-                    dec,
-                    shared,
-                    flags,
-                    "",
-                    ", flushing",
-                    ", suppressing repeated flush",
-                );
+                audio_error_burst(dec, flags, "", ", flushing", ", suppressing repeated flush");
             }
             _ => flags.audio_decode_errors = 0,
         }

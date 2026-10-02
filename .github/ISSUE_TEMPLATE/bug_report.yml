@@ -111,7 +111,7 @@ body:
       placeholder: |
         [irl-source] Video stream 0: hevc 1920x1080 (d3d11va)
         [irl-source] First keyframe received (1920x1080 fmt=171 hardware decode)
-        [irl-source] Stats: video=1801 audio=2997 buf=100ms target=120ms speed=1.000 ...
+        [irl-source] Stats: video=1801 audio=1406 buf=118ms peak=164ms target=120ms speed=1.000 ll=off ...
 
   - type: input
     id: plugin-version

@@ -349,13 +349,10 @@ impl Sim {
     /// first batch and hits that path, which is correct. So the invariant is
     /// not "nothing was skipped" but "everything skipped was inaudible".
     fn assert_no_audible_audio_dropped(&self) {
-        let skipped = self.shared.conn.audio_resync_skipped_chunks.load(Relaxed);
-        let hidden = self.shared.conn.audio_hidden_trimmed_chunks.load(Relaxed);
+        let skipped = self.shared.conn.audible_skipped_chunks.load(Relaxed);
         assert_eq!(
-            skipped,
-            hidden,
-            "{} audible chunks were skipped rather than played faster",
-            skipped - hidden
+            skipped, 0,
+            "{skipped} audible chunks were skipped rather than played faster"
         );
     }
 

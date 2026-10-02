@@ -71,28 +71,24 @@ function update_stats()
 
     local buf_ms = obs.calldata_int(cd, "buffer_fill_ms")
     local speed = obs.calldata_float(cd, "current_speed")
-    local ctrl = obs.calldata_bool(cd, "adaptive_latency_control")
     local reconnecting = obs.calldata_bool(cd, "reconnecting")
     local video = obs.calldata_int(cd, "total_video_frames")
     local audio = obs.calldata_int(cd, "total_audio_frames")
-    local repairs = obs.calldata_int(cd, "pts_repairs")
-    local silence = obs.calldata_int(cd, "silence_insertions")
+    local max_gap = obs.calldata_int(cd, "pts_max_gap_ms")
     local underruns = obs.calldata_int(cd, "audio_underruns")
-    local resync_skips = obs.calldata_int(cd, "audio_resync_skipped_chunks")
-    local hidden_trims = obs.calldata_int(cd, "audio_hidden_trimmed_chunks")
-    local quality_events = obs.calldata_int(cd, "audio_quality_events")
-    local audio_flushes = obs.calldata_int(cd, "audio_decoder_flushes")
-    local delay = obs.calldata_int(cd, "stream_delay_ms")
+    local restarts = obs.calldata_int(cd, "audio_output_restarts")
+    local video_delay = obs.calldata_int(cd, "video_delay_ms")
+    local skew = obs.calldata_int(cd, "av_skew_ms")
+    local hold = obs.calldata_int(cd, "audio_hold_ms")
 
     obs.calldata_destroy(cd)
     obs.obs_source_release(source)
 
     local status = reconnecting and "RECONNECTING" or "LIVE"
     local text = string.format(
-        "Status: %s\nDelay: %dms\nBuffer: %dms\nControl: %s\nCorrection: %.3fx\nFrames: %d/%d (v/a)\nPTS Repairs: %d\nAudio Quality: %d events\nSilence/Underruns: %d/%d\nHidden Trims: %d\nResync Skips: %d\nAudio Decoder Flushes: %d",
-        status, delay, buf_ms, ctrl and "on" or "off", speed, video, audio,
-        repairs, quality_events, silence, underruns, hidden_trims,
-        resync_skips, audio_flushes
+        "Status: %s\nBuffer: %dms\nSpeed: %.3fx\nA/V skew: %dms (hold %dms, video delay %dms)\nUnderruns/Restarts: %d/%d\nMax PTS gap: %dms\nFrames: %d/%d (v/a)",
+        status, buf_ms, speed, skew, hold, video_delay, underruns, restarts,
+        max_gap, video, audio
     )
 
     -- Re-rendering the text texture is the expensive part; skip it

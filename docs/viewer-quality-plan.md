@@ -18,12 +18,12 @@ and video cadence freezes.
 
 ## Recovery is observable
 
-PTS repair telemetry is split into separate counters (normalization,
-interpolation, silence, reset, last gap, max gap) so each recovery mechanism
-can be tuned independently. The aggregate `pts_repairs` counter is kept for
-script compatibility. The periodic stats log line reports buffer fill,
-underruns, trims, OBS lead, timing state, and the split PTS counters together,
-so a single log line describes the health of the whole path.
+The periodic stats log line reports buffer fill, speed, underruns, output
+restarts, the largest PTS gap, the A/V skew and the delay and hold that cover
+it, and the video queues together, so a single log line describes the health
+of the whole path. Underruns, startup trims, output clock restarts and
+re-anchors, and decoder corruption bursts also log a line each when they
+happen.
 
 ## Audio behavior
 
@@ -52,7 +52,8 @@ so a single log line describes the health of the whole path.
 - HEVC frames predicted from a missing reference are held back. HEVC has no
   concealment; FFmpeg synthesizes the missing reference as flat gray, so the
   choice is between a gray GOP and a freeze on the last good frame, and the
-  freeze wins. Resumes at the next keyframe; `video_corrupt_held` counts them.
+  freeze wins. Resumes at the next keyframe, and the line that says so
+  reports how many frames were held.
 - The video decoder is never flushed. A flush clears the reference buffer and
   the decoder's recovery state, which is a guaranteed gray GOP on both codecs;
   repeated errors are counted and logged instead.
@@ -63,21 +64,16 @@ so a single log line describes the health of the whole path.
 
 When validating against live lossy SRT logs:
 
-- `silence_insertions` should rise only on real medium audio gaps or underruns.
-- `pts_normalizations` can be high without audible artifacts (frame-sized
-  cadence smoothing).
-- `pts_interpolations` should be read together with gap size and audio quality.
-- `pts_resets` should stay rare.
+- `max_gap` is the largest audio PTS gap repaired on this connection. Below
+  70 ms it was interpolated, up to 2 s it was filled with silence, and beyond
+  that the timeline was reset.
 - `speed` stays near 1.000 in buffered mode; any deviation should be smooth and
   correlated with high/low fill.
-- `resync_skips` happens only during low-latency resync or hidden/recovery
-  backlog cleanup.
 - `Audio trim` logs are hidden/recovery cleanup only, before old chunks become
   audible.
 - Video corruption logs do not imply audio corruption unless audio decoder or
   PTS diagnostics also show damage.
-- `corrupt=` in the stats line (`video_corrupt_frames`) is frames the decoder
-  flagged as damaged; `held=` (`video_corrupt_held`) is the HEVC subset that
-  was kept off screen. A `held` count that keeps climbing on an HEVC stream
-  means references are being lost faster than keyframes arrive: shorten the
-  encoder's keyframe interval or give SRT more latency to retransmit.
+- `HEVC video resumed (N frames held this connection)` reports the HEVC frames
+  kept off screen. A count that keeps climbing means references are being
+  lost faster than keyframes arrive: shorten the encoder's keyframe interval or
+  give SRT more latency to retransmit.

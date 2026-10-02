@@ -623,8 +623,6 @@ fn intake_discards_warmup_then_buffers_decoded_audio() {
         state.latest_audio_stream_pts_ns,
         (frames - 1) * CHUNK_NS as i64
     );
-    assert_eq!(shared.conn.pts_repairs.load(Relaxed), 0);
-    assert_eq!(shared.conn.silence_insertions.load(Relaxed), 0);
 
     let buf = shared.audio_buf();
     let buf = buf.as_ref().unwrap();

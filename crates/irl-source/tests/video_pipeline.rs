@@ -412,7 +412,6 @@ fn hevc_frames_from_a_missing_reference_are_held_back() {
         "the damaged frame is not paced"
     );
     assert_eq!(shared.conn.video_corrupt_held.load(Relaxed), 1);
-    assert_eq!(shared.conn.video_corrupt_frames.load(Relaxed), 1);
     assert!(state.hold_logged);
 
     // H.264 damage passes through instead, to preserve cadence.
@@ -707,11 +706,10 @@ fn clearing_the_ts_init_mirror_re_anchors_the_fallback_clock() {
         "re-anchored {re_anchored} should sit at ~now, before the capped {capped}"
     );
     assert!(shared.conn.video_ts_init.load(Relaxed));
-    assert_eq!(shared.conn.video_pts_base.load(Relaxed), 10_000_000_000);
 }
 
 #[test]
-fn the_lead_stats_follow_the_mapping() {
+fn a_frame_is_due_where_the_audio_mapping_puts_it() {
     let shared = shared();
     let (mut thread, _recorder) = thread_with(shared.clone());
 
@@ -727,12 +725,11 @@ fn the_lead_stats_follow_the_mapping() {
     frame.set_pts(0);
     let due = thread.due_time(&frame);
 
-    assert!(due >= now + 1_900_000_000);
-    let lead = shared.conn.video_lead_ns.load(Relaxed);
-    assert!(lead > 1_900_000_000, "lead {lead}");
-    assert_eq!(shared.lifetime.video_lead_peak_ns.load(Relaxed), lead);
-    // 2 s is past 120 ms of target buffer plus the 400 ms floor.
-    assert_eq!(shared.lifetime.video_lead_excess.load(Relaxed), 1);
+    assert!(
+        due >= now + 1_900_000_000,
+        "due {}ms ahead",
+        (due as i64 - now as i64) / 1_000_000
+    );
 }
 
 #[test]

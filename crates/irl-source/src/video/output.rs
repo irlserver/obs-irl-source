@@ -221,8 +221,6 @@ impl VideoThread {
             self.sys_base = now;
             self.pts_base = pts_ns;
             self.ts_init = true;
-            self.shared.conn.video_sys_base.store(now, Relaxed);
-            self.shared.conn.video_pts_base.store(pts_ns, Relaxed);
             self.shared.conn.video_ts_init.store(true, Relaxed);
         }
 
@@ -264,7 +262,7 @@ impl VideoThread {
     /// already queued.
     ///
     /// Deliberately free of the side effects in [`Self::due_time`] — the lead
-    /// stats, the warning line and the video-only fallback anchor all belong
+    /// warning and the video-only fallback anchor both belong
     /// to a frame arriving, and running them again for every queued frame on
     /// every pacing cycle would report the queue rather than the stream.
     /// `None` when there is no audio to slave to, or when the mapping has been
@@ -287,14 +285,13 @@ impl VideoThread {
         Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
     }
 
-    /// `video_record_lead` (`video-handler.c:285-327`): how far ahead of wall
-    /// clock the mapping placed this frame.
+    /// `video_record_lead` (`video-handler.c:285-327`): warn when the mapping
+    /// placed this frame further ahead of wall clock than libobs can queue.
     ///
-    /// The lead is recorded, never clamped. What libobs queues is the lead's
-    /// *growth* since its play head last anchored, not its size, so a large
-    /// but steady lead queues nothing and clamping it would only shift video
-    /// ahead of audio. The measurement stays because it is the signal for
-    /// whether pacing is doing its job.
+    /// The lead is never clamped. What libobs queues is the lead's *growth*
+    /// since its play head last anchored, not its size, so a large but steady
+    /// lead queues nothing and clamping it would only shift video ahead of
+    /// audio.
     pub fn record_lead(&mut self, ts: i64, now: u64, frame_interval_ns: i64) {
         let lead_ns = ts - now as i64;
         let frame_interval_ns = if frame_interval_ns <= 0 {
@@ -304,19 +301,9 @@ impl VideoThread {
         };
         let queue_safe_ns = self.shared.hot.watermarks().target_ms as i64 * 1_000_000
             + video_time::queue_safe_ns(frame_interval_ns);
-
-        self.shared.conn.video_lead_ns.store(lead_ns, Relaxed);
-        // Keep the high-water mark too: stats are sampled every 30 s, and an
-        // excursion that drains in ~17 s is very likely to fall between two
-        // samples.
-        self.shared
-            .lifetime
-            .video_lead_peak_ns
-            .fetch_max(lead_ns, Relaxed);
         if lead_ns <= queue_safe_ns {
             return;
         }
-        self.shared.lifetime.video_lead_excess.fetch_add(1, Relaxed);
 
         // Only a risk while the lead is still climbing — a steady lead of any
         // size is free — so this is a "watch this" line, not a fault.

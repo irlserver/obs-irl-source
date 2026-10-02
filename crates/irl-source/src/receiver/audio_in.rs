@@ -65,7 +65,6 @@ impl AudioIntake {
         let Some((verdict, pts_tb, duration)) = self.evaluate_pts(frame, out_rate, tb) else {
             return;
         };
-        let mut inserted_silence = false;
 
         // ── Startup warm-up ──
         let frame_ms = audio_frame_duration_ms(frame.nb_samples(), out_rate);
@@ -81,13 +80,11 @@ impl AudioIntake {
         }
 
         // ── PTS repair dispatch ──
+        let mut inserted_silence = false;
         match verdict.action {
             PtsAction::Silence if verdict.silence_ms > 0 => {
-                if self.insert_silence(shared, verdict.corrected_pts, verdict.silence_ms, pts_tb) {
-                    shared.conn.silence_insertions.fetch_add(1, Relaxed);
-                    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
-                    inserted_silence = true;
-                }
+                inserted_silence =
+                    self.insert_silence(shared, verdict.corrected_pts, verdict.silence_ms, pts_tb);
             }
             PtsAction::Reset => {
                 let mut state = shared.audio_state();
@@ -100,7 +97,6 @@ impl AudioIntake {
                     ffmpeg::gettime_us() as u64,
                     consts::AUDIO_RECOVERY_HOLD_US,
                 );
-                shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 drop(state);
                 // The video half of `irl_reset_stream_timing_state`. Video
                 // decode runs on its own thread now, so this is a request
@@ -115,23 +111,10 @@ impl AudioIntake {
         }
 
         if verdict.action != PtsAction::Pass {
-            let gap_ms = verdict.gap_ms;
-            shared.conn.pts_last_gap_ms.store(gap_ms, Relaxed);
-            shared.conn.pts_max_gap_ms.fetch_max(gap_ms, Relaxed);
-
-            let frame_sized_normalization =
-                verdict.action == PtsAction::Interpolate && frame_ms > 0 && gap_ms <= frame_ms + 2;
-            if frame_sized_normalization {
-                shared.conn.pts_normalizations.fetch_add(1, Relaxed);
-            } else {
-                shared.conn.pts_repairs.fetch_add(1, Relaxed);
-                if verdict.action == PtsAction::Interpolate {
-                    shared.conn.pts_interpolations.fetch_add(1, Relaxed);
-                }
-            }
-            if verdict.action == PtsAction::Reset {
-                shared.conn.pts_resets.fetch_add(1, Relaxed);
-            }
+            shared
+                .conn
+                .pts_max_gap_ms
+                .fetch_max(verdict.gap_ms, Relaxed);
         }
 
         // ── Convert to interleaved float ──

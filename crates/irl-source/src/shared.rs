@@ -137,9 +137,8 @@ pub struct AudioState {
     /// Decoded samples per frame (AAC 1024, Opus 960): the output chunk size.
     pub decoded_frame_samples: i32,
 
-    // Stream PTS mirrors (ns).
+    /// Stream PTS of the newest decoded audio (ns).
     pub latest_audio_stream_pts_ns: i64,
-    pub latest_video_stream_pts_ns: i64,
 
     /// Underrun recovery hold (FFmpeg µs domain).
     pub recovery_until_us: u64,
@@ -199,29 +198,18 @@ impl AudioState {
 pub struct ConnStats {
     pub total_audio_frames: AtomicU64,
     pub total_video_frames: AtomicU64,
-    pub pts_repairs: AtomicU64,
-    pub pts_normalizations: AtomicU64,
-    pub pts_interpolations: AtomicU64,
-    pub pts_resets: AtomicU64,
-    pub pts_last_gap_ms: AtomicI32,
     pub pts_max_gap_ms: AtomicI32,
-    pub silence_insertions: AtomicU64,
     pub audio_underruns: AtomicU64,
-    pub audio_resync_skipped_chunks: AtomicU64,
-    pub audio_hidden_trimmed_chunks: AtomicU64,
-    pub audio_quality_events: AtomicU64,
     pub audio_output_restarts: AtomicU64,
-    pub audio_decoder_flushes: AtomicU64,
-    pub video_corrupt_frames: AtomicU64,
+    /// Chunks dropped from the jitter buffer after playback primed, which only
+    /// the low-latency backlog cap does. Not a stat: it is how the network
+    /// simulation holds buffered mode to "audible audio is never skipped".
+    pub audible_skipped_chunks: AtomicU64,
+    /// HEVC frames held back for a missing reference, for the line that
+    /// reports the hold ending.
     pub video_corrupt_held: AtomicU64,
     /// `f32::to_bits` of the smoothed playback speed.
     pub current_speed_bits: AtomicU32,
-    pub last_obs_lead_ns: AtomicI64,
-    pub last_chunk_stream_ns: AtomicU64,
-    pub last_chunk_obs_ns: AtomicU64,
-    pub last_frames_out: AtomicU32,
-    pub last_samples_per_sec: AtomicU32,
-    pub video_lead_ns: AtomicI64,
     /// Mirror of the video thread's standing delay, for the stats.
     pub video_delay_ns: AtomicU64,
     /// Mirror of `AudioState::hold_ms`, for the stats and the video thread.
@@ -230,12 +218,11 @@ pub struct ConnStats {
     /// Taken at arrival: the decoded-frame PTS trails it by however long the
     /// packet waited for its due time, which is not the sender's doing.
     pub video_arrival_pts_ns: AtomicI64,
-    /// EMA of decoded PTS deltas; written by the receiver, read by video.
+    /// EMA of decoded PTS deltas, for the frame rate the stats line reports.
     pub video_frame_interval_ns: AtomicI64,
-    // Mirrors of the video thread's anchors for stats / media_get_state.
+    /// Mirror of the video thread's fallback anchor, for `media_get_state`
+    /// and for the receiver to request a re-anchor by clearing it.
     pub video_ts_init: AtomicBool,
-    pub video_sys_base: AtomicU64,
-    pub video_pts_base: AtomicI64,
     pub last_video_width: AtomicI32,
     pub last_video_height: AtomicI32,
 }
@@ -255,7 +242,6 @@ impl ConnStats {
 /// `reset_runtime_state()` left alone.
 #[derive(Default)]
 pub struct LifetimeStats {
-    pub reconnect_count: AtomicU64,
     pub video_queue_drops: AtomicU64,
     /// Peak packets queued for decode. Was the peak count of *decoded* frames
     /// pinning hardware surfaces, which no longer exist: the receiver queues
@@ -265,10 +251,10 @@ pub struct LifetimeStats {
     pub pacing_now: AtomicI32,
     pub pacing_peak: AtomicI32,
     pub pacing_bytes: AtomicUsize,
-    pub pacing_overflows: AtomicU64,
     pub audio_fill_peak_ms: AtomicI32,
-    pub video_lead_peak_ns: AtomicI64,
-    pub video_lead_excess: AtomicU64,
+    /// Declared output-clock re-anchors. Not a stat: the network simulation
+    /// counts them, with the output restarts, as the only places the OBS
+    /// clock may jump.
     pub audio_offset_reanchors: AtomicU64,
     pub video_pkt_eagain: AtomicU64,
     pub audio_pkt_eagain: AtomicU64,

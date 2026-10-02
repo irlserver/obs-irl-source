@@ -96,11 +96,10 @@ impl Source for IrlSource {
         let proc_cb = match CString::new(proc_declaration()) {
             Ok(decl) => {
                 let state = Arc::clone(&obs_state);
-                let lifetime = Arc::clone(&lifetime);
                 Some(source.proc_handler().add(
                     &decl,
                     Box::new(move |cd: &mut CallData| {
-                        write_stats(cd, &snapshot(&state.lock(), &lifetime));
+                        write_stats(cd, &snapshot(&state.lock()));
                     }),
                 ))
             }
@@ -480,15 +479,10 @@ pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
 /// Snapshot every stat, consistently: the audio state (and, under it, the
 /// jitter buffer) is locked once.
 ///
-/// With no run in progress the per-connection counters read zero, while the
-/// lifetime counters and the settings-derived flags still report.
-fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
+/// With no run in progress every stat reads zero, and the speed reads 1.0.
+fn snapshot(state: &ObsState) -> StatsSnapshot {
     let mut snap = StatsSnapshot {
         current_speed: 1.0,
-        adaptive_latency_control: state.config.hot.adaptive_speed,
-        low_latency_audio: state.config.stream.low_latency_audio,
-        video_lead_excess: lifetime.video_lead_excess.load(Relaxed) as i64,
-        reconnect_count: lifetime.reconnect_count.load(Relaxed) as i64,
         ..StatsSnapshot::default()
     };
 
@@ -508,38 +502,12 @@ fn snapshot(state: &ObsState, lifetime: &LifetimeStats) -> StatsSnapshot {
     snap.reconnecting = shared.flags.reconnecting.load(Relaxed);
     snap.total_audio_frames = conn.total_audio_frames.load(Relaxed) as i64;
     snap.total_video_frames = conn.total_video_frames.load(Relaxed) as i64;
-    snap.pts_repairs = conn.pts_repairs.load(Relaxed) as i64;
-    snap.pts_normalizations = conn.pts_normalizations.load(Relaxed) as i64;
-    snap.pts_interpolations = conn.pts_interpolations.load(Relaxed) as i64;
-    snap.pts_resets = conn.pts_resets.load(Relaxed) as i64;
-    snap.pts_last_gap_ms = conn.pts_last_gap_ms.load(Relaxed) as i64;
     snap.pts_max_gap_ms = conn.pts_max_gap_ms.load(Relaxed) as i64;
-    snap.silence_insertions = conn.silence_insertions.load(Relaxed) as i64;
     snap.audio_underruns = conn.audio_underruns.load(Relaxed) as i64;
-    snap.audio_resync_skipped_chunks = conn.audio_resync_skipped_chunks.load(Relaxed) as i64;
-    snap.audio_hidden_trimmed_chunks = conn.audio_hidden_trimmed_chunks.load(Relaxed) as i64;
-    snap.audio_quality_events = conn.audio_quality_events.load(Relaxed) as i64;
     snap.audio_output_restarts = conn.audio_output_restarts.load(Relaxed) as i64;
-    snap.obs_lead_ms = conn.last_obs_lead_ns.load(Relaxed) / 1_000_000;
-    snap.audio_decoder_flushes = conn.audio_decoder_flushes.load(Relaxed) as i64;
-    snap.video_corrupt_frames = conn.video_corrupt_frames.load(Relaxed) as i64;
-    snap.video_corrupt_held = conn.video_corrupt_held.load(Relaxed) as i64;
-    snap.video_lead_ms = conn.video_lead_ns.load(Relaxed) / 1_000_000;
     snap.video_delay_ms = (conn.video_delay_ns.load(Relaxed) / 1_000_000) as i64;
     snap.av_skew_ms = av_skew_ms(shared, &audio);
     snap.audio_hold_ms = i64::from(conn.audio_hold_ms.load(Relaxed));
-
-    // Stream delay: how far behind real time the video output is, computed as
-    // wall clock minus the anchored video PTS. Includes SRT latency, decode
-    // time and any buffering, which is what makes it the number to watch in a
-    // latency overlay.
-    if conn.video_ts_init.load(Relaxed) && audio.latest_video_stream_pts_ns != 0 {
-        let video_wall_ns = conn.video_sys_base.load(Relaxed) as i64
-            + (audio.latest_video_stream_pts_ns - conn.video_pts_base.load(Relaxed));
-        snap.stream_delay_ms =
-            ((obs::time::gettime_ns() as i64 - video_wall_ns) / 1_000_000).max(0);
-    }
-
     snap
 }
 

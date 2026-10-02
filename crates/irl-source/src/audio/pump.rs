@@ -217,7 +217,6 @@ impl AudioPump {
                     return false;
                 }
                 shared.conn.audio_output_restarts.fetch_add(1, Relaxed);
-                shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 irl_warn!(
                     "Audio output stalled {}ms; restarting output clock",
                     (now - next_ts) / 1_000_000
@@ -277,7 +276,6 @@ impl AudioPump {
                 irl_info!("Audio underrun: concealing with silence");
             }
             shared.conn.audio_underruns.fetch_add(1, Relaxed);
-            shared.conn.audio_quality_events.fetch_add(1, Relaxed);
             super::mark_audio_recovery(state, now_us, consts::AUDIO_RECOVERY_HOLD_US);
             state.conceal_fade_pending = true;
             return self.emit_concealment_silence(shared, state, base_samples, &fmt);
@@ -299,9 +297,8 @@ impl AudioPump {
             if trimmed > 0 {
                 shared
                     .conn
-                    .audio_resync_skipped_chunks
+                    .audible_skipped_chunks
                     .fetch_add(trimmed as u64, Relaxed);
-                shared.conn.audio_quality_events.fetch_add(1, Relaxed);
                 fill_ms = post.map_or(0, |s| s.fill_ms);
             }
         }
@@ -460,7 +457,6 @@ Video stays in sync with it; check the sender's frame rate and clock",
             fmt.rate as u32,
             chunk_pts_ns,
             stream_duration_ns,
-            (self.now_ns)(),
         );
         if first_mapping {
             // Video holds its first frame until this mapping exists and then
@@ -515,7 +511,6 @@ Video stays in sync with it; check the sender's frame rate and clock",
             fmt.rate as u32,
             state.latest_buffered_end_pts_ns,
             0,
-            (self.now_ns)(),
         );
         true
     }
@@ -607,8 +602,8 @@ impl BufferFormat {
 /// wall clock moves, and the stall check reads that as a stalled audio thread —
 /// which it is not. Restarting it there re-anchors, waits one lead and trips
 /// again, so a silent input produced a "restarting output clock" warning every
-/// ~150ms for as long as it stayed silent, with `audio_output_restarts` and
-/// `audio_quality_events` climbing on a source that was merely quiet.
+/// ~150ms for as long as it stayed silent, with `audio_output_restarts`
+/// climbing on a source that was merely quiet.
 ///
 /// Drop the stale mapping instead and let the normal prime path establish one
 /// new clock when a real chunk arrives. Counted as an underrun, which is what
@@ -622,10 +617,8 @@ fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u6
     state.latest_buffered_end_pts_ns = 0;
     state.offset_baseline_set = false;
     state.conceal_fade_pending = true;
-    shared.conn.last_obs_lead_ns.store(0, Relaxed);
 
     shared.conn.audio_underruns.fetch_add(1, Relaxed);
-    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
     super::mark_audio_recovery(state, now_us, consts::AUDIO_RECOVERY_HOLD_US);
     irl_warn!(
         "Low-latency audio input empty for {}ms; suspending output clock until audio resumes",
@@ -707,7 +700,6 @@ fn maybe_reanchor_offset(
     state.conceal_fade_pending = true;
 
     shared.lifetime.audio_offset_reanchors.fetch_add(1, Relaxed);
-    shared.conn.audio_quality_events.fetch_add(1, Relaxed);
     irl_warn!(
         "Audio latency drifted +{}ms past baseline (>{}ms) with buffer at/below target; re-anchoring output clock",
         excess_ns / 1_000_000,
@@ -777,14 +769,6 @@ fn maybe_trim_hidden_backlog(
         return false;
     }
 
-    shared
-        .conn
-        .audio_resync_skipped_chunks
-        .fetch_add(trimmed as u64, Relaxed);
-    shared
-        .conn
-        .audio_hidden_trimmed_chunks
-        .fetch_add(trimmed as u64, Relaxed);
     irl_info!(
         "Audio trim: dropped {} hidden buffered chunk{} before playback (fill={}ms target={}ms)",
         trimmed,
@@ -795,9 +779,7 @@ fn maybe_trim_hidden_backlog(
     true
 }
 
-/// `finalize_audio_output`: publish the playout mapping and the per-chunk
-/// stats the receiver's stats line and `get_stats` read.
-#[allow(clippy::too_many_arguments)]
+/// `finalize_audio_output`: publish the playout mapping and count the chunk.
 fn finalize_audio_output(
     shared: &Shared,
     state: &mut AudioState,
@@ -806,39 +788,13 @@ fn finalize_audio_output(
     samples_per_sec: u32,
     chunk_pts_ns: i64,
     stream_duration_ns: u64,
-    after_output: u64,
 ) {
     state.latest_buffered_end_pts_ns = chunk_pts_ns + stream_duration_ns as i64;
-
-    if samples_per_sec > 0 {
-        let audio_duration_ns = frames as u64 * 1_000_000_000 / samples_per_sec as u64;
-        state.latest_obs_end_ts_ns = timestamp + audio_duration_ns;
-        shared
-            .conn
-            .last_chunk_obs_ns
-            .store(audio_duration_ns, Relaxed);
+    state.latest_obs_end_ts_ns = if samples_per_sec > 0 {
+        timestamp + frames as u64 * 1_000_000_000 / samples_per_sec as u64
     } else {
-        state.latest_obs_end_ts_ns = timestamp;
-        shared.conn.last_chunk_obs_ns.store(0, Relaxed);
-    }
-
-    shared
-        .conn
-        .last_chunk_stream_ns
-        .store(stream_duration_ns, Relaxed);
-    shared.conn.last_frames_out.store(frames, Relaxed);
-    shared
-        .conn
-        .last_samples_per_sec
-        .store(samples_per_sec, Relaxed);
-
-    let lead = if state.latest_obs_end_ts_ns > after_output {
-        (state.latest_obs_end_ts_ns - after_output) as i64
-    } else {
-        0
+        timestamp
     };
-    shared.conn.last_obs_lead_ns.store(lead, Relaxed);
-
     shared.conn.total_audio_frames.fetch_add(1, Relaxed);
 }
 

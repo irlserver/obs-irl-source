@@ -2,9 +2,8 @@
 //!
 //! The arithmetic of `irl_video_due_time` and `video_record_lead`, extracted
 //! from the locking and logging around it: what those C functions do beyond
-//! this is snapshot audio-thread state under `audio_state_lock`, publish the
-//! lead stats and throttle a warning line, all of which belongs to the plugin
-//! crate.
+//! this is snapshot audio-thread state under `audio_state_lock` and throttle a
+//! warning line, both of which belong to the plugin crate.
 
 use crate::consts;
 

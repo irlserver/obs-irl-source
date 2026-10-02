@@ -235,7 +235,7 @@ Releases are tag driven (`.github/workflows/release.yml`, see `RELEASING.md`). P
 The port is behaviour-identical except for these, which are intentional:
 
 1. The dead `network_buffer_mb` setting is gone. Nothing read it; the transport buffer is `irl_core::consts::NETWORK_BUFFER_MB`.
-2. The `video_decoder_flushes` stat is gone (it was always 0 after the video decoder stopped being flushed). 27 stat fields remained; deviation 16 adds `video_delay_ms` and `av_skew_ms`, and deviation 17 adds `audio_hold_ms`, making 30.
+2. The `video_decoder_flushes` stat is gone (it was always 0 after the video decoder stopped being flushed). Deviations 16 and 17 later added `video_delay_ms`, `av_skew_ms` and `audio_hold_ms`, and 3.0.0 cut the surface down to the 11 stat fields that diagnosed real issues (the stats log line was trimmed with it).
 3. `irl-stats.lua` finds the source by its plugin id instead of by display name, and takes source names as script properties.
 4. The vestigial `hw_map_ok` flag is not ported.
 5. `w32-pthreads.dll` is no longer shipped on Windows: Rust never calls `pthread_*`, so the librist shim hazard that `include/irl-threading.h` existed for is gone. The installer deletes a stale copy.

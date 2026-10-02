@@ -71,9 +71,8 @@ pub fn output_claim(state: &mut AudioState, frames: u32, rate: u32) -> u64 {
 }
 
 /// `irl_reset_audio_timing_state`: output clock, playout mapping, fades and
-/// concealment back to the not-yet-primed state, including the per-chunk
-/// stats mirrored in `ConnStats`. Caller holds `audio_state`.
-pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
+/// concealment back to the not-yet-primed state. Caller holds `audio_state`.
+pub fn reset_audio_timing_state(state: &mut AudioState) {
     state.primed = false;
     state.anchor_ns = 0;
     state.samples = 0;
@@ -94,12 +93,6 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
     state.startup_warmup_remaining_ms = 0;
     state.drain = irl_core::DrainWatch::default();
 
-    // The output-side stats the C's audio reset zeroed, now in `ConnStats`.
-    shared.conn.last_obs_lead_ns.store(0, Relaxed);
-    shared.conn.last_chunk_stream_ns.store(0, Relaxed);
-    shared.conn.last_chunk_obs_ns.store(0, Relaxed);
-    shared.conn.last_frames_out.store(0, Relaxed);
-    shared.conn.last_samples_per_sec.store(0, Relaxed);
     // The receiver-thread half of the C function (decode-error counters,
     // last-sample memory) lives in `ReceiverFlags` / `AudioIntake`, cleared
     // by their owners at the same call sites.
@@ -109,7 +102,7 @@ pub fn reset_audio_timing_state(shared: &Shared, state: &mut AudioState) {
 /// mirrors in `ConnStats` and the stream PTS trackers. Caller holds
 /// `audio_state`.
 pub fn reset_stream_timing_state(shared: &Shared, state: &mut AudioState) {
-    reset_audio_timing_state(shared, state);
+    reset_audio_timing_state(state);
 
     // The trim is a property of the sender, so it deliberately survives the
     // audio-only reset above (a throttled decoder flush must not cost two
@@ -123,17 +116,10 @@ pub fn reset_stream_timing_state(shared: &Shared, state: &mut AudioState) {
     // release window takes it back if the sender no longer needs it.
     hold::forget_readings(state);
 
-    state.latest_video_stream_pts_ns = 0;
-
-    // State, not counters: the interval has to be re-measured for the new
-    // stream, and a stale lead would be reported until the first frame
-    // arrives. video_lead_excess is cumulative for the source, like the other
-    // quality counters.
+    // The fallback clock re-anchors, and the frame interval is re-measured
+    // for the new stream.
     shared.conn.video_ts_init.store(false, Relaxed);
-    shared.conn.video_sys_base.store(0, Relaxed);
-    shared.conn.video_pts_base.store(0, Relaxed);
     shared.conn.video_frame_interval_ns.store(0, Relaxed);
-    shared.conn.video_lead_ns.store(0, Relaxed);
 
     // Every C call site set `current_speed = 1.0f` immediately after this
     // call (`irl-source.c:234-235`, `receiver-stream.c:671-678`); the
