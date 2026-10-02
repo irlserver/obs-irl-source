@@ -1,10 +1,5 @@
-//! Decoded video intake (port of `irl_handle_video_frame`,
-//! `receiver-video.c:289-438`).
-//!
-//! Runs on the **video** thread, not the receiver: decode moved there so that
-//! the stream's latency can be held as compressed packets rather than decoded
-//! frames, and so that a receiver blocked in `av_read_frame` during a network
-//! stall cannot stop video from draining the buffer it already has.
+//! Decoded video intake. Runs on the video thread, next to the decoder (see
+//! [`crate::video::decode`] for why that is not the receiver).
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -12,12 +7,9 @@ use irl_core::video_time;
 
 use crate::shared::Shared;
 
-/// Video-thread-owned decode and intake state.
-///
-/// The C kept all of it on `struct irl_source` under the receiver's lock
-/// discipline. Only the two flags the audio path also touches are shared
-/// ([`crate::shared::VideoFlags`]); everything here belongs to one thread and
-/// needs no synchronisation at all.
+/// Video-thread-owned decode and intake state. Only the two flags the audio
+/// path also touches are shared ([`crate::shared::VideoFlags`]); everything
+/// here belongs to one thread.
 #[derive(Default)]
 pub struct DecodeState {
     /// Packet-level keyframe gate: the decoder is not fed until a key packet
@@ -46,9 +38,8 @@ impl DecodeState {
         *self = Self::default();
     }
 
-    /// The video half of `irl_reset_stream_timing_state`: an audio PTS reset
-    /// broke the timeline, so the interval estimate and the decoder-error
-    /// bookkeeping no longer describe this stream.
+    /// An audio PTS reset broke the timeline, so the interval estimate and the
+    /// decoder-error bookkeeping no longer describe this stream.
     ///
     /// The keyframe gates are deliberately untouched — the connection did not
     /// change and video has not lost its reference frames.
@@ -86,8 +77,8 @@ pub fn handle_frame(
     let is_key = frame.is_key();
     let first_keyframe = shared.video_flags.first_keyframe.load(Relaxed);
 
-    // The frame-level backstop only gates when Wait For Keyframe is on
-    // (master 64dcd0f); the first-keyframe bookkeeping runs either way.
+    // The frame-level backstop only gates when Wait For Keyframe is on; the
+    // first-keyframe bookkeeping runs either way.
     if !first_keyframe && !is_key && shared.hot.wait_for_keyframe.load(Relaxed) {
         if shared.conn.total_video_frames.load(Relaxed) == 0 {
             irl_debug!("Waiting for keyframe (dropped non-keyframe)");

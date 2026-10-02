@@ -19,15 +19,15 @@ const MAX_PLANES: usize = 8;
 
 /* ── swscale backend selection ────────────────────────────── */
 
-/// `IRL_SWS_UNSTABLE`, read (and logged) once, exactly as the C
-/// `sws_unstable_enabled()` reads it: set, non-empty, not starting with `0`.
+/// `IRL_SWS_UNSTABLE`, read and logged once: on when set, non-empty and not
+/// starting with `0`.
 ///
 /// FFmpeg 9.0's op-chain backends are reachable only through the dynamic API
 /// (`sws_alloc_context` with no `sws_init_context`, driven by
-/// `sws_scale_frame`), which is what [`Scaler`] uses; `SWS_UNSTABLE` is what
-/// makes it prefer them. Every format OBS makes us convert is subsampled, so
-/// as of 9.0 the op chain declines and the legacy pass runs anyway — the flag
-/// is wired up for the day that changes, and defaults off.
+/// `sws_scale_frame`), which is what [`Scaler`] uses; `SWS_UNSTABLE` makes it
+/// prefer them. Every format OBS makes us convert is subsampled, which the op
+/// chain declines in 9.0, so the legacy pass runs anyway and the flag defaults
+/// off.
 fn sws_unstable() -> bool {
     static UNSTABLE: OnceLock<bool> = OnceLock::new();
     *UNSTABLE.get_or_init(|| {
@@ -51,7 +51,6 @@ fn sws_unstable() -> bool {
 
 /* ── Format mapping ───────────────────────────────────────── */
 
-/// `avpixfmt_to_obs` (`video-handler.c:170-199`).
 pub fn avpixfmt_to_obs(fmt: AVPixelFormat) -> VideoFormat {
     use AVPixelFormat as F;
     match fmt {
@@ -69,9 +68,7 @@ pub fn avpixfmt_to_obs(fmt: AVPixelFormat) -> VideoFormat {
     }
 }
 
-/// `convert_color_space` (`video-handler.c:210-230`). The C signature also
-/// takes the primaries and never reads them; BT.2020 splits on the transfer
-/// function alone.
+/// BT.2020 splits into HLG and PQ on the transfer function alone.
 pub fn convert_color_space(cs: AVColorSpace, trc: AVColorTransferCharacteristic) -> ColorSpace {
     match cs {
         AVColorSpace::AVCOL_SPC_BT709 => ColorSpace::Bt709,
@@ -87,7 +84,6 @@ pub fn convert_color_space(cs: AVColorSpace, trc: AVColorTransferCharacteristic)
     }
 }
 
-/// `convert_color_range` (`video-handler.c:232-236`).
 pub fn convert_color_range(range: AVColorRange) -> ColorRange {
     if range == AVColorRange::AVCOL_RANGE_JPEG {
         ColorRange::Full
@@ -99,17 +95,15 @@ pub fn convert_color_range(range: AVColorRange) -> ColorRange {
 impl VideoThread {
     /* ── Transfer to system memory ────────────────────────── */
 
-    /// `irl_video_to_sysmem` (`video-handler.c:539-587`).
-    ///
     /// A system-memory frame comes back as a new reference (no copy). A
     /// hardware frame is copied out exactly once, into a buffer recycled
     /// through [`FramePool`]: `av_hwframe_map` would keep the decoder surface
     /// pinned for the whole output lead and exhaust the pool within a few
-    /// frames, and letting `av_hwframe_transfer_data` allocate meant a
+    /// frames, and letting `av_hwframe_transfer_data` allocate costs a
     /// frame-sized malloc/free per frame (page zeroing plus thousands of soft
     /// faults per 4K frame).
-    // Named after the C `irl_video_to_sysmem`; the `&mut self` is the transfer
-    // pool and its broken latch, not a conversion of the receiver.
+    // The `&mut self` is the transfer pool and its broken latch, not a
+    // conversion of the receiver.
     #[allow(clippy::wrong_self_convention)]
     pub fn to_sysmem(&mut self, frame: &Frame) -> Option<Frame> {
         if !frame.is_hw() {
@@ -127,9 +121,8 @@ impl VideoThread {
         Some(out)
     }
 
-    /// The pooled half of the transfer (`xfer_frame_from_pool` plus the
-    /// broken-backend latch). `None` means "let FFmpeg allocate the
-    /// destination instead", which is exactly what shipped before the pool.
+    /// The pooled half of the transfer. `None` means "let FFmpeg allocate the
+    /// destination instead".
     fn pooled_transfer(&mut self, frame: &Frame) -> Option<Frame> {
         if self.xfer_pool_broken {
             return None;
@@ -172,8 +165,7 @@ impl VideoThread {
 
     /* ── Timestamp mapping ────────────────────────────────── */
 
-    /// `irl_video_due_time` (`video-handler.c:339-411`): the OBS timestamp a
-    /// freshly transferred frame is scheduled for.
+    /// The OBS timestamp a freshly transferred frame is scheduled for.
     ///
     /// While audio is playing, queued audio is the master playout clock: video
     /// PTS maps through the same stream-PTS → OBS-clock offset as the latest
@@ -210,11 +202,10 @@ impl VideoThread {
             return mapped;
         }
 
-        // `conn.video_ts_init` is the cross-thread half of the C's
-        // `video_ts_init` and the authority here: the receiver clears it on a
+        // `conn.video_ts_init` is the authority here: it is cleared on a
         // resolution change and on every new connection
         // (`prepare_new_connection` / `reset_stream_timing_state`), so a
-        // cleared mirror means "re-anchor now" even though the private anchors
+        // cleared flag means "re-anchor now" even though the private anchors
         // below still hold the previous connection's epoch. This is the only
         // place that sets it.
         if !self.ts_init || !self.shared.conn.video_ts_init.load(Relaxed) {
@@ -227,10 +218,9 @@ impl VideoThread {
         let mut computed = video_time::fallback_anchor(pts_ns, self.pts_base, self.sys_base, now)
             .saturating_add(delay_ns);
 
-        // Startup fallback before the audio playout mapping exists. Here the
-        // mapping cannot stand in for "there is audio" — the whole point is
-        // that it does not exist yet — so this reads the flag the receiver
-        // thread publishes.
+        // Startup fallback before the audio playout mapping exists. The
+        // mapping cannot stand in for "there is audio" here, so this reads the
+        // flag the receiver publishes.
         if self.shared.flags.audio_present.load(Relaxed) {
             let mut audio_lead_ns = 0;
             if obs_end == 0 {
@@ -257,14 +247,12 @@ impl VideoThread {
         self.shared.audio_state().playout_mapping().is_some()
     }
 
-    /// `irl_video_playout_offset` (`video-handler.c:431-453`): the current
-    /// stream-PTS → OBS-clock offset, for re-deriving the due time of frames
-    /// already queued.
+    /// The current stream-PTS → OBS-clock offset, for re-deriving the due time
+    /// of frames already queued.
     ///
-    /// Deliberately free of the side effects in [`Self::due_time`] — the lead
-    /// warning and the video-only fallback anchor both belong
-    /// to a frame arriving, and running them again for every queued frame on
-    /// every pacing cycle would report the queue rather than the stream.
+    /// Free of the side effects in [`Self::due_time`]: the lead warning and the
+    /// fallback anchor belong to a frame arriving, and running them for every
+    /// queued frame would report the queue rather than the stream.
     /// `None` when there is no audio to slave to, or when the mapping has been
     /// gone long enough that holding it would be a guess; the caller then
     /// keeps the due times the frames arrived with. The standing video delay
@@ -285,8 +273,8 @@ impl VideoThread {
         Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
     }
 
-    /// `video_record_lead` (`video-handler.c:285-327`): warn when the mapping
-    /// placed this frame further ahead of wall clock than libobs can queue.
+    /// Warn when the mapping placed this frame further ahead of wall clock
+    /// than libobs can queue.
     ///
     /// The lead is never clamped. What libobs queues is the lead's *growth*
     /// since its play head last anchored, not its size, so a large but steady
@@ -323,15 +311,15 @@ impl VideoThread {
 
     /* ── Output ───────────────────────────────────────────── */
 
-    /// `irl_video_output_frame` (`video-handler.c:591-675`): hand a
-    /// system-memory frame to OBS with the timestamp pacing scheduled it for.
+    /// Hand a system-memory frame to OBS with the timestamp pacing scheduled
+    /// it for.
     ///
     /// A directly supported format lends its planes to libobs, which copies
-    /// them inside `obs_source_output_video`; the borrow ends at that call, so
-    /// this path performs no copy of its own. Anything else — an unmapped
-    /// pixel format, or the bottom-up layout OBS's async path cannot express
-    /// (`Frame::plane` reports a negative stride as no plane) — goes through
-    /// swscale into the persistent NV12 scratch.
+    /// them inside `obs_source_output_video`, so this path makes no copy of its
+    /// own. Anything else (an unmapped pixel format, or the bottom-up layout
+    /// OBS's async path cannot express, which `Frame::plane` reports as no
+    /// plane) goes through swscale into the persistent NV12 scratch.
+    ///
     /// Returns whether the frame reached libobs. A conversion that fails
     /// submits nothing, and the caller needs to know: libobs's play head is
     /// only anchored by a frame it actually received.
@@ -397,10 +385,8 @@ impl VideoThread {
             self.sws_src = Some((width, height, pix_fmt));
         }
 
-        // Stride is the display width, as in the C. The chroma plane is sized
-        // for `ceil(height / 2)` rows rather than the C's `y_size / 2`, which
-        // is one row short for an odd height — never smaller than the C
-        // reserved, and it is what `scale_into_nv12` validates.
+        // Stride is the display width. The chroma plane has `ceil(height / 2)`
+        // rows, which is what `scale_into_nv12` validates.
         let stride = width as usize;
         let y_size = stride * height as usize;
         let uv_size = stride * (height as usize).div_ceil(2);

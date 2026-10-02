@@ -11,7 +11,7 @@
 //!   2. `samples_per_sec` must be constant: any change makes OBS
 //!      destroy/recreate its per-source resampler with no crossfade (a click
 //!      per change). Playback speed is instead applied here with a persistent
-//!      swresample compensation, ffplay-style.
+//!      swresample compensation.
 //!   3. The OBS mixer consumes 21.3 ms ticks against wall clock; a source
 //!      whose queued audio runs dry gets a tick of silence plus a time-shifted
 //!      splice (crackle), and a source that falls behind the mix window makes
@@ -50,10 +50,8 @@ pub struct AudioPump {
     now_ns: Box<dyn Fn() -> u64 + Send>,
     /// The FFmpeg-domain clock (`av_gettime`), which times the speed trim's
     /// integration and the underrun recovery hold. Injectable alongside
-    /// [`Self::now_ns`] and for the same reason: a test that steps the OBS
-    /// clock while this one runs at wall speed makes the trim integrate
-    /// hundreds of times too slowly, so the loop it is meant to close never
-    /// closes. The two are always the same real clock in production.
+    /// [`Self::now_ns`]: a test that steps the OBS clock while this one runs at
+    /// wall speed makes the trim integrate far too slowly to close its loop.
     now_us: Box<dyn Fn() -> u64 + Send>,
     /// How long the audio thread may sleep before this pump next has work.
     /// See [`Self::idle_sleep_ms`].
@@ -90,9 +88,8 @@ impl AudioPump {
         self
     }
 
-    /// Replace the FFmpeg-domain clock (tests only). A test that steps
-    /// [`Self::with_clock`] should step this one with it, or the speed trim
-    /// integrates against wall time while the buffer moves in virtual time.
+    /// Replace the FFmpeg-domain clock (tests only). Step it together with
+    /// [`Self::with_clock`].
     #[must_use]
     pub fn with_us_clock(mut self, now_us: Box<dyn Fn() -> u64 + Send>) -> Self {
         self.now_us = now_us;
@@ -104,9 +101,8 @@ impl AudioPump {
     /// Once primed the output clock says exactly when the next chunk is due, so
     /// the thread can sleep to that deadline instead of polling. When the pump
     /// is waiting on data rather than on the clock there is no deadline to
-    /// compute, and this stays at [`consts::AUDIO_PUMP_SLEEP_MS`] — the C
-    /// behaviour, and the right one, since the wake condition is a write from
-    /// another thread.
+    /// compute, and this stays at [`consts::AUDIO_PUMP_SLEEP_MS`], since the
+    /// wake condition is a write from another thread.
     pub fn idle_sleep_ms(&self) -> u32 {
         self.idle_sleep_ms
     }
@@ -115,11 +111,10 @@ impl AudioPump {
     /// call; returns whether audio (or concealment) was emitted.
     pub fn pump_once(&mut self) -> bool {
         let shared = Arc::clone(&self.shared);
-        // The whole call runs under the audio state lock, exactly like the C
-        // (`receiver.c: irl_audio_thread` takes it around
-        // `irl_pump_audio_once`). Nothing below may take it again — the mutex
-        // is not recursive. Buffer-mutex calls nest underneath it, which is
-        // the documented order (audio state lock, then buffer).
+        // The whole call runs under the audio state lock. Nothing below may
+        // take it again: the mutex is not recursive. Buffer-mutex calls nest
+        // underneath it, which is the documented order (audio state lock, then
+        // buffer).
         let mut state = shared.audio_state();
         // Re-check under the same lock as the disconnect fade. The receiver
         // can pause playback while a pump burst is already in progress.
@@ -132,7 +127,7 @@ impl AudioPump {
     fn pump_locked(&mut self, shared: &Shared, state: &mut AudioState) -> bool {
         // Every path but the "already queued far enough ahead" one below is
         // waiting on a write from another thread, which no deadline here can
-        // predict; those keep the C's poll interval.
+        // predict; those keep the fixed poll interval.
         self.idle_sleep_ms = consts::AUDIO_PUMP_SLEEP_MS;
         let low_latency = shared.cfg.low_latency_audio;
 
@@ -152,10 +147,9 @@ impl AudioPump {
         let now = (self.now_ns)();
 
         if !state.primed {
-            // The C set `current_speed = 1.0f` at every connection prep and
-            // runtime reset; the controller lives on this thread, and "not
-            // yet primed" is exactly the window those resets cover (the speed
-            // is only ever computed after priming).
+            // The speed is only computed after priming, so the controller
+            // re-arms from 1.0 for as long as playback is unprimed, which is
+            // the window every connection prep and runtime reset opens.
             self.speed.reset();
             shared.conn.set_current_speed(1.0);
         }
@@ -264,9 +258,9 @@ impl AudioPump {
         }
 
         if !has_audio {
-            // Low-latency mode keeps the old behaviour: no concealment,
-            // resume where the clock line left off (the stall restart above
-            // covers long droughts).
+            // Low-latency mode emits no concealment and resumes where the
+            // clock line left off (the stall restart above covers long
+            // droughts).
             if low_latency {
                 return false;
             }
@@ -467,8 +461,8 @@ Video stays in sync with it; check the sender's frame rate and clock",
         true
     }
 
-    /// `emit_concealment_silence`: one chunk of silence that decays out of the
-    /// last real sample, on the clock line the real audio left behind.
+    /// One chunk of silence that decays out of the last real sample, on the
+    /// clock line the real audio left behind.
     fn emit_concealment_silence(
         &mut self,
         shared: &Shared,
@@ -515,9 +509,9 @@ Video stays in sync with it; check the sender's frame rate and clock",
         true
     }
 
-    /// `apply_output_speed`: stretch/shrink one chunk by `speed` through the
-    /// persistent output resampler. Returns the output frame count, or `None`
-    /// to fall back to the unmodified input chunk.
+    /// Stretch or shrink one chunk by `speed` through the persistent output
+    /// resampler. Returns the output frame count, or `None` to fall back to the
+    /// unmodified input chunk.
     ///
     /// A free function rather than a method because it writes `speed_scratch`
     /// while reading `pump_scratch`, which a `&mut self` receiver would not
@@ -533,9 +527,8 @@ Video stays in sync with it; check the sender's frame rate and clock",
         channels: i32,
         speed: f32,
     ) -> Option<i32> {
-        // `ensure_speed_swr`: rebuild when the format moved; a failed build
-        // leaves `None`, so the next chunk retries (as the C zeroed the
-        // cached rate/channels).
+        // Rebuild when the format moved; a failed build leaves `None`, so the
+        // next chunk retries.
         if swr
             .as_ref()
             .is_none_or(|s| !s.matches_params(rate, channels))
@@ -575,9 +568,8 @@ struct BufferFormat {
     channels: i32,
     bytes_per_sample: i32,
     frame_size: usize,
-    /// The buffer's own target, which `audio_buffer_resize` moves; the
-    /// config's target (the hot watermarks) is a separate quantity and the C
-    /// used each in specific places.
+    /// The buffer's own target, which `AudioBuffer::resize` moves. Not the
+    /// same quantity as the config's target in the hot watermarks.
     target_ms: i32,
 }
 
@@ -597,18 +589,15 @@ impl BufferFormat {
 
 /// Stand the low-latency output clock down until real audio returns.
 ///
-/// Low-latency mode deliberately emits no concealment, so an empty input
-/// cannot advance the sample counter. The output clock then sits still while
-/// wall clock moves, and the stall check reads that as a stalled audio thread —
-/// which it is not. Restarting it there re-anchors, waits one lead and trips
-/// again, so a silent input produced a "restarting output clock" warning every
-/// ~150ms for as long as it stayed silent, with `audio_output_restarts`
-/// climbing on a source that was merely quiet.
+/// Low-latency mode emits no concealment, so an empty input cannot advance the
+/// sample counter, and the stall check reads the still clock as a stalled
+/// audio thread. Restarting the clock there would trip again one lead later,
+/// for as long as the input stays silent.
 ///
 /// Drop the stale mapping instead and let the normal prime path establish one
-/// new clock when a real chunk arrives. Counted as an underrun, which is what
-/// it is. Buffered mode is untouched: its concealment keeps the counter moving,
-/// so a late clock there really is an output-side stall.
+/// new clock when a real chunk arrives. Counted as an underrun. Buffered mode
+/// never gets here: its concealment keeps the counter moving, so a late clock
+/// there really is an output-side stall.
 fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64, now_us: u64) {
     state.primed = false;
     state.anchor_ns = 0;
@@ -626,8 +615,6 @@ fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u6
     );
 }
 
-/// `irl_audio_maybe_reanchor_offset`.
-///
 /// The audio→OBS playout offset is (obs clock end) − (stream PTS end) of the
 /// latest chunk handed to OBS; the video path adds this same offset to every
 /// frame PTS for lip sync. Concealment freezes the stream-PTS side while
@@ -676,17 +663,14 @@ fn maybe_reanchor_offset(
     }
 
     // Only reclaim latency the speed-drain cannot. While backlog is queued
-    // the inflation is real buffered audio, and draining it at up to the
-    // catch-up speed preserves every sample, so leave it to the controller
-    // (content is never skipped). We step in only once the buffer is back
-    // at/below target, where the residual offset is phantom: concealment
-    // silence with no backing audio (the concealed packets were dropped, not
-    // merely late), which no speed-up can ever recover. Re-anchoring here
-    // skips nothing.
+    // the inflation is real buffered audio, which the controller drains
+    // without skipping a sample. Once the buffer is back at or below target
+    // the residual offset is phantom: concealment silence with no backing
+    // audio (the concealed packets were dropped, not late), which no speed-up
+    // can recover. Re-anchoring here skips nothing.
     //
-    // The audio state lock is already held (see `pump_once`); this fill query
-    // takes and releases the buffer mutex underneath it, which is the
-    // documented order.
+    // The audio state lock is already held (see `pump_once`); taking the
+    // buffer mutex underneath it is the documented order.
     let fill_ms = shared.audio_buf().as_ref().map_or(0, |b| b.fill_ms());
     if fill_ms > buffer_target_ms {
         return;
@@ -707,8 +691,6 @@ fn maybe_reanchor_offset(
     );
 }
 
-/// `maybe_trim_hidden_audio_backlog`.
-///
 /// Before playback primes, nothing has been audible yet, so excess startup
 /// backlog can be dropped for free. This is the only trim path. Once audio is
 /// live, content is never skipped: the read loop stops ingesting above a fill
@@ -724,7 +706,6 @@ fn maybe_trim_hidden_backlog(
     if !shared.hot.adaptive_speed.load(Relaxed) {
         return false;
     }
-    // `should_hide_audio_backlog`.
     if low_latency || state.primed {
         return false;
     }
@@ -779,7 +760,7 @@ fn maybe_trim_hidden_backlog(
     true
 }
 
-/// `finalize_audio_output`: publish the playout mapping and count the chunk.
+/// Publish the playout mapping and count the chunk.
 fn finalize_audio_output(
     shared: &Shared,
     state: &mut AudioState,
@@ -798,7 +779,6 @@ fn finalize_audio_output(
     shared.conn.total_audio_frames.fetch_add(1, Relaxed);
 }
 
-/// Grow a scratch buffer to at least `need` bytes (`ensure_scratch`).
 fn ensure_scratch(buf: &mut Vec<u8>, need: usize) {
     if buf.len() < need {
         buf.resize(need, 0);

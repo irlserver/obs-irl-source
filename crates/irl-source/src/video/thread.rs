@@ -1,13 +1,13 @@
 //! Video thread loop and pacing.
 //!
-//! The thread pops compressed packets off [`VideoChannel`](crate::shared::VideoChannel),
-//! decodes each one as it approaches its due time, copies the frame out of the
-//! hardware pool immediately (which returns the decoder's surface), then holds
-//! it in a thread-private pacing queue until its mapped timestamp is due, the
-//! way OBS's own media source paces in
-//! `mp_media_sleep`. Handing libobs a frame early makes libobs hold it, and
-//! past `MAX_ASYNC_FRAMES` (30) held frames `cache_video` silently discards the
-//! whole queue, so this queue is what keeps libobs's async queue about one
+//! The thread pops compressed packets off
+//! [`VideoChannel`](crate::shared::VideoChannel), decodes each one as it
+//! approaches its due time, copies the frame out of the hardware pool at once
+//! (which returns the decoder's surface), then holds it in a thread-private
+//! pacing queue until its mapped timestamp is due, the way OBS's own media
+//! source paces in `mp_media_sleep`. Handing libobs a frame early makes libobs
+//! hold it, and past `MAX_ASYNC_FRAMES` (30) held frames `cache_video` silently
+//! discards the whole queue, so this queue keeps libobs's async queue about one
 //! frame deep.
 
 use std::sync::Arc;
@@ -34,7 +34,6 @@ pub struct Paced {
 }
 
 impl Paced {
-    /// The system-memory frame itself.
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
@@ -71,7 +70,6 @@ pub struct VideoThread {
     scratch: Frame,
     /// Reusable output list for one packet's frames.
     decoded: Vec<Frame>,
-    /// Decode and intake state, owned outright by this thread.
     state: DecodeState,
     pacing: PacingQueue<Paced>,
     /// Last known stream-PTS → OBS-clock offset and when it was taken.
@@ -162,7 +160,6 @@ impl VideoThread {
         }
     }
 
-    /// The thread body (`irl_video_thread`).
     pub fn run(&mut self) {
         while self.shared.is_active() {
             let wait = self.run_once(obs::time::gettime_ns());
@@ -184,8 +181,7 @@ impl VideoThread {
     }
 
     /// One pass of the loop body, at OBS clock `now_ns`. Returns how long to
-    /// sleep before the next pass; zero means "go round again immediately",
-    /// which is the C's `continue`.
+    /// sleep before the next pass; zero means "go round again immediately".
     pub fn run_once(&mut self, now_ns: u64) -> Duration {
         if self.shared.video.take_clear() {
             // The receiver already dropped `video_queue`; the paced frames
@@ -229,8 +225,8 @@ impl VideoThread {
         }
         self.pacing_emit_due(now_ns, slack_ns);
         self.publish_counters();
-        // Fresh clock for the sleep, as in the C: the emit above may have
-        // taken long enough to make the next frame due already.
+        // Fresh clock for the sleep: the emit above may have taken long
+        // enough to make the next frame due already.
         self.sleep_hint(obs::time::gettime_ns(), slack_ns)
     }
 
@@ -247,12 +243,11 @@ impl VideoThread {
 
     /// Decode packets into the pacing queue until it holds its lead.
     ///
-    /// This is the whole point of the design: the queue's soft bound is
-    /// [`consts::VIDEO_DECODE_LEAD_MS`] of *media*, not the stream's latency,
-    /// so only a quarter second of decoded frames is ever resident however deep
-    /// the Target Buffer is. Everything behind that stays compressed in the
-    /// channel. Each frame is copied out of the hardware pool immediately, so a
-    /// decoder surface is pinned only for the length of one transfer.
+    /// The queue's soft bound is [`consts::VIDEO_DECODE_LEAD_MS`] of *media*,
+    /// not the stream's latency, so only that much decoded video is resident
+    /// however deep the Target Buffer is; everything behind it stays
+    /// compressed in the channel. Each frame is copied out of the hardware pool
+    /// at once, so a decoder surface is pinned only for one transfer.
     fn decode_intake(&mut self) {
         let shared = self.shared.clone();
         if shared.video_flags.timeline_reset.swap(false, Relaxed) {
@@ -307,7 +302,7 @@ impl VideoThread {
     ///
     /// Public as the seam the pacing tests use to put a frame in front of the
     /// loop without a decoder; production reaches it only through
-    /// [`Self::decode_intake`].
+    /// `decode_intake`.
     pub fn pace_decoded(&mut self, frame: Frame, received_ns: u64) {
         let sysmem = self.to_sysmem(&frame);
         let due_ns = match &sysmem {
@@ -319,7 +314,6 @@ impl VideoThread {
         if let Some(f) = sysmem {
             let pts_ns = f.pts();
             self.arrival.note(received_ns, pts_ns);
-            // `av_image_get_buffer_size(fmt, w, h, 1)`, as `pacing_frame_bytes`.
             let bytes = f.image_buffer_size().unwrap_or(0);
             let paced = Paced {
                 frame: f,
@@ -329,8 +323,8 @@ impl VideoThread {
         }
     }
 
-    /// `pacing_reschedule`: re-derive every queued frame's due time from the
-    /// offset as it stands now.
+    /// Re-derive every queued frame's due time from the offset as it stands
+    /// now.
     ///
     /// The audio side reclaims playout latency two ways, and both would leave
     /// paced video behind for the depth of this queue. The speed controller
@@ -352,10 +346,9 @@ impl VideoThread {
         });
     }
 
-    /// `pacing_emit_due`: emit every frame whose moment has arrived. Over the
-    /// ceilings the head goes out early rather than being dropped — too-early
-    /// video is what the un-paced path did all the time, and it beats a hole
-    /// in the picture.
+    /// Emit every frame whose moment has arrived. Over the ceilings the head
+    /// goes out early rather than being dropped: early video beats a hole in
+    /// the picture.
     fn pacing_emit_due(&mut self, now_ns: u64, slack_ns: i64) {
         let tick_ns = self.canvas_tick_ns();
         if self.anchor_pending {
@@ -413,16 +406,11 @@ impl VideoThread {
     /// it hands libobs the frame that anchors its play head.
     ///
     /// libobs anchors the play head to the *arrival* of the first frame after
-    /// a start or a clear and only ever advances it by wall-clock deltas, so
-    /// whatever error that frame's timing carries is the connection's
-    /// lip-sync error for good. Before audio primes the only schedule is the
-    /// video-only fallback, and it does not agree with the mapping audio will
-    /// publish: the fallback places the first frame `Target Buffer` after
-    /// arrival, the mapping places it at the first audio chunk — a prime
-    /// threshold plus a chunk after the first *kept* audio, so ~100 ms later
-    /// when the warm-up had already drained, and earlier than the fallback by
-    /// whatever warm-up remained when it had not. Which case a connection
-    /// lands in is a race between the audio warm-up and the first keyframe.
+    /// a start or a clear and only advances it by wall-clock deltas, so that
+    /// frame's timing error is the connection's lip-sync error for good.
+    /// Before audio primes the only schedule is the video-only fallback, which
+    /// disagrees with the mapping audio will publish by ~100 ms, in a
+    /// direction set by whether the audio warm-up or the first keyframe wins.
     ///
     /// So while an audio stream is present, video holds until the mapping
     /// exists and anchors from it. A stream whose audio never primes is let
@@ -468,55 +456,40 @@ impl VideoThread {
 
     /// Settle the frame that will anchor libobs's play head.
     ///
-    /// Two things are decided for each head frame, in this order. First its
-    /// arrival margin: nothing has been shown yet, so a frame whose packet
-    /// reached this thread less than a canvas tick before it is due raises the
-    /// standing video delay on the spot ([`VideoDelay::before_anchor`]) and the
-    /// queue is moved onto it. A tick, not the delivery lead: the frame is
-    /// measured at its packet's arrival and still has to be decoded, so the
-    /// tick is the allowance for that, while the lead is an allowance for the
-    /// pacing timer oversleeping, which a frame handed over on arrival never
-    /// meets. That is what keeps a sender whose video trails its audio
-    /// by more than Target Buffer covers from playing unpaced — every frame
-    /// late, handed over on arrival, and dropped by libobs whenever two arrive
-    /// inside one canvas tick — or, before this existed, from being dropped
-    /// here indefinitely. The delay is a fixed lip-sync error in return for a
-    /// smooth picture, and the log line says how much more Target Buffer would
-    /// remove it.
+    /// Two things are decided for each head frame, in this order.
+    ///
+    /// First its arrival margin. Nothing has been shown yet, so a frame whose
+    /// packet reached this thread less than a canvas tick before it is due
+    /// raises the standing video delay on the spot
+    /// ([`VideoDelay::before_anchor`]) and the queue moves with it. The
+    /// allowance is a tick for the decode still to come, not the delivery
+    /// lead: the lead covers the pacing timer oversleeping, and a frame handed
+    /// over on arrival never sleeps. This keeps a sender whose video trails its
+    /// audio by more than Target Buffer covers from playing unpaced, with
+    /// libobs dropping a frame whenever two arrive inside one canvas tick.
+    ///
+    /// Only the newest frame in hand is measured (nothing queued behind it and
+    /// the channel empty, so its arrival is a live one). The receiver pushes
+    /// the probe backlog in one burst stamped with a single arrival time, so
+    /// older frames look late by up to the probe span when they were merely
+    /// buffered. An on-time head that is not the newest anchors unmeasured; a
+    /// sender that really is late is caught by the hand-over measurement after
+    /// the anchor.
     ///
     /// Second, with audio present, whether the head is stale. The anchoring
-    /// frame must go out at its due time, so a head already past due cannot be
-    /// it, and such frames are dropped until one that is on time is at the
-    /// head. The mapping arriving is what makes frames overdue here —
-    /// everything decoded during the wait maps to the moments its audio was
-    /// discarded by the warm-up or already played — and handing them over would
-    /// anchor the connection late by however stale the first one was. They
-    /// amount to a fraction of a second at connection start and nothing has
-    /// been shown yet. Their margins are *not* measured: the probe buffers
-    /// about a second of packets and the receiver pushes them in one burst,
-    /// all stamped with the same arrival time, so the oldest of them looks
-    /// late by up to the probe span when it was merely buffered, and even the
-    /// one that happens to be on time may be so by buffering. Only the newest
-    /// frame in hand — the queue holds nothing behind it and the channel is
-    /// empty, so its arrival is a live one — says anything about the sender's
-    /// skew. An on-time head that is not the newest anchors unmeasured; if the
-    /// sender really is late, the hand-over measurement after the anchor sees
-    /// it within a window.
-    ///
-    /// A sender later than the delay ceiling covers is the one case where the
-    /// stale test must not run its course: no frame of such a stream is ever
-    /// on time, so dropping until one is drops the whole connection, which
-    /// audio still plays through (#33). Once the delay sits at its ceiling,
-    /// the newest frame in hand anchors however late it is, and the
-    /// connection plays unpaced from there — every frame handed over on
-    /// arrival — exactly as the ceiling's warning says it does.
+    /// frame must go out at its due time, so heads already past due are
+    /// dropped until one is on time: they map to audio the warm-up discarded
+    /// or already played, and anchoring on them would make the connection late
+    /// by that much. The exception is a sender later than the delay ceiling
+    /// covers, which has no on-time frame at all: once the delay sits at its
+    /// ceiling the newest frame anchors however late it is, and the connection
+    /// plays unpaced from there (#33).
     ///
     /// "Past due" is measured against a canvas tick, not the emit slack: libobs
-    /// quantises display to its ticks anyway, and a box with a coarse timer can
-    /// oversleep by most of one, which must not make it drop every candidate in
-    /// turn. Without audio there is nothing to be in sync with, and the
-    /// fallback frames go out as they always did, now a tick after they arrive
-    /// instead of on arrival.
+    /// quantises display to its ticks anyway, and a coarse timer can oversleep
+    /// by most of one, which must not make it drop every candidate in turn.
+    /// Without audio there is nothing to be in sync with, and the fallback
+    /// frames go out a tick after they arrive.
     fn settle_anchor_candidate(&mut self, now_ns: u64, tick_ns: u64) {
         let audio_present = self.shared.flags.audio_present.load(Relaxed);
         let mut dropped = 0u32;
@@ -554,12 +527,9 @@ impl VideoThread {
             if !audio_present || on_time {
                 break;
             }
-            // Late past the delay ceiling, on the newest frame there is: no
-            // delay can make this stream on time, and waiting for a frame that
-            // is would wait forever, dropping every one of them meanwhile
-            // (#33). It anchors as it is — late, and handed over on arrival
-            // from here on, as the ceiling promises — rather than showing
-            // nothing.
+            // Late past the delay ceiling on the newest frame: no delay makes
+            // this stream on time, so it anchors as it is rather than dropping
+            // every frame while waiting for one that is (#33).
             if newest_in_hand && self.delay.at_ceiling() {
                 break;
             }
@@ -670,13 +640,10 @@ impl VideoThread {
     /// standing delay.
     ///
     /// The hold grows the audio playout offset, and with it every video due
-    /// time, by playing audio slower until the buffer holds the raise. Video
-    /// that was late enough to need a delay was late against the old offset,
-    /// so each millisecond the offset grows is a millisecond of delay it no
-    /// longer needs. Taking it back here keeps due times exactly where they
-    /// were: the picture neither jumps nor changes speed, and the lip-sync
-    /// error the delay stands for drains as the sound slows into step with
-    /// it.
+    /// time. Video late enough to need a delay was late against the old
+    /// offset, so each millisecond the offset grows is a millisecond of delay
+    /// it no longer needs. Taking it back keeps due times where they were: the
+    /// picture neither jumps nor changes speed while the lip-sync error drains.
     fn absorb_audio_hold(&mut self) {
         let built_ns = self.shared.audio_state().hold_built_ns;
         let Some(seen_ns) = self.hold_built_seen_ns.replace(built_ns) else {
@@ -716,19 +683,15 @@ impl VideoThread {
     /// lead.
     ///
     /// The frame keeps its due time as its timestamp, so this changes when
-    /// libobs *receives* it, not when it is shown — see
-    /// [`consts::VIDEO_PACING_LEAD_TICKS`].
+    /// libobs *receives* it, not when it is shown (see
+    /// [`consts::VIDEO_PACING_LEAD_TICKS`]).
     ///
-    /// The one exception is the frame that re-anchors libobs's play head.
+    /// The exception is the frame that re-anchors libobs's play head.
     /// `get_closest_frame()` shows the first frame after `last_frame_ts` hits
     /// zero the moment it arrives, whatever its timestamp, and anchors the play
-    /// head to it; the head only advances by wall-clock deltas from there. So
-    /// anchoring from a frame handed over two ticks early would run the whole
-    /// connection two ticks ahead of the schedule the audio mapping set — a
-    /// permanent ~33ms video-leads-audio offset at a 60fps canvas, in the more
-    /// noticeable of the two directions. That frame goes at its due time; the
-    /// jitter the lead guards against cannot show on a frame displayed on
-    /// arrival regardless.
+    /// head to it. A frame handed over two ticks early would run the whole
+    /// connection two ticks ahead of the audio (~33ms at a 60fps canvas), so
+    /// that frame goes at its due time.
     fn emit_slack_ns(&self) -> i64 {
         if self.anchor_pending {
             return consts::VIDEO_PACING_SLACK_NS;
