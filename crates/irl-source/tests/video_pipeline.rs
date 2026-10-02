@@ -11,10 +11,10 @@
 
 #![allow(dead_code)]
 
+mod common;
+
 use obs_irl_source::{shared, video};
 
-use std::ffi::CString;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
@@ -23,7 +23,7 @@ use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
 use obs::{ColorRange, ColorSpace, VideoFormat};
 use parking_lot::Mutex;
 
-use shared::{HotValues, LifetimeStats, Shared, StreamConfig};
+use shared::Shared;
 use video::VideoSink;
 use video::output;
 use video::thread::VideoThread;
@@ -91,34 +91,10 @@ impl VideoSink for RecorderSink {
     }
 }
 
-fn stream_config(low_latency_audio: bool) -> StreamConfig {
-    StreamConfig {
-        url: CString::new("srt://127.0.0.1:9999").unwrap(),
-        ffmpeg_options: None,
-        hw_decode: irl_core::HwDecode::Auto,
-        low_latency_audio,
-    }
-}
-
-fn hot_values() -> HotValues {
-    HotValues {
-        reconnect_delay_s: irl_core::consts::DEFAULT_RECONNECT_DELAY_S as i32,
-        adaptive_speed: true,
-        catchup_percent: irl_core::consts::DEFAULT_CATCHUP_PERCENT as i32,
-        wait_for_keyframe: true,
-        clear_on_disconnect: true,
-        watermarks: irl_core::Watermarks::derive(irl_core::consts::DEFAULT_BUFFER_TARGET_MS as i32),
-    }
-}
-
 fn shared() -> Arc<Shared> {
-    // Never dereferenced: every output in these tests goes to the recorder.
-    let source = unsafe { obs::SourceHandle::from_raw(NonNull::dangling()) };
-    Shared::new(
-        source,
-        stream_config(false),
-        hot_values(),
-        Arc::new(LifetimeStats::default()),
+    common::shared(
+        common::stream_config(false),
+        common::hot_values(irl_core::consts::DEFAULT_BUFFER_TARGET_MS as i32),
     )
 }
 
@@ -134,6 +110,14 @@ fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>) {
 /// A software frame with real buffers.
 fn sw_frame(fmt: Pix, width: i32, height: i32) -> ffmpeg::Frame {
     ffmpeg::Frame::alloc_video(fmt, width, height).expect("alloc")
+}
+
+/// Hand the pacing loop a small I420 frame stamped `pts`, decoded from a
+/// packet that reached the video thread at `received_ns`.
+fn feed(thread: &mut VideoThread, pts: i64, received_ns: u64) {
+    let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
+    frame.set_pts(pts);
+    thread.pace_decoded(frame, received_ns);
 }
 
 /// `AV_FRAME_FLAG_KEY`, which the safe API deliberately has no setter for
@@ -189,57 +173,35 @@ fn pixel_formats_map_to_the_obs_table() {
 fn colour_spaces_map_the_way_the_c_did() {
     let sdr = AVColorTransferCharacteristic::AVCOL_TRC_BT709;
     let hlg = AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67;
+    let pq = AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084;
 
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_BT709, sdr),
-        ColorSpace::Bt709
-    );
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_SMPTE170M, sdr),
-        ColorSpace::Bt601
-    );
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_BT470BG, sdr),
-        ColorSpace::Bt601
-    );
-    // BT.2020 splits on the transfer function, not the primaries.
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_BT2020_NCL, hlg),
-        ColorSpace::Hlg2100
-    );
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_BT2020_CL, hlg),
-        ColorSpace::Hlg2100
-    );
-    assert_eq!(
-        output::convert_color_space(
-            AVColorSpace::AVCOL_SPC_BT2020_NCL,
-            AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084
-        ),
-        ColorSpace::Pq2100
-    );
-    // Unspecified and everything unknown fall back to BT.709.
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_UNSPECIFIED, sdr),
-        ColorSpace::Bt709
-    );
-    assert_eq!(
-        output::convert_color_space(AVColorSpace::AVCOL_SPC_FCC, sdr),
-        ColorSpace::Bt709
-    );
+    let table = [
+        (AVColorSpace::AVCOL_SPC_BT709, sdr, ColorSpace::Bt709),
+        (AVColorSpace::AVCOL_SPC_SMPTE170M, sdr, ColorSpace::Bt601),
+        (AVColorSpace::AVCOL_SPC_BT470BG, sdr, ColorSpace::Bt601),
+        // BT.2020 splits on the transfer function, not the primaries.
+        (AVColorSpace::AVCOL_SPC_BT2020_NCL, hlg, ColorSpace::Hlg2100),
+        (AVColorSpace::AVCOL_SPC_BT2020_CL, hlg, ColorSpace::Hlg2100),
+        (AVColorSpace::AVCOL_SPC_BT2020_NCL, pq, ColorSpace::Pq2100),
+        // Unspecified and everything unknown fall back to BT.709.
+        (AVColorSpace::AVCOL_SPC_UNSPECIFIED, sdr, ColorSpace::Bt709),
+        (AVColorSpace::AVCOL_SPC_FCC, sdr, ColorSpace::Bt709),
+    ];
+    for (space, trc, obs) in table {
+        assert_eq!(
+            output::convert_color_space(space, trc),
+            obs,
+            "{space:?} / {trc:?}"
+        );
+    }
 
-    assert_eq!(
-        output::convert_color_range(AVColorRange::AVCOL_RANGE_JPEG),
-        ColorRange::Full
-    );
-    assert_eq!(
-        output::convert_color_range(AVColorRange::AVCOL_RANGE_MPEG),
-        ColorRange::Partial
-    );
-    assert_eq!(
-        output::convert_color_range(AVColorRange::AVCOL_RANGE_UNSPECIFIED),
-        ColorRange::Partial
-    );
+    for (range, obs) in [
+        (AVColorRange::AVCOL_RANGE_JPEG, ColorRange::Full),
+        (AVColorRange::AVCOL_RANGE_MPEG, ColorRange::Partial),
+        (AVColorRange::AVCOL_RANGE_UNSPECIFIED, ColorRange::Partial),
+    ] {
+        assert_eq!(output::convert_color_range(range), obs, "{range:?}");
+    }
 }
 
 /* ── to_sysmem ────────────────────────────────────────────── */
@@ -391,15 +353,7 @@ fn the_packet_queue_is_bounded_by_duration_and_bytes() {
 
     // Well past the duration ceiling: the oldest packets go.
     for i in 0..40 {
-        shared.video.push_packet(
-            shared::TimedPacket {
-                packet: ffmpeg::Packet::new().unwrap(),
-                pts_ns: ms(i * 500),
-                bytes: 1024,
-                received_ns: 0,
-            },
-            &shared.lifetime,
-        );
+        common::push_packet(&shared, ms(i * 500), 1024);
     }
     assert!(
         shared.video.span_ns() <= ms(irl_core::consts::VIDEO_PACKET_QUEUE_MAX_MS),
@@ -415,15 +369,7 @@ fn the_packet_queue_is_bounded_by_duration_and_bytes() {
 fn the_packet_queue_is_bounded_by_bytes_whatever_the_timestamps_say() {
     let big = shared();
     for _ in 0..40 {
-        big.video.push_packet(
-            shared::TimedPacket {
-                packet: ffmpeg::Packet::new().unwrap(),
-                pts_ns: 0,
-                bytes: 4 * 1024 * 1024,
-                received_ns: 0,
-            },
-            &big.lifetime,
-        );
+        common::push_packet(&big, 0, 4 * 1024 * 1024);
     }
     assert!(
         big.video.bytes() <= irl_core::consts::VIDEO_PACKET_QUEUE_MAX_BYTES,
@@ -437,15 +383,7 @@ fn the_packet_queue_is_bounded_by_bytes_whatever_the_timestamps_say() {
 #[test]
 fn the_channel_delivers_packets_after_the_decoder_that_owns_them() {
     let shared = shared();
-    shared.video.push_packet(
-        shared::TimedPacket {
-            packet: ffmpeg::Packet::new().unwrap(),
-            pts_ns: 0,
-            bytes: 1,
-            received_ns: 0,
-        },
-        &shared.lifetime,
-    );
+    common::push_packet(&shared, 0, 1);
     assert_eq!(shared.video.len(), 1);
 
     assert!(matches!(
@@ -526,9 +464,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
     // schedules it at its arrival, so it is delayed by a tick first (see
     // `video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback`).
     let t0 = obs::time::gettime_ns();
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(t0 as i64);
-    thread.pace_decoded(first, t0);
+    feed(&mut thread, t0 as i64, t0);
     let now = t0 + TICK;
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1, "anchor frame emitted");
@@ -537,9 +473,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
     // it should go now even though its due time has not arrived. (Its due
     // time is its PTS on the fallback epoch plus the delay: `t0 + 25 ms +
     // 1 tick`, 25 ms from `now`.)
-    let mut soon = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    soon.set_pts(t0 as i64 + 25_000_000);
-    thread.pace_decoded(soon, t0);
+    feed(&mut thread, t0 as i64 + 25_000_000, t0);
     thread.run_once(now);
     assert_eq!(
         recorder.emitted().len(),
@@ -548,9 +482,7 @@ fn a_frame_is_handed_over_a_lead_before_it_is_due() {
     );
 
     // One due far out still waits.
-    let mut later = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    later.set_pts(t0 as i64 + 500_000_000);
-    thread.pace_decoded(later, now);
+    feed(&mut thread, t0 as i64 + 500_000_000, now);
     let wait = thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 2, "not due, not delivered");
     assert!(!wait.is_zero(), "should sleep toward the lead");
@@ -571,15 +503,7 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
 
     // A backlog of packets, as any target above the decode lead produces.
     for i in 0..200 {
-        shared.video.push_packet(
-            shared::TimedPacket {
-                packet: ffmpeg::Packet::new().unwrap(),
-                pts_ns: i * 33_333_333,
-                bytes: 2048,
-                received_ns: 0,
-            },
-            &shared.lifetime,
-        );
+        common::push_packet(&shared, i * 33_333_333, 2048);
     }
     assert!(!shared.video.is_empty());
 
@@ -587,9 +511,7 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
     let now = obs::time::gettime_ns();
     let mut pts = 0i64;
     while thread.pacing().has_room() {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(now as i64 + 60_000_000_000 + pts);
-        thread.pace_decoded(frame, now);
+        feed(&mut thread, now as i64 + 60_000_000_000 + pts, now);
         pts += 33_333_333;
     }
     assert!(!thread.pacing().has_room(), "queue should be at its lead");
@@ -615,27 +537,11 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
 #[test]
 fn a_decoder_handover_is_taken_even_with_no_pacing_room() {
     let shared = shared();
-    shared.video.push_packet(
-        shared::TimedPacket {
-            packet: ffmpeg::Packet::new().unwrap(),
-            pts_ns: 0,
-            bytes: 1,
-            received_ns: 0,
-        },
-        &shared.lifetime,
-    );
+    common::push_packet(&shared, 0, 1);
     assert!(!shared.video.next_is_decoder(), "a packet is at the front");
 
     shared.video.request_clear();
-    shared.video.push_packet(
-        shared::TimedPacket {
-            packet: ffmpeg::Packet::new().unwrap(),
-            pts_ns: 0,
-            bytes: 1,
-            received_ns: 0,
-        },
-        &shared.lifetime,
-    );
+    common::push_packet(&shared, 0, 1);
     assert!(!shared.video.next_is_decoder());
 }
 
@@ -683,9 +589,7 @@ fn a_future_frame_waits_instead_of_being_emitted() {
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1, "the anchor frame goes out");
 
-    let mut later = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    later.set_pts(200_000_000);
-    thread.pace_decoded(later, now);
+    feed(&mut thread, 200_000_000, now);
     let wait = thread.run_once(now);
 
     assert_eq!(recorder.emitted().len(), 1, "not due yet");
@@ -704,16 +608,12 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     let now = obs::time::gettime_ns();
-    let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    queued.set_pts(0);
-    thread.pace_decoded(queued, now);
+    feed(&mut thread, 0, now);
     let now = now + TICK;
     thread.run_once(now);
     assert_eq!(recorder.emitted().len(), 1);
 
-    let mut pending = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    pending.set_pts(10_000_000_000);
-    thread.pace_decoded(pending, now);
+    feed(&mut thread, 10_000_000_000, now);
     thread.run_once(now);
     assert_eq!(thread.pacing().len(), 1, "parked until its due time");
 
@@ -748,9 +648,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
         state.latest_buffered_end_pts_ns = 10_000_000_000;
     }
 
-    let mut queued = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    queued.set_pts(10_000_000_000);
-    thread.pace_decoded(queued, now);
+    feed(&mut thread, 10_000_000_000, now);
     thread.run_once(now);
 
     assert!(recorder.emitted().is_empty(), "due a second from now");
@@ -867,6 +765,16 @@ fn publish_mapping(shared: &Shared, obs_end_ts_ns: u64, buffered_end_pts_ns: i64
     state.latest_buffered_end_pts_ns = buffered_end_pts_ns;
 }
 
+/// Anchor the play head on a frame at stream PTS 10 s that arrives at the
+/// returned OBS time and maps 100 ms out: a comfortable margin.
+fn anchor_with_margin(shared: &Shared, thread: &mut VideoThread) -> u64 {
+    let t0 = obs::time::gettime_ns();
+    publish_mapping(shared, t0 + 100_000_000, 10_000_000_000);
+    feed(thread, 10_000_000_000, t0);
+    thread.run_once(t0 + 100_000_000);
+    t0
+}
+
 fn shared_with_audio() -> Arc<Shared> {
     let shared = shared();
     shared.flags.audio_present.store(true, Relaxed);
@@ -887,9 +795,7 @@ fn video_waits_for_the_audio_mapping_before_anchoring_the_play_head() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     let now = obs::time::gettime_ns();
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(10_000_000_000);
-    thread.pace_decoded(first, now);
+    feed(&mut thread, 10_000_000_000, now);
 
     // Well past the fallback due time (+120 ms): still held.
     let wait = thread.run_once(now + 300_000_000);
@@ -922,9 +828,11 @@ fn frames_already_past_due_when_the_mapping_arrives_do_not_anchor_the_play_head(
     // arriving in real time over the 160 ms before the mapping.
     let now = obs::time::gettime_ns();
     for i in 0..4 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + i * 40_000_000);
-        thread.pace_decoded(frame, now - 160_000_000 + i as u64 * 40_000_000);
+        feed(
+            &mut thread,
+            10_000_000_000 + i * 40_000_000,
+            now - 160_000_000 + i as u64 * 40_000_000,
+        );
     }
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
@@ -953,9 +861,7 @@ fn a_frame_late_by_under_a_canvas_tick_still_anchors() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     let now = obs::time::gettime_ns();
-    let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    frame.set_pts(10_000_000_000);
-    thread.pace_decoded(frame, now - 50_000_000);
+    feed(&mut thread, 10_000_000_000, now - 50_000_000);
     publish_mapping(&shared, now, 10_000_000_000);
 
     thread.run_once(now + 10_000_000);
@@ -974,9 +880,7 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     let now = obs::time::gettime_ns();
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(10_000_000_000);
-    thread.pace_decoded(first, now);
+    feed(&mut thread, 10_000_000_000, now);
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
 
@@ -1001,9 +905,11 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     // test's 1.35 s of pretend time it would look a second late, which in
     // production cannot happen (a packet never arrives after a due time the
     // fallback capped at now + 200 ms).
-    let mut fresh = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    fresh.set_pts(10_000_000_000 + 1_400_000_000);
-    thread.pace_decoded(fresh, obs::time::gettime_ns());
+    feed(
+        &mut thread,
+        10_000_000_000 + 1_400_000_000,
+        obs::time::gettime_ns(),
+    );
     let due = thread.pacing().next_due().expect("paced on the fallback");
     thread.run_once(due);
     assert_eq!(recorder.only().timestamp, due);
@@ -1020,9 +926,7 @@ fn video_without_audio_is_delayed_by_a_tick_and_anchors_on_the_fallback() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     let t0 = obs::time::gettime_ns();
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(t0 as i64);
-    thread.pace_decoded(first, t0);
+    feed(&mut thread, t0 as i64, t0);
     thread.run_once(t0);
     assert!(
         recorder.emitted().is_empty(),
@@ -1053,9 +957,11 @@ const LIVE_FRAMES: u64 = (irl_core::consts::VIDEO_LIVE_LOOKBACK_MS * 1_000_000).
 /// handed over. They are queued like any others, and go as stale.
 fn live_history(thread: &mut VideoThread, next_arrival_ns: u64, next_pts_ns: i64) {
     for k in (1..=LIVE_FRAMES).rev() {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(next_pts_ns - (k * FRAME) as i64);
-        thread.pace_decoded(frame, next_arrival_ns - k * FRAME);
+        feed(
+            thread,
+            next_pts_ns - (k * FRAME) as i64,
+            next_arrival_ns - k * FRAME,
+        );
     }
 }
 
@@ -1086,9 +992,7 @@ fn video_that_trails_its_audio_is_delayed_into_pacing_not_dropped() {
 
         for i in 0..30u64 {
             let arrival = t0 + i * FRAME;
-            let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-            frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-            thread.pace_decoded(frame, arrival);
+            feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
             thread.run_once(arrival);
         }
 
@@ -1140,9 +1044,7 @@ fn a_stale_startup_burst_does_not_raise_the_delay() {
     let last_due = t0 + 40_000_000;
     publish_mapping(&shared, last_due, 10_000_000_000 + 19 * FRAME as i64);
     for i in 0..20i64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + i * FRAME as i64);
-        thread.pace_decoded(frame, t0);
+        feed(&mut thread, 10_000_000_000 + i * FRAME as i64, t0);
     }
     thread.run_once(t0);
 
@@ -1176,9 +1078,7 @@ fn a_late_stream_is_measured_on_its_newest_frame() {
     let late = 150_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
-    let mut newest = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    newest.set_pts(10_000_000_000);
-    thread.pace_decoded(newest, t0);
+    feed(&mut thread, 10_000_000_000, t0);
     thread.run_once(t0);
 
     // 150 ms plus a tick, in ticks, from the newest frame; the older ones
@@ -1202,12 +1102,7 @@ fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
     let (mut thread, recorder) = thread_with(shared.clone());
 
     // A frame arriving now maps 100 ms out: a comfortable margin to anchor on.
-    let t0 = obs::time::gettime_ns();
-    publish_mapping(&shared, t0 + 100_000_000, 10_000_000_000);
-    let mut anchor = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    anchor.set_pts(10_000_000_000);
-    thread.pace_decoded(anchor, t0);
-    thread.run_once(t0 + 100_000_000);
+    let t0 = anchor_with_margin(&shared, &mut thread);
     assert_eq!(recorder.emitted().len(), 1, "anchored with a full margin");
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
 
@@ -1216,9 +1111,11 @@ fn recurring_lateness_after_the_anchor_raises_the_delay_once() {
     let arrival_of = |i: u64| t0 + 105_000_000 + i * FRAME;
     let mut delay_seen = Vec::new();
     for i in 1..=80u64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, arrival_of(i));
+        feed(
+            &mut thread,
+            10_000_000_000 + (i * FRAME) as i64,
+            arrival_of(i),
+        );
         thread.run_once(arrival_of(i));
         delay_seen.push(shared.conn.video_delay_ns.load(Relaxed));
     }
@@ -1249,20 +1146,17 @@ fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() 
     let shared = shared_with_audio();
     let (mut thread, recorder) = thread_with(shared.clone());
 
-    let t0 = obs::time::gettime_ns();
-    publish_mapping(&shared, t0 + 100_000_000, 10_000_000_000);
-    let mut anchor = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    anchor.set_pts(10_000_000_000);
-    thread.pace_decoded(anchor, t0);
-    thread.run_once(t0 + 100_000_000);
+    let t0 = anchor_with_margin(&shared, &mut thread);
     assert_eq!(recorder.emitted().len(), 1);
 
     // Two seconds of frames with 3 ms in hand: a tenth of the lead.
     let arrival_of = |i: u64| t0 + 97_000_000 + i * FRAME;
     for i in 1..=60u64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, arrival_of(i));
+        feed(
+            &mut thread,
+            10_000_000_000 + (i * FRAME) as i64,
+            arrival_of(i),
+        );
         thread.run_once(arrival_of(i));
     }
 
@@ -1277,27 +1171,26 @@ fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
     let shared = shared_with_audio();
     let (mut thread, recorder) = thread_with(shared.clone());
 
-    let t0 = obs::time::gettime_ns();
-    publish_mapping(&shared, t0 + 100_000_000, 10_000_000_000);
-    let mut anchor = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    anchor.set_pts(10_000_000_000);
-    thread.pace_decoded(anchor, t0);
-    thread.run_once(t0 + 100_000_000);
+    let t0 = anchor_with_margin(&shared, &mut thread);
     assert_eq!(recorder.emitted().len(), 1);
 
     let due_of = |i: u64| t0 + 100_000_000 + i * FRAME;
     // Six frames 20 ms late, inside 200 ms ...
     for i in 1..=6u64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, due_of(i) + 20_000_000);
+        feed(
+            &mut thread,
+            10_000_000_000 + (i * FRAME) as i64,
+            due_of(i) + 20_000_000,
+        );
         thread.run_once(due_of(i) + 20_000_000);
     }
     // ... then a second and a half of frames with their full margin.
     for i in 7..=50u64 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, due_of(i) - 100_000_000);
+        feed(
+            &mut thread,
+            10_000_000_000 + (i * FRAME) as i64,
+            due_of(i) - 100_000_000,
+        );
         thread.run_once(due_of(i) - 100_000_000);
     }
     thread.run_once(due_of(50));
@@ -1321,9 +1214,7 @@ fn a_clear_forgets_the_video_delay() {
     let t0 = obs::time::gettime_ns();
     publish_mapping(&shared, t0 - 150_000_000, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
-    let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    frame.set_pts(10_000_000_000);
-    thread.pace_decoded(frame, t0);
+    feed(&mut thread, 10_000_000_000, t0);
     thread.run_once(t0);
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 10 * TICK);
 
@@ -1334,9 +1225,7 @@ fn a_clear_forgets_the_video_delay() {
 
     // The next connection's audio primes with room to spare: no delay.
     publish_mapping(&shared, t1 + 200_000_000, 20_000_000_000);
-    let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    frame.set_pts(20_000_000_000);
-    thread.pace_decoded(frame, t1);
+    feed(&mut thread, 20_000_000_000, t1);
     thread.run_once(t1 + 200_000_000);
     assert_eq!(
         recorder.emitted().last().map(|f| f.timestamp),
@@ -1367,9 +1256,7 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
 
     for i in 0..60u64 {
         let arrival = t0 + i * FRAME;
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, arrival);
+        feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
         thread.run_once(arrival);
         assert_eq!(
             thread.pacing().len(),
@@ -1414,9 +1301,7 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     let t0 = obs::time::gettime_ns();
     publish_mapping(&shared, t0 - 1_300_000_000, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(10_000_000_000);
-    thread.pace_decoded(first, t0);
+    feed(&mut thread, 10_000_000_000, t0);
     thread.run_once(t0);
     let set = shared.conn.video_delay_ns.load(Relaxed);
     assert_eq!(set, (1_300_000_000 + TICK).div_ceil(TICK) * TICK);
@@ -1428,9 +1313,7 @@ fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     let mut delays = Vec::new();
     for i in 1..=frames {
         let arrival = t0 + i * FRAME;
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(pts_of(i));
-        thread.pace_decoded(frame, arrival);
+        feed(&mut thread, pts_of(i), arrival);
         thread.run_once(arrival);
         delays.push(shared.conn.video_delay_ns.load(Relaxed));
     }
@@ -1483,9 +1366,7 @@ fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
     let late = 300_000_000;
     publish_mapping(&shared, t0 - late, 10_000_000_000);
     live_history(&mut thread, t0, 10_000_000_000);
-    let mut first = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-    first.set_pts(10_000_000_000);
-    thread.pace_decoded(first, t0);
+    feed(&mut thread, 10_000_000_000, t0);
     thread.run_once(t0);
     let set = shared.conn.video_delay_ns.load(Relaxed);
     assert_eq!(set, (late + TICK).div_ceil(TICK) * TICK);
@@ -1500,9 +1381,7 @@ fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
         publish_mapping(&shared, t0 - late + grown, 10_000_000_000);
         shared.audio_state().hold_built_ns = grown;
         let arrival = t0 + i * FRAME;
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(10_000_000_000 + (i * FRAME) as i64);
-        thread.pace_decoded(frame, arrival);
+        feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, arrival);
         thread.run_once(arrival);
         delays.push(shared.conn.video_delay_ns.load(Relaxed));
     }
@@ -1574,9 +1453,7 @@ fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
     );
 
     for i in 0..caught_up + 90 {
-        let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
-        frame.set_pts(pts_of(i));
-        thread.pace_decoded(frame, arrival_of(i));
+        feed(&mut thread, pts_of(i), arrival_of(i));
         thread.run_once(arrival_of(i));
         assert_eq!(
             shared.conn.video_delay_ns.load(Relaxed),

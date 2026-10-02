@@ -11,44 +11,21 @@
 //! realistically be lost is someone teaching `Config::load` to read a
 //! provider key.
 
-use std::ffi::CString;
+mod common;
+
 use std::fs;
 use std::path::Path;
-
-use irl_core::{HwDecode, Watermarks, consts};
-use obs_irl_source::config::Config;
-use obs_irl_source::shared::{HotValues, StreamConfig};
-
-fn url_only(url: &str) -> Config {
-    Config {
-        stream: StreamConfig {
-            url: CString::new(url).unwrap(),
-            ffmpeg_options: None,
-            hw_decode: HwDecode::Auto,
-            low_latency_audio: false,
-        },
-        hot: HotValues {
-            reconnect_delay_s: consts::DEFAULT_RECONNECT_DELAY_S as i32,
-            adaptive_speed: consts::DEFAULT_ADAPTIVE_SPEED,
-            catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
-            wait_for_keyframe: consts::DEFAULT_WAIT_FOR_KEYFRAME,
-            clear_on_disconnect: consts::DEFAULT_CLEAR_ON_DISCONNECT,
-            watermarks: Watermarks::derive(consts::DEFAULT_BUFFER_TARGET_MS as i32),
-        },
-        close_when_inactive: consts::DEFAULT_CLOSE_WHEN_INACTIVE,
-    }
-}
 
 #[test]
 fn a_url_alone_is_a_runnable_config() {
     // Nothing else is consulted: no token, no cached list, no provider. This
     // is the scene collection that was saved months ago and still works.
-    let config = url_only("srt://relay.example:4000?streamid=play/stream/abc");
+    let config = common::default_config("srt://relay.example:4000?streamid=play/stream/abc");
     assert!(config.url().is_some());
-    assert!(!config.requires_restart(&url_only(
+    assert!(!config.requires_restart(&common::default_config(
         "srt://relay.example:4000?streamid=play/stream/abc"
     )));
-    assert!(config.requires_restart(&url_only(
+    assert!(config.requires_restart(&common::default_config(
         "srt://relay.example:4000?streamid=play/stream/def"
     )));
 }

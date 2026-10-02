@@ -21,74 +21,20 @@
 
 #![allow(dead_code)]
 
-use std::ffi::CString;
-use std::ptr::NonNull;
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use parking_lot::Mutex;
-
-use irl_core::{HwDecode, Watermarks, consts};
+use irl_core::consts;
+use obs_irl_source::audio::AudioPump;
 use obs_irl_source::audio::hold;
-use obs_irl_source::audio::{AudioPump, AudioSink};
 use obs_irl_source::config::Config;
 use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
-use obs_irl_source::shared::{HotValues, LifetimeStats, Shared, StreamConfig, TimedPacket};
+use obs_irl_source::shared::Shared;
 
-const RATE: i32 = 48_000;
-const CHANNELS: i32 = 2;
-/// One Opus frame: 20 ms at 48 kHz.
-const CHUNK_FRAMES: i32 = 960;
-const CHUNK_NS: u64 = 20_000_000;
-
-// ── Recording sink ────────────────────────────────────────────
-
-#[derive(Clone, Copy)]
-struct Emitted {
-    timestamp: u64,
-    frames: u32,
-    rate: u32,
-    /// The constant this chunk's samples carry, so silence is distinguishable
-    /// from real audio.
-    value: f32,
-}
-
-#[derive(Clone)]
-struct Recorder {
-    channels: usize,
-    emitted: Arc<Mutex<Vec<Emitted>>>,
-}
-
-impl Recorder {
-    fn new() -> Self {
-        Self {
-            channels: CHANNELS as usize,
-            emitted: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-impl AudioSink for Recorder {
-    fn output_audio(&self, audio: &obs::AudioFrame<'_>) {
-        let sys = audio.as_sys();
-        let bytes = sys.frames as usize * self.channels * 4;
-        // SAFETY: the frame borrows a live interleaved-float buffer of
-        // `frames * channels` samples, which is what the pump built.
-        let raw = unsafe { std::slice::from_raw_parts(sys.data[0], bytes) };
-        let value = if raw.len() >= 4 {
-            f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])
-        } else {
-            0.0
-        };
-        self.emitted.lock().push(Emitted {
-            timestamp: sys.timestamp,
-            frames: sys.frames,
-            rate: sys.samples_per_sec,
-            value,
-        });
-    }
-}
+use common::{CHANNELS, CHUNK_FRAMES, CHUNK_NS, RATE, Recorder};
 
 // ── The simulated plugin ──────────────────────────────────────
 
@@ -146,32 +92,13 @@ impl Sim {
 
     /// A sim with Low Latency Audio set as given.
     fn with_mode(target_ms: i32, low_latency_audio: bool) -> Self {
-        // SAFETY: no code under test dereferences the handle — audio leaves
-        // through the recording sink and nothing here calls into libobs.
-        let source = unsafe { obs::SourceHandle::from_raw(NonNull::dangling()) };
-        let wm = Watermarks::derive(target_ms);
-        let cfg = StreamConfig {
-            url: CString::new("srt://sim.invalid:9000").unwrap(),
-            ffmpeg_options: None,
-            hw_decode: HwDecode::Off,
-            low_latency_audio,
-        };
-        let shared = Shared::new(
-            source,
-            cfg.clone(),
-            HotValues {
-                reconnect_delay_s: 2,
-                adaptive_speed: true,
-                catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
-                wait_for_keyframe: true,
-                clear_on_disconnect: true,
-                watermarks: wm,
-            },
-            Arc::new(LifetimeStats::default()),
+        let shared = common::shared(
+            common::stream_config(low_latency_audio),
+            common::hot_values(target_ms),
         );
 
         let clock = Arc::new(AtomicU64::new(1_000_000_000));
-        let audio_out = Recorder::new();
+        let audio_out = Recorder::default();
         let pump = {
             let ns = Arc::clone(&clock);
             let us = Arc::clone(&clock);
@@ -292,7 +219,7 @@ impl Sim {
             (*raw).duration = CHUNK_NS as i64;
 
             let dst = (*raw).data[0];
-            for i in 0..(CHUNK_FRAMES as usize * CHANNELS as usize) {
+            for i in 0..(CHUNK_FRAMES * CHANNELS) as usize {
                 let bytes = value.to_le_bytes();
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(i * 4), 4);
             }
@@ -397,7 +324,7 @@ impl Sim {
 
         let mut jumps = 0;
         for pair in emitted.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
+            let (a, b) = (&pair[0], &pair[1]);
             assert_eq!(a.rate, RATE as u32, "the submitted rate must never change");
             let expected = a.timestamp + a.frames as u64 * 1_000_000_000 / a.rate as u64;
             if (b.timestamp as i64 - expected as i64).abs() > 1 {
@@ -429,6 +356,22 @@ impl Sim {
             hidden,
             "{} audible chunks were skipped rather than played faster",
             skipped - hidden
+        );
+    }
+
+    /// The two invariants every scenario owes, whatever the link did.
+    fn assert_healthy(&self) {
+        self.assert_clock_only_jumps_where_declared();
+        self.assert_no_audible_audio_dropped();
+    }
+
+    /// Video stamped the sender's skew behind the newest audio is in hand
+    /// before it is due, by about the hold's margin: picture and sound agree.
+    fn assert_in_lip_sync(&self) {
+        let margin = self.video_margin_now_ms();
+        assert!(
+            (40..=200).contains(&margin),
+            "video arriving now is {margin}ms early against its audio"
         );
     }
 
@@ -470,8 +413,7 @@ fn a_batching_upstream_does_not_modulate_playback_speed() {
             "a {}ms batch at a {target_ms}ms target modulated playback {swing:.2}% (speed {lo:.4}..{hi:.4})",
             batch_ticks * 20,
         );
-        sim.assert_clock_only_jumps_where_declared();
-        sim.assert_no_audible_audio_dropped();
+        sim.assert_healthy();
     }
 }
 
@@ -490,8 +432,7 @@ fn a_batch_longer_than_the_buffer_underruns_but_stays_honest() {
         sim.underruns() > 0,
         "a 1s batch against a 120ms buffer has to underrun"
     );
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
 }
 
 #[test]
@@ -499,8 +440,7 @@ fn a_clean_link_holds_the_target_and_never_breaks_the_clock() {
     let mut sim = Sim::new(120);
     sim.run(60.0, Link::Up);
 
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     assert_eq!(sim.underruns(), 0, "a clean link must not underrun");
 
     // The centred read alignment puts the two reachable levels half a chunk
@@ -537,8 +477,7 @@ fn a_three_second_stall_conceals_then_recovers_without_skipping() {
     // Everything the sender buffered lands at once, then the link is fine.
     sim.run(60.0, Link::Up);
 
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     let fill = sim.fill_ms();
     assert!(
         fill < 120 + 60,
@@ -557,8 +496,7 @@ fn repeated_short_dropouts_do_not_ratchet_latency() {
         sim.run(4.0, Link::Up);
     }
 
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     let fill = sim.fill_ms();
     assert!(
         fill < 200 + 100,
@@ -576,8 +514,7 @@ fn a_sender_whose_clock_is_not_wall_clock_still_holds_the_target() {
         sim.sender_rate = rate;
         sim.run(240.0, Link::Up);
 
-        sim.assert_clock_only_jumps_where_declared();
-        sim.assert_no_audible_audio_dropped();
+        sim.assert_healthy();
         // Without the integral trim a proportional loop parks tens of
         // milliseconds off target here, permanently, and the latency parks
         // with it.
@@ -598,8 +535,7 @@ fn an_unwinnably_fast_sender_is_bounded_rather_than_unbounded() {
     sim.sender_rate = 1.20;
     sim.run(120.0, Link::Up);
 
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     let fill = sim.fill_ms();
     assert!(
         fill <= consts::BLEED_PACE_FILL_MS * 4,
@@ -619,15 +555,7 @@ fn video_keeps_flowing_while_the_receiver_is_blocked() {
 
     // Queue a second of packets, as a healthy link would have.
     for i in 0..30 {
-        sim.shared.video.push_packet(
-            TimedPacket {
-                packet: ffmpeg::Packet::new().unwrap(),
-                pts_ns: i * 33_333_333,
-                bytes: 4096,
-                received_ns: 0,
-            },
-            &sim.shared.lifetime,
-        );
+        common::push_packet(&sim.shared, i * 33_333_333, 4096);
     }
     assert_eq!(sim.shared.video.len(), 30);
 
@@ -654,15 +582,7 @@ fn decoded_memory_does_not_grow_with_the_target() {
 
     // 8s of 1080p60 packets: what an 8s target actually holds.
     for i in 0..480 {
-        deep.shared.video.push_packet(
-            TimedPacket {
-                packet: ffmpeg::Packet::new().unwrap(),
-                pts_ns: i * 16_666_667,
-                bytes: 16 * 1024,
-                received_ns: 0,
-            },
-            &deep.shared.lifetime,
-        );
+        common::push_packet(&deep.shared, i * 16_666_667, 16 * 1024);
     }
 
     // Compressed, that is single-digit megabytes. Decoded it would be ~1.5GB,
@@ -708,8 +628,7 @@ fn audio_that_arrives_ahead_of_its_video_starts_late_enough_to_keep_lip_sync() {
         (550..1_000).contains(&started_ms),
         "audio started {started_ms}ms in against a 250ms hold"
     );
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     assert_eq!(sim.underruns(), 0);
     let mean = sim.mean_fill_ms(20.0);
     assert!(
@@ -717,13 +636,7 @@ fn audio_that_arrives_ahead_of_its_video_starts_late_enough_to_keep_lip_sync() {
         "held {mean:.1}ms on average against a 370ms effective target"
     );
 
-    // Video stamped the sender's skew behind the newest audio is in hand
-    // before it is due, by about the margin.
-    let margin = sim.video_margin_now_ms();
-    assert!(
-        (40..=200).contains(&margin),
-        "video arriving now is {margin}ms early against its audio"
-    );
+    sim.assert_in_lip_sync();
 }
 
 /// The stabiliser stream from #33: video 1.65 s behind its audio.
@@ -733,14 +646,9 @@ fn video_seconds_behind_its_audio_is_held_for_too() {
     sim.run(40.0, Link::Up);
 
     assert_eq!(sim.hold_ms(), 1650 + 100 - 120 - 80);
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     assert_eq!(sim.underruns(), 0);
-    let margin = sim.video_margin_now_ms();
-    assert!(
-        (40..=200).contains(&margin),
-        "video arriving now is {margin}ms early against its audio"
-    );
+    sim.assert_in_lip_sync();
 }
 
 /// A sender whose video is within what Target Buffer already covers needs no
@@ -772,8 +680,7 @@ fn audio_starts_without_a_skew_reading_once_the_wait_runs_out() {
         (wait_ms..wait_ms + 700).contains(&started_ms),
         "audio started {started_ms}ms in against a {wait_ms}ms wait"
     );
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
 }
 
 /// The sender starts sending its video 700 ms behind its audio halfway
@@ -799,19 +706,14 @@ fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     // Built at -2 %, 20 ms a second, easing off as the buffer nears its new
     // target: about a minute for 600 ms.
     sim.run(70.0, Link::Up);
-    let margin = sim.video_margin_now_ms();
-    assert!(
-        (40..=200).contains(&margin),
-        "video arriving now is {margin}ms early against its audio"
-    );
+    sim.assert_in_lip_sync();
     let built_ms = sim.shared.audio_state().hold_built_ns / 1_000_000;
     assert!(
         (590..=600).contains(&built_ms),
         "credited {built_ms}ms of a 600ms raise to the video thread"
     );
     assert_eq!(sim.reanchors(), 0, "the hold building was read as drift");
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     assert_eq!(sim.underruns(), 0);
 }
 
@@ -834,8 +736,7 @@ fn recurring_bursts_of_late_video_do_not_ratchet_the_hold() {
 
     assert_eq!(sim.hold_ms(), 250);
     assert!(sim.video_margin_now_ms() > 0);
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
     assert_eq!(sim.underruns(), 0);
 }
 
@@ -862,8 +763,7 @@ fn the_hold_is_released_when_the_sender_recovers() {
         "held {mean:.1}ms on average after the release"
     );
     assert!(sim.video_margin_now_ms() > 0);
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
 }
 
 /// Low-latency mode keeps no cushion and has no speed control to build one
@@ -877,11 +777,7 @@ fn low_latency_audio_holds_at_connection_start_only() {
     let hold = sim.hold_ms();
     assert_eq!(hold, 350 + 100 - 20);
     assert_eq!(sim.shared.hot.watermarks().target_ms, 120, "nothing folded");
-    let margin = sim.video_margin_now_ms();
-    assert!(
-        (40..=200).contains(&margin),
-        "video arriving now is {margin}ms early against its audio"
-    );
+    sim.assert_in_lip_sync();
 
     // A later skew is the video delay's, as before.
     sim.video_trails_by(900);
@@ -902,14 +798,7 @@ fn a_target_buffer_edit_composes_with_the_hold() {
     let stream = sim.shared.cfg.clone();
     let edit = |target_ms| Config {
         stream: stream.clone(),
-        hot: obs_irl_source::shared::HotValues {
-            reconnect_delay_s: 2,
-            adaptive_speed: true,
-            catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
-            wait_for_keyframe: true,
-            clear_on_disconnect: true,
-            watermarks: Watermarks::derive(target_ms),
-        },
+        hot: common::hot_values(target_ms),
         close_when_inactive: false,
     };
 
@@ -928,8 +817,7 @@ fn a_target_buffer_edit_composes_with_the_hold() {
         sim.shared.hot.watermarks().target_ms,
         consts::BUFFER_TARGET_MAX_MS
     );
-    sim.assert_clock_only_jumps_where_declared();
-    sim.assert_no_audible_audio_dropped();
+    sim.assert_healthy();
 }
 
 /// A new connection may be a different sender, or the same one with its
