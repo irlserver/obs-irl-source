@@ -9,21 +9,16 @@
 //! isolated in `set_flags` with the `av_opt_set_int("sws_flags")` fallback
 //! documented there.
 //!
-//! Why dynamic mode at all (ported from the C plugin's `video-handler.c`):
-//! FFmpeg 9.0 landed the swscale rewrite, where conversions are decomposed
-//! into elementary ops compiled into kernel chains. `sws_getContext()` sets
-//! `is_legacy_init`, and swscale.h is blunt that "the stateful legacy API
-//! always implies SWS_BACKEND_LEGACY" — `SWS_UNSTABLE` on such a context is
-//! silently ignored. The new backends exist only behind `sws_alloc_context()`
-//! with no `sws_init_context()`, driven by `sws_scale_frame()`.
+//! Why dynamic mode: FFmpeg 9.0's swscale rewrite (conversions compiled into
+//! op chains) is reachable only through `sws_alloc_context()` without
+//! `sws_init_context()`, driven by `sws_scale_frame()`. A context from
+//! `sws_getContext()` is legacy and silently ignores `SWS_UNSTABLE`.
 //!
-//! As of 9.0 the op chain refuses every conversion this plugin performs: it
-//! only builds a pass when no chroma resampling is needed, so `yuv420p → nv12`
-//! (and every other subsampled target) fails `ff_sws_op_list_generate()` with
-//! `ENOTSUP` and falls back to the legacy pass, bit-identically. The flag is
-//! wired up anyway because that is where upstream's work is going, and it
-//! should be one env var away rather than a refactor away. Callers gate it on
-//! `IRL_SWS_UNSTABLE`; the default is `flags = 0`, i.e. the legacy backend.
+//! As of 9.0 the op chain refuses every conversion this plugin performs (it
+//! only builds a pass when no chroma resampling is needed) and falls back to
+//! the legacy pass bit-identically. Callers gate `SWS_UNSTABLE` on
+//! `IRL_SWS_UNSTABLE` so the new backend is one env var away; the default is
+//! `flags = 0`, the legacy backend.
 
 use core::ffi::{c_int, c_uint};
 
@@ -40,8 +35,7 @@ pub struct Scaler {
 unsafe impl Send for Scaler {}
 
 impl Scaler {
-    /// `unstable` sets `SWS_UNSTABLE` (the C plugin gates it on the
-    /// `IRL_SWS_UNSTABLE` environment variable).
+    /// `unstable` sets `SWS_UNSTABLE`.
     pub fn new(unstable: bool) -> Result<Self> {
         // SAFETY: no arguments; returns an allocated, uninitialised context or
         // null. Deliberately no sws_init_context(): that is what would mark the

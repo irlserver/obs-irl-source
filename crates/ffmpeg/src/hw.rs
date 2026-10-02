@@ -26,7 +26,7 @@ unsafe impl Send for HwDeviceContext {}
 impl HwDeviceContext {
     /// Try `av_hwdevice_ctx_create(type, NULL, NULL, 0)` for each type in
     /// order; the first success wins. `on_fail` is called for each failure so
-    /// the caller can log it the way the C plugin does.
+    /// the caller can log it.
     pub fn probe(
         types: &[AVHWDeviceType],
         on_fail: &mut dyn FnMut(AVHWDeviceType, Error),

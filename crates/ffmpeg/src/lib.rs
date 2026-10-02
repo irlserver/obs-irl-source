@@ -4,11 +4,10 @@
 //! frame, swresample (including compensation-based speed control) and
 //! swscale (`sws_scale_frame` on the public `SwsContext`).
 //!
-//! Every `unsafe` FFmpeg call in the plugin lives in this crate. The API is
-//! deliberately close to the C surface (the C plugin is the behavioral spec),
-//! but ownership is explicit: `Frame`, `Packet`, `CodecContext`,
-//! `FormatContext`, `HwDeviceContext`, `FramePool`, `Resampler` and `Scaler`
-//! free their FFmpeg objects in `Drop`.
+//! Every `unsafe` FFmpeg call in the plugin lives in this crate. The API stays
+//! close to FFmpeg's own, but ownership is explicit: `Frame`, `Packet`,
+//! `CodecContext`, `FormatContext`, `HwDeviceContext`, `FramePool`,
+//! `Resampler` and `Scaler` free their FFmpeg objects in `Drop`.
 //!
 //! Time domains: [`gettime_us`] is `av_gettime()` (microseconds) and is used
 //! only for FFmpeg-side timers (interrupt watch, decoder cooldowns). OBS
@@ -245,8 +244,7 @@ pub(crate) const fn ffalign(x: i32, a: i32) -> i32 {
 ///
 /// The bindgen enum is `#[repr(i32)]` with contiguous discriminants from
 /// `AV_PIX_FMT_NONE` (-1) to `AV_PIX_FMT_NB`, so a range check is enough to
-/// make the transmute sound; anything outside becomes `AV_PIX_FMT_NONE`
-/// (which is how the C plugin's `default:` arms treat unknown formats too).
+/// make the transmute sound; anything outside becomes `AV_PIX_FMT_NONE`.
 pub(crate) fn pix_fmt_from_raw(raw: c_int) -> AVPixelFormat {
     if raw < AVPixelFormat::AV_PIX_FMT_NONE as c_int || raw > AVPixelFormat::AV_PIX_FMT_NB as c_int
     {

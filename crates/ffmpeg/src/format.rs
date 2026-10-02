@@ -8,10 +8,9 @@ use crate::dict::Dictionary;
 use crate::packet::Packet;
 use crate::{AVCodecID, Error, Rational, Result};
 
-/// Port of the C `interrupt_cb`: abort the blocking FFmpeg call when the
-/// stream was told to stop, or when the current I/O call has been blocked
-/// longer than `timeout_us` (a dead-but-open connection otherwise hangs
-/// `av_read_frame` forever).
+/// Aborts the blocking FFmpeg call when the stream was told to stop, or when
+/// the current I/O call has been blocked longer than `timeout_us` (a
+/// dead-but-open connection otherwise hangs `av_read_frame` forever).
 ///
 /// `active` is the *same* atomic as the stream's `thread_active` flag, so a
 /// stop request reaches a receiver blocked inside FFmpeg. `io_start_us` is
@@ -53,10 +52,10 @@ impl InterruptWatch {
     ///
     /// The byte count starts at -1, which no `bytes_read` can equal, so the
     /// first callback that sees a connection counts it as progress and
-    /// restarts the clock. Starting at 0 matched a fresh connection's count,
-    /// and the deadline then ran from `arm()`, which for a listener was when
-    /// it started waiting: a sender that called in more than `timeout_us`
-    /// later was aborted on its first read, before it could send anything.
+    /// restarts the clock. Starting at 0 would match a fresh connection's
+    /// count and leave the deadline running from `arm()`, which for a listener
+    /// is when it started waiting: a sender that called in more than
+    /// `timeout_us` later would be aborted on its first read.
     fn track(&self, ptr: *mut ffmpeg_sys_next::AVFormatContext) {
         self.fmt.store(ptr, Ordering::Relaxed);
         self.io_bytes_read.store(-1, Ordering::Relaxed);
@@ -80,30 +79,20 @@ impl InterruptWatch {
     /// plain field reads, so it is safe to run inside FFmpeg's callback
     /// without `catch_unwind`.
     ///
-    /// "Without progress" is meant literally, and neither half of that was
-    /// true before:
+    /// A stall means no progress, in two senses:
     ///
     /// - No `AVIOContext` yet means no connection yet, and for a listener URL
-    ///   that is the source's normal idle state, not a fault.
-    ///   `srt://0.0.0.0:7000?mode=listener` sits inside `srt_accept()` until
-    ///   the sender calls in — which can be hours — and libsrt polls this
-    ///   callback throughout. Timing that out tore the listening socket down
-    ///   every 10s and rebound it after the reconnect delay, so the port was
-    ///   dark for a slice of every cycle and any handshake in flight died with
-    ///   the socket. A caller URL keeps the deadline: it is dialing a host that
-    ///   either answers or does not, and libsrt's own `SRTO_CONNTIMEO` bounds
-    ///   it besides.
+    ///   that is the normal idle state. `srt://0.0.0.0:7000?mode=listener`
+    ///   sits inside `srt_accept()` until the sender calls in, possibly for
+    ///   hours, and libsrt polls this callback throughout. Timing that out
+    ///   would tear the listening socket down every cycle and kill any
+    ///   handshake in flight. A caller URL keeps the deadline: libsrt's own
+    ///   `SRTO_CONNTIMEO` bounds it besides.
     /// - Once connected, the stall is measured from the connection or the
-    ///   last byte that actually arrived, whichever is later, rather than
-    ///   from the start of the call.
-    ///   `avformat_open_input` accepts the connection and then probes over the
-    ///   same deadline, so without this a sender that arrived nine seconds into
-    ///   the accept got one second to deliver a PAT/PMT — a healthy stream
-    ///   failing on a stopwatch.
-    ///
-    /// Reported as "IRL Source fails to open an SRT stream that OBS's Media
-    /// Source opens immediately" (irlserver/obs-irl-source#28): the media
-    /// source's interrupt callback only checks for shutdown, so it just waits.
+    ///   last byte that arrived, whichever is later, not from the start of
+    ///   the call. `avformat_open_input` accepts and then probes over the
+    ///   same deadline, so a sender that arrived late into the accept would
+    ///   otherwise get only the remainder to deliver a PAT/PMT (#28).
     pub(crate) fn should_abort(&self) -> bool {
         if !self.active.load(Ordering::Relaxed) {
             return true;
@@ -327,8 +316,7 @@ impl FormatContext {
         }
     }
 
-    /// `av_read_frame` (arms the watch first). `Err(EAGAIN)`/`EOF` map to the
-    /// C plugin's read-error handling.
+    /// `av_read_frame` (arms the watch first).
     pub fn read_frame(&mut self, pkt: &mut Packet) -> Result<()> {
         self.watch.arm();
         // SAFETY: `self.ptr` is an open context and `pkt` a live packet we own;

@@ -156,8 +156,8 @@ impl Frame {
     }
 
     /// Borrow plane `index`. `None` when the plane pointer is null **or the
-    /// linesize is not positive** — the negative-stride case the C plugin
-    /// routes to swscale — so the caller's format check lands in one place.
+    /// linesize is not positive** (a negative stride needs swscale), so the
+    /// caller's format check lands in one place.
     /// Length is `linesize * plane_height(index)`, with the chroma height
     /// derived from `av_pix_fmt_desc_get(format)->log2_chroma_h`.
     pub fn plane(&self, index: usize) -> Option<&[u8]> {

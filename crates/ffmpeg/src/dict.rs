@@ -29,7 +29,7 @@ impl Dictionary {
     }
 
     /// Keys left after `avformat_open_input`, i.e. options the demuxer did not
-    /// recognise (logged by the C plugin).
+    /// recognise.
     pub(crate) fn remaining_keys(&self) -> Vec<String> {
         self.iter_keys().collect()
     }

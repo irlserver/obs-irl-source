@@ -191,8 +191,8 @@ impl CodecBuilder {
         self
     }
 
-    /// Whether `hw_device_ctx` is currently attached (the C plugin's
-    /// "hardware was requested" check before the open attempt).
+    /// Whether `hw_device_ctx` is currently attached, i.e. hardware was
+    /// requested.
     pub fn has_hw_device(&self) -> bool {
         // SAFETY: `self.ptr` is an unopened context we own.
         !unsafe { (*self.ptr).hw_device_ctx }.is_null()
@@ -282,8 +282,8 @@ impl CodecContext {
 
     /// `avcodec_receive_frame` into `frame` (unrefs it first).
     pub fn receive_frame(&mut self, frame: &mut Frame) -> Result<()> {
-        // avcodec_receive_frame unrefs internally, but the C plugin's callers
-        // rely on the frame being blank on every error path too.
+        // avcodec_receive_frame unrefs internally, but callers rely on the
+        // frame being blank on every error path too.
         frame.unref();
         // SAFETY: `self.ptr` is an open decoder and `frame` a live frame we own.
         Error::check(unsafe {
