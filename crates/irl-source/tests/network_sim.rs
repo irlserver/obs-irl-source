@@ -1,15 +1,12 @@
 //! End-to-end simulation of the plugin under bad network conditions.
 //!
-//! Everything this plugin is *for* happens when the connection misbehaves, and
-//! none of it was testable: a stall, a burst, a sender whose clock is not wall
-//! clock. Those were validated by streaming for an hour and reading a stats
-//! line. This drives the real jitter buffer, PTS repair, speed controller,
-//! output clock, packet queue and pacing queue against a synthetic sender on a
-//! virtual clock, and asserts the invariants the design actually promises.
-//!
-//! The seams were already there: `AudioSink`/`VideoSink` are traits, the pump
-//! takes both of its clocks by injection, `irl-core` is pure, and `Shared` can
-//! be built without libobs.
+//! Everything this plugin is *for* happens when the connection misbehaves: a
+//! stall, a burst, a sender whose clock is not wall clock. This drives the
+//! real jitter buffer, PTS repair, speed controller, output clock, packet
+//! queue and pacing queue against a synthetic sender on a virtual clock, and
+//! asserts the invariants the design promises. `AudioSink`/`VideoSink` are
+//! traits, the pump takes both of its clocks by injection, and `Shared` can be
+//! built without libobs.
 //!
 //! **What it does not cover.** The demuxer, and the video decoder itself: the
 //! bundled FFmpeg carries only the decoders the plugin needs (no rawvideo), so
@@ -384,12 +381,10 @@ impl Sim {
 /// the whole speed ramp at the batch period.
 ///
 /// A controller that regulates the instantaneous level chases that sawtooth and
-/// modulates playback speed at the same period. Measured here before the level
-/// was smoothed: 1.2% peak-to-peak at a 500ms batch and 3.3% at a 1s batch.
-/// 1% is 17 cents, so that is plainly audible pitch wobble — and because video
-/// due times are the frame PTS plus the audio playout offset, the same
-/// modulation lands on video as judder that looks like the picture repeatedly
-/// speeding up and catching up.
+/// modulates playback speed at the same period: 1.2% peak-to-peak at a 500ms
+/// batch and 3.3% at a 1s batch. 1% is 17 cents, so that is audible pitch
+/// wobble, and because video due times are the frame PTS plus the audio
+/// playout offset, the same modulation lands on video as judder.
 ///
 /// Regulating the smoothed level instead leaves the batch period alone while
 /// still tracking anything that lasts: a stall's backlog persists for tens of
@@ -504,17 +499,14 @@ fn repeated_short_dropouts_do_not_ratchet_latency() {
 #[test]
 fn a_sender_whose_clock_is_not_wall_clock_still_holds_the_target() {
     // The case the speed trim exists for: a sender 0.3% fast delivers 3ms of
-    // extra audio every second, forever. A proportional-only loop parks
-    // off-target and the latency parks with it.
+    // extra audio every second, forever. A proportional-only loop parks tens
+    // of milliseconds off target, and the latency parks with it.
     for rate in [1.003, 0.997] {
         let mut sim = Sim::new(120);
         sim.sender_rate = rate;
         sim.run(240.0, Link::Up);
 
         sim.assert_healthy();
-        // Without the integral trim a proportional loop parks tens of
-        // milliseconds off target here, permanently, and the latency parks
-        // with it.
         let mean = sim.mean_fill_ms(60.0);
         assert!(
             (mean - 120.0).abs() <= 20.0,
@@ -545,7 +537,7 @@ fn an_unwinnably_fast_sender_is_bounded_rather_than_unbounded() {
 /// The property the packet-paced design turns on: video output does not depend
 /// on the receiver thread running. The receiver spends a stall blocked in
 /// `av_read_frame`, and that is exactly when video has to keep draining what it
-/// already holds. If decode ever moves back onto the receiver, this stops.
+/// already holds.
 #[test]
 fn video_keeps_flowing_while_the_receiver_is_blocked() {
     let mut sim = Sim::new(120);
@@ -582,8 +574,7 @@ fn decoded_memory_does_not_grow_with_the_target() {
         common::push_packet(&deep.shared, i * 16_666_667, 16 * 1024);
     }
 
-    // Compressed, that is single-digit megabytes. Decoded it would be ~1.5GB,
-    // which is what the pacing queue used to be asked to hold.
+    // Compressed, that is single-digit megabytes. Decoded it would be ~1.5GB.
     let queued = deep.shared.video.bytes();
     assert!(
         queued < 16 * 1024 * 1024,
@@ -605,11 +596,10 @@ fn decoded_memory_does_not_grow_with_the_target() {
 /// pocketSRT queues its audio about 300 ms ahead of its deadline, so the
 /// audio of an instant reaches the plugin ~350 ms before the video of it,
 /// against a default cushion of 120 ms plus the 80 ms output lead. Played as
-/// it arrives, the sound ran that far ahead of the picture, and the only
-/// remedies were a Target Buffer the user had to know to raise or a Sync
-/// Offset by hand (#34). The hold measures the skew before audio starts and
-/// starts audio late enough for the picture: nothing inserted, nothing
-/// skipped, and video maps with an ordinary margin.
+/// it arrives, the sound runs that far ahead of the picture (#34). The hold
+/// measures the skew before audio starts and starts audio late enough for the
+/// picture: nothing inserted, nothing skipped, and video maps with an
+/// ordinary margin.
 #[test]
 fn audio_that_arrives_ahead_of_its_video_starts_late_enough_to_keep_lip_sync() {
     let mut sim = Sim::new(120).with_video_trailing_by(350);
@@ -649,7 +639,7 @@ fn video_seconds_behind_its_audio_is_held_for_too() {
 }
 
 /// A sender whose video is within what Target Buffer already covers needs no
-/// hold, and starts as soon as it always did.
+/// hold.
 #[test]
 fn a_sender_within_the_target_gets_no_hold() {
     let mut sim = Sim::new(120).with_video_trailing_by(50);
@@ -714,8 +704,8 @@ fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
     assert_eq!(sim.underruns(), 0);
 }
 
-/// The regression #34 asked for: a sender whose video is steadily behind
-/// its audio, with a short burst of later video every few seconds. The hold
+/// The case from #34: a sender whose video is steadily behind its audio,
+/// with a short burst of later video every few seconds. The hold
 /// covers the steady skew; the bursts are the video delay's to cover and do
 /// not ratchet the latency up.
 #[test]
@@ -776,7 +766,7 @@ fn low_latency_audio_holds_at_connection_start_only() {
     assert_eq!(sim.shared.hot.watermarks().target_ms, 120, "nothing folded");
     sim.assert_in_lip_sync();
 
-    // A later skew is the video delay's, as before.
+    // A later skew is the video delay's.
     sim.video_trails_by(900);
     sim.run(20.0, Link::Up);
     assert_eq!(sim.hold_ms(), hold);

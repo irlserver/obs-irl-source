@@ -65,8 +65,7 @@ impl Recorder {
     }
 }
 
-/// Local newtype: `VideoSink` and `Arc` are both foreign to this test crate
-/// now that the plugin modules come from the library.
+/// Local newtype: `VideoSink` and `Arc` are both foreign to this test crate.
 struct RecorderSink(Arc<Recorder>);
 
 impl VideoSink for RecorderSink {
@@ -871,7 +870,7 @@ fn a_frame_late_by_under_a_canvas_tick_still_anchors() {
 }
 
 /// A stream that advertises audio but never primes it cannot hold video
-/// forever: past the expected prime the fallback anchors as before.
+/// forever: past the expected prime the fallback anchors.
 #[test]
 fn video_stops_waiting_for_audio_that_never_primes() {
     let shared = shared_with_audio();
@@ -1163,7 +1162,7 @@ fn frames_handed_over_short_of_the_lead_but_before_due_do_not_raise_the_delay() 
 }
 
 /// A few late frames in a row are a scheduling hiccup on the host, not a
-/// sender skew: they go out late, as they always did, and the delay stays.
+/// sender skew: they go out late, and the delay stays.
 #[test]
 fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
     let shared = shared_with_audio();
@@ -1285,11 +1284,11 @@ fn video_later_than_the_delay_ceiling_anchors_and_plays_unpaced() {
 /// The delay before the anchor is sized from one frame, and that frame can
 /// still lie in a way the live check cannot see: a sender that is late for
 /// its first seconds and then is not (an encoder warming up, a stabiliser
-/// switched off), arriving in real time throughout. A delay that never shrank then held on-time video that far behind
-/// its audio for the whole connection, which a tester heard as the sound
-/// running ahead of the picture until the stream dropped. Once a whole window
-/// of frames has needed less, the delay ramps back down at the Catch-Up
-/// Speed: video plays slightly fast, nothing jumps and nothing is dropped.
+/// switched off), arriving in real time throughout. A delay that never shrank
+/// would hold on-time video that far behind its audio for the whole
+/// connection. Once a whole window of frames has needed less, the delay ramps
+/// back down at the Catch-Up Speed: video plays slightly fast, nothing jumps
+/// and nothing is dropped.
 #[test]
 fn a_delay_set_by_a_bad_first_frame_ramps_back_without_a_jump() {
     let shared = shared_with_audio();
@@ -1420,11 +1419,10 @@ fn the_video_delay_hands_itself_back_as_the_audio_hold_builds() {
 /// audio, so the connection opens with video a second behind its audio, and
 /// that video then arrives faster than real time until it has caught up. A
 /// frame measured during the catch-up reads as a late sender on a stream
-/// with no skew at all; a tester on a throttled link got 1333 ms of delay
-/// from it and the sound ran ahead of the picture until the stream dropped.
-/// The network cannot cause this (both streams share one mux), so it is not
-/// a poor-link problem and must not be answered like one: video sizes the
-/// delay only once it is live, and this stream anchors in sync with none.
+/// with no skew at all. The network cannot cause this (both streams share
+/// one mux), so it is not a poor-link problem and must not be answered like
+/// one: video sizes the delay only once it is live, and this stream anchors
+/// in sync with none.
 #[test]
 fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
     let shared = shared_with_audio();

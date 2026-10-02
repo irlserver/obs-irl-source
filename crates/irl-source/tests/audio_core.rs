@@ -458,7 +458,7 @@ fn an_idle_pump_reports_when_it_next_has_work() {
     while pump.pump_once() {}
 
     // Primed and queued ahead: it now knows when the lead runs down, and that
-    // is further away than the 1ms poll it used to spend.
+    // is further away than a 1ms poll.
     assert!(shared.audio_state().primed);
     let hint = pump.idle_sleep_ms();
     assert!(
@@ -479,10 +479,10 @@ fn an_idle_pump_reports_when_it_next_has_work() {
 }
 
 /// Low-latency mode emits no concealment, so an empty input cannot advance the
-/// sample counter. The output clock then sits still while wall clock moves, and
-/// the stall check used to read that as a stalled audio thread — restarting,
-/// re-anchoring, waiting one lead and tripping again, roughly every 150ms for
-/// as long as the source stayed quiet.
+/// sample counter. The output clock then sits still while wall clock moves,
+/// and the stall check must not read that as a stalled audio thread: it would
+/// restart, re-anchor, wait one lead and trip again, roughly every 150ms for
+/// as long as the source stays quiet.
 #[test]
 fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     let (shared, clock, _, mut pump) = harness(true, true); // low latency
@@ -520,13 +520,11 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
 }
 
 /// AAC decodes 1024 frames at a time, which does not divide a 120ms target
-/// (5760 frames). Reads and writes are both whole chunks, so before the read
-/// alignment the residual could only be a multiple of 1024 and the loop had to
-/// straddle the target at 106ms or 128ms — up to a whole chunk of cushion the
-/// user configured and never got.
-///
-/// The existing tests all use 960-frame chunks, where 120ms *is* on the grid,
-/// so none of them could see this.
+/// (5760 frames). Reads and writes are both whole chunks, so without the read
+/// alignment the residual can only be a multiple of 1024 and the loop
+/// straddles the target at 106ms or 128ms: up to a whole chunk of cushion the
+/// user configured and never gets. With 960-frame chunks 120ms *is* on the
+/// grid, so only a 1024-frame stream shows this.
 #[test]
 fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
     const AAC_FRAMES: usize = 1024;
