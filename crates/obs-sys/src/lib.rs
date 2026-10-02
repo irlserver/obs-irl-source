@@ -12,9 +12,8 @@
 //! resolve against the already-loaded libobs at dlopen time; on macOS the
 //! plugin crate passes `-undefined dynamic_lookup`.
 //!
-//! Callers must never invoke `pthread_*` or link w32-pthreads: the reason the
-//! C plugin had to (librist's pthread shim colliding with w32-pthreads on
-//! MSVC) does not exist in Rust, and nothing here depends on it.
+//! Nothing here calls `pthread_*` or needs w32-pthreads, which collides with
+//! librist's pthread shim on MSVC.
 
 #![allow(
     non_camel_case_types,
@@ -524,11 +523,10 @@ pub struct obs_transform_info_slack {
     pub _slack: [u8; 64],
 }
 
-/// `struct calldata` (callback/calldata.h). `calldata_init` is a memset to
-/// zero and `calldata_free` is `bfree(stack)`; both are `static inline` in the
-/// header and reimplemented in the `obs` crate, as are every typed
-/// `calldata_set_*`/`calldata_get_*` helper (over `calldata_set_data` /
-/// `calldata_get_data`).
+/// `struct calldata` (callback/calldata.h). The header's `static inline`
+/// helpers (`calldata_init`, `calldata_free`, the typed getters and setters)
+/// are reimplemented in the `obs` crate over `calldata_set_data` /
+/// `calldata_get_data`.
 #[repr(C)]
 pub struct calldata_t {
     pub stack: *mut u8,
@@ -558,14 +556,8 @@ pub struct obs_websocket_request_callback {
 // ── Functions ──────────────────────────────────────────────────────────
 //
 // Every declaration matches the prototype in the libobs header named above
-// its group. `raw-dylib` on Windows means no import library is needed; on
-// Linux/macOS the symbols stay undefined and resolve against the libobs the
-// host process already loaded.
-//
-// `obs_get_video_info` and `obs_sceneitem_set_info2` are declared with the
-// exact struct types, but their two call sites in the `obs` crate hand them a
-// pointer into an [`obs_video_info_slack`] / [`obs_transform_info_slack`], so
-// a newer libobs that appended a member cannot overrun the caller's frame.
+// its group. `obs_get_video_info` and `obs_sceneitem_set_info2` are called
+// with a pointer into the slack wrappers above.
 
 #[cfg_attr(windows, link(name = "obs", kind = "raw-dylib"))]
 unsafe extern "C" {
@@ -731,8 +723,6 @@ unsafe extern "C" {
     ) -> *mut obs_property_t;
 
     // ── callback/calldata.h ────────────────────────────────────────────
-    // The typed helpers around these three are `static inline` in the header
-    // and are reimplemented in the `obs` crate (`proc::CallData`).
     pub fn calldata_get_data(
         data: *const calldata_t,
         name: *const c_char,
