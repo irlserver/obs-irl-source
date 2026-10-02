@@ -87,10 +87,9 @@ pub struct VideoFrame<'a> {
 impl<'a> VideoFrame<'a> {
     #[must_use]
     pub fn new(width: u32, height: u32, format: VideoFormat) -> Self {
-        // `struct obs_source_frame` has no niche-carrying member (raw
+        // SAFETY: `struct obs_source_frame` has no niche-carrying member (raw
         // pointers, integers, floats, bools and one `volatile long` libobs
-        // resets itself), so an all-zero value is a valid one — the same
-        // `memset(&frame, 0, sizeof frame)` the C plugin does.
+        // resets itself), so an all-zero value is a valid one.
         let mut inner: obs_sys::obs_source_frame = unsafe { core::mem::zeroed() };
         inner.width = width;
         inner.height = height;

@@ -387,10 +387,6 @@ pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 pub const VIDEO_TS_CLAMP_NS: i64 = 500_000_000;
 /// Video-only fallback: forward cap.
 pub const VIDEO_TS_CAP_NS: u64 = 200_000_000;
-/// Plane alignment of the transfer pool (FFmpeg's uncached-copy fast path).
-pub const XFER_PLANE_ALIGN: i32 = 64;
-/// Transfer pool dimension alignment.
-pub const XFER_DIM_ALIGN: i32 = 16;
 
 // ── Stream / network ──
 
@@ -533,8 +529,6 @@ mod tests {
         assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000);
         assert_eq!(VIDEO_TS_CLAMP_NS, 500_000_000);
         assert_eq!(VIDEO_TS_CAP_NS, 200_000_000);
-        assert_eq!(XFER_PLANE_ALIGN, 64);
-        assert_eq!(XFER_DIM_ALIGN, 16);
 
         // ── stream / network ──
         assert_eq!(IO_STALL_TIMEOUT_US, 10_000_000);

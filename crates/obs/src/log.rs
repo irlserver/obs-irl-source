@@ -1,4 +1,4 @@
-//! `blog` bridge. Plugins bind their prefix once with [`log!`]-style macros of
+//! `blog` bridge. Plugins bind their prefix once with `log!`-style macros of
 //! their own (see `irl-source/src/log.rs`); this module owns the single
 //! `blog(level, "%s", msg)` call and the level constants.
 

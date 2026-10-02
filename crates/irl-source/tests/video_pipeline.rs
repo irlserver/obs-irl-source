@@ -123,6 +123,7 @@ fn feed(thread: &mut VideoThread, pts: i64, received_ns: u64) {
 /// `AV_FRAME_FLAG_KEY`, which the safe API deliberately has no setter for
 /// (only decoders set it).
 fn mark_keyframe(frame: &mut ffmpeg::Frame) {
+    // SAFETY: `frame` owns a live AVFrame for the duration of the borrow.
     unsafe {
         (*frame.as_mut_ptr()).flags |= ffmpeg::sys::AV_FRAME_FLAG_KEY;
     }
