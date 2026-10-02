@@ -1,26 +1,9 @@
-//! Video timestamp mapping: the arithmetic behind video due times and the
-//! lead libobs can absorb. Locking and logging stay in the plugin crate.
+//! Video timestamp arithmetic outside the audio playout mapping
+//! ([`crate::PlayoutMapping`]): the video-only fallback, the lead libobs can
+//! absorb and the frame interval. Locking and logging stay in the plugin
+//! crate.
 
 use crate::consts;
-
-/// Map a stream PTS through the audio playout mapping: the OBS timestamp at
-/// which audio with `buffered_end_pts_ns` will play is `obs_end_ts_ns`, so
-/// `pts` lands at `obs_end + (pts − buffered_end)`. Negative results clamp to
-/// zero.
-///
-/// The caller decides whether a mapping exists at all (`obs_end_ts_ns != 0
-/// && buffered_end_pts_ns > 0`), and holds the last known offset for
-/// `VIDEO_OFFSET_HOLD_NS` after that stops being true.
-pub fn map_through_playout(pts_ns: i64, obs_end_ts_ns: u64, buffered_end_pts_ns: i64) -> u64 {
-    let mapped = pts_ns + (obs_end_ts_ns as i64 - buffered_end_pts_ns);
-    if mapped < 0 { 0 } else { mapped as u64 }
-}
-
-/// The stream-PTS → OBS-clock offset the mapping implies, for re-deriving
-/// queued frames' due times.
-pub fn playout_offset_ns(obs_end_ts_ns: u64, buffered_end_pts_ns: i64) -> i64 {
-    obs_end_ts_ns as i64 - buffered_end_pts_ns
-}
 
 /// Video-only fallback anchored at the first frame: drift below −500 ms shows
 /// now, drift above +500 ms caps at now + 200 ms.
@@ -81,31 +64,6 @@ pub fn interval_ema(prev_ns: i64, delta_ns: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mapping_shifts_the_pts_onto_the_obs_clock() {
-        // Audio whose stream PTS ends at 10 s plays out at 3 s on the OBS
-        // clock: everything is shifted back by 7 s.
-        let obs_end = 3_000_000_000u64;
-        let buffered_end = 10_000_000_000i64;
-        assert_eq!(
-            map_through_playout(10_000_000_000, obs_end, buffered_end),
-            3_000_000_000
-        );
-        assert_eq!(
-            map_through_playout(10_016_000_000, obs_end, buffered_end),
-            3_016_000_000
-        );
-        assert_eq!(playout_offset_ns(obs_end, buffered_end), -7_000_000_000);
-    }
-
-    #[test]
-    fn negative_mapped_pts_clamps_to_zero() {
-        // A frame from before the audio epoch would map before the OBS clock
-        // started; OBS takes 0 as "now".
-        assert_eq!(map_through_playout(0, 1_000_000_000, 10_000_000_000), 0);
-        assert_eq!(map_through_playout(-5, 1, 1), 0);
-    }
 
     #[test]
     fn fallback_passes_a_frame_inside_the_drift_window() {

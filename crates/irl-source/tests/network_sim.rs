@@ -175,12 +175,8 @@ impl Sim {
         let skew = self.video_skew_ns.expect("a sender with video");
         let pts = self.delivered.last().expect("audio delivered") - skew;
         let state = self.shared.audio_state();
-        assert!(state.latest_obs_end_ts_ns != 0, "audio has not primed");
-        let due = irl_core::video_time::map_through_playout(
-            pts,
-            state.latest_obs_end_ts_ns,
-            state.latest_buffered_end_pts_ns,
-        );
+        assert!(state.mapping.has_output(), "audio has not primed");
+        let due = state.mapping.map(pts).expect("a published mapping");
         (due as i64 - self.now_ns() as i64) / 1_000_000
     }
 

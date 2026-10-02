@@ -29,8 +29,8 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use irl_core::arrival::ArrivalFloor;
 use irl_core::{
-    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, OutputClock, SpeedCarry, SpeedTrim,
-    Watermarks,
+    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, OutputClock, PlayoutMapping,
+    SpeedCarry, SpeedTrim, Watermarks,
 };
 
 /// Settings latched when the stream opens; changing any of them forces a
@@ -113,11 +113,9 @@ pub struct RunFlags {
 pub struct AudioState {
     pub clock: OutputClock,
 
-    // Playout mapping (audio → OBS clock), the lip-sync source for video.
-    pub latest_obs_end_ts_ns: u64,
-    pub latest_buffered_end_pts_ns: i64,
-    pub offset_baseline_ns: i64,
-    pub offset_baseline_set: bool,
+    /// Where the audio the pump hands OBS plays, which video is scheduled
+    /// through. Other threads read it through [`Self::playout_mapping`].
+    pub mapping: PlayoutMapping,
 
     // Concealment.
     pub out_last: LastSample,
@@ -167,9 +165,6 @@ pub struct AudioState {
     /// offset grew for the hold. The video thread takes the growth out of its
     /// standing delay.
     pub hold_built_ns: u64,
-    /// The hold when `offset_baseline_ns` was taken, so a re-anchor does not
-    /// read the hold building as concealment drift.
-    pub offset_baseline_hold_ms: i32,
     /// When the pump first waited on a skew reading to prime; zero while it
     /// has not.
     pub hold_wait_since_ns: u64,
@@ -179,11 +174,10 @@ pub struct AudioState {
 }
 
 impl AudioState {
-    /// The audio → OBS playout mapping, `(latest_obs_end_ts_ns,
-    /// latest_buffered_end_pts_ns)`, once the pump has published one.
-    pub fn playout_mapping(&self) -> Option<(u64, i64)> {
-        (self.latest_obs_end_ts_ns != 0 && self.latest_buffered_end_pts_ns > 0)
-            .then_some((self.latest_obs_end_ts_ns, self.latest_buffered_end_pts_ns))
+    /// A copy of the playout mapping, so a reader on another thread holds
+    /// `audio_state` only for the copy.
+    pub fn playout_mapping(&self) -> PlayoutMapping {
+        self.mapping
     }
 }
 

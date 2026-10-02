@@ -179,13 +179,9 @@ impl VideoThread {
         let pts_ns = frame.pts();
         let now = obs::time::gettime_ns();
 
-        let (obs_end, buffered_end, startup_warmup_ms) = {
+        let (mapping, startup_warmup_ms) = {
             let state = self.shared.audio_state();
-            (
-                state.latest_obs_end_ts_ns,
-                state.latest_buffered_end_pts_ns,
-                state.startup_warmup_remaining_ms,
-            )
+            (state.playout_mapping(), state.startup_warmup_remaining_ms)
         };
         let frame_interval_ns = self.shared.conn.video_frame_interval_ns.load(Relaxed);
 
@@ -195,9 +191,8 @@ impl VideoThread {
         // `VideoThread::settle_anchor_candidate`.
         let delay_ns = self.delay.delay_ns();
 
-        if obs_end != 0 && buffered_end > 0 {
-            let mapped = video_time::map_through_playout(pts_ns, obs_end, buffered_end)
-                .saturating_add(delay_ns);
+        if let Some(mapped) = mapping.map(pts_ns) {
+            let mapped = mapped.saturating_add(delay_ns);
             self.record_lead(mapped as i64, now, frame_interval_ns);
             return mapped;
         }
@@ -223,7 +218,7 @@ impl VideoThread {
         // flag the receiver publishes.
         if self.shared.flags.audio_present.load(Relaxed) {
             let mut audio_lead_ns = 0;
-            if obs_end == 0 {
+            if !mapping.has_output() {
                 audio_lead_ns = startup_warmup_ms as i64 * 1_000_000;
                 if !self.shared.cfg.low_latency_audio {
                     audio_lead_ns += self.shared.hot.watermarks().target_ms as i64 * 1_000_000;
@@ -244,7 +239,7 @@ impl VideoThread {
     /// a held offset belongs to audio that has stopped, and anchoring on it
     /// would be anchoring on a guess.
     pub fn mapping_published(&self) -> bool {
-        self.shared.audio_state().playout_mapping().is_some()
+        self.shared.audio_state().playout_mapping().is_published()
     }
 
     /// The current stream-PTS → OBS-clock offset, for re-deriving the due time
@@ -258,11 +253,11 @@ impl VideoThread {
     /// keeps the due times the frames arrived with. The standing video delay
     /// rides on the offset, so a reschedule keeps it.
     pub fn playout_offset(&mut self) -> Option<i64> {
-        let mapping = self.shared.audio_state().playout_mapping();
+        let offset_ns = self.shared.audio_state().playout_mapping().offset_ns();
         let now = obs::time::gettime_ns();
 
-        if let Some((obs_end, buffered_end)) = mapping {
-            self.playout_offset_ns = video_time::playout_offset_ns(obs_end, buffered_end);
+        if let Some(offset_ns) = offset_ns {
+            self.playout_offset_ns = offset_ns;
             self.playout_offset_time_ns = now;
         } else if self.playout_offset_time_ns == 0
             || now.saturating_sub(self.playout_offset_time_ns) > consts::VIDEO_OFFSET_HOLD_NS

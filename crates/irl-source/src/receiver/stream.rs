@@ -527,17 +527,11 @@ impl Receiver {
         let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
             let skew = crate::source::av_skew_ms(shared, &state);
-            let drift = match state.playout_mapping() {
-                // Net of the audio hold, which moves the offset on purpose.
-                Some((obs_end, buffered_end)) if state.offset_baseline_set => {
-                    (obs_end as i64
-                        - buffered_end
-                        - state.offset_baseline_ns
-                        - crate::audio::hold::moved_since_baseline_ns(&state))
-                        / 1_000_000
-                }
-                _ => 0,
-            };
+            // Net of the audio hold, which moves the offset on purpose.
+            let drift = state
+                .mapping
+                .drift_ns(state.hold_ms)
+                .map_or(0, |drift_ns| drift_ns / 1_000_000);
             (drift, skew)
         };
 

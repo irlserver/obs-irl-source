@@ -18,6 +18,7 @@ pub mod config;
 pub mod consts;
 pub mod dsp;
 pub mod pacing;
+pub mod playout;
 pub mod pts_repair;
 mod rescale;
 pub mod speed;
@@ -32,6 +33,7 @@ pub use audio_hold::{AudioHold, HoldChange};
 pub use config::{HwDecode, Watermarks};
 pub use dsp::LastSample;
 pub use pacing::{DueVerdict, PacingQueue};
+pub use playout::PlayoutMapping;
 pub use pts_repair::{PtsAction, PtsRepair, Verdict};
 pub use speed::{
     DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,

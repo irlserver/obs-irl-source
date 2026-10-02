@@ -643,8 +643,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     let now = obs::time::gettime_ns();
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now + 1_000_000_000;
-        state.latest_buffered_end_pts_ns = 10_000_000_000;
+        state.mapping.publish(now + 1_000_000_000, 10_000_000_000);
     }
 
     feed(&mut thread, 10_000_000_000, now);
@@ -658,7 +657,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     // with it rather than trailing by the depth of the queue.
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now + 500_000_000;
+        state.mapping.publish(now + 500_000_000, 10_000_000_000);
     }
     thread.run_once(now);
     assert_eq!(thread.pacing().next_due(), Some(now + 500_000_000));
@@ -668,7 +667,7 @@ fn queued_frames_reschedule_onto_the_audio_playout_offset() {
     // end of it.
     {
         let mut state = shared.audio_state();
-        state.latest_obs_end_ts_ns = now;
+        state.mapping.publish(now, 10_000_000_000);
     }
     thread.run_once(now);
     assert!(recorder.emitted().is_empty());
@@ -716,8 +715,7 @@ fn a_frame_is_due_where_the_audio_mapping_puts_it() {
     {
         let mut state = shared.audio_state();
         // A frame at stream PTS 0 maps two seconds into the future.
-        state.latest_obs_end_ts_ns = now + 2_000_000_000;
-        state.latest_buffered_end_pts_ns = 1;
+        state.mapping.publish(now + 2_000_000_000, 1);
     }
 
     let mut frame = sw_frame(Pix::AV_PIX_FMT_YUV420P, 64, 32);
@@ -758,8 +756,7 @@ fn a_disabled_keyframe_gate_passes_non_key_frames() {
 /// `buffered_end_pts_ns` plays out at OBS time `obs_end_ts_ns`.
 fn publish_mapping(shared: &Shared, obs_end_ts_ns: u64, buffered_end_pts_ns: i64) {
     let mut state = shared.audio_state();
-    state.latest_obs_end_ts_ns = obs_end_ts_ns;
-    state.latest_buffered_end_pts_ns = buffered_end_pts_ns;
+    state.mapping.publish(obs_end_ts_ns, buffered_end_pts_ns);
 }
 
 /// Anchor the play head on a frame at stream PTS 10 s that arrives at the

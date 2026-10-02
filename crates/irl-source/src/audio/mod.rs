@@ -67,8 +67,7 @@ pub fn reset_audio_timing_state(state: &mut AudioState) {
     state.clock.stand_down();
     state.conceal_fade_pending = false;
     state.out_last = irl_core::LastSample::default();
-    state.offset_baseline_ns = 0;
-    state.offset_baseline_set = false;
+    state.mapping.clear();
     state.recovery_until_us = 0;
     state.speed_carry.reset();
     state.align_read_pending = false;
@@ -76,8 +75,6 @@ pub fn reset_audio_timing_state(state: &mut AudioState) {
     // to build once it re-primes.
     state.hold_unbuilt_ns = 0;
     state.latest_audio_stream_pts_ns = 0;
-    state.latest_buffered_end_pts_ns = 0;
-    state.latest_obs_end_ts_ns = 0;
     state.decoded_frame_samples = 0;
     state.startup_warmup_remaining_ms = 0;
     state.drain = irl_core::DrainWatch::default();

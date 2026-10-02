@@ -99,12 +99,6 @@ pub fn credit_build(state: &mut AudioState, played_ns: u64, consumed_ns: u64) {
     state.hold_built_ns += built_ns;
 }
 
-/// How far the hold has moved since the playout offset baseline was taken,
-/// which the offset is expected to follow rather than read as drift.
-pub fn moved_since_baseline_ns(state: &AudioState) -> i64 {
-    i64::from(state.hold_ms - state.offset_baseline_hold_ms) * 1_000_000
-}
-
 /// Forget the readings, keeping the hold in force: the audio timeline broke,
 /// so readings from before it no longer compare with readings after it, but
 /// the sender is the same one.
