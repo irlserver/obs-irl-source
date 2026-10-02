@@ -844,15 +844,6 @@ mod tests {
     }
 
     #[test]
-    fn naive_rounding_would_fail_that_test() {
-        // Pin the defect the carry fixes, so a "simplification" that drops it
-        // does not pass silently.
-        let n = 1024;
-        let naive = (n as f32 / 1.0002 + 0.5) as i32;
-        assert_eq!(naive, n, "rounding alone discards +0.02 %");
-    }
-
-    #[test]
     fn the_carry_never_asks_for_less_than_one_frame() {
         let mut carry = SpeedCarry::new();
         assert_eq!(carry.output_frames(1, 1000.0), 1);

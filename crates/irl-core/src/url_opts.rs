@@ -153,71 +153,6 @@ pub fn awaits_caller(url: &str, extra: Option<&str>) -> bool {
 }
 
 #[cfg(test)]
-mod awaits_caller_tests {
-    use super::awaits_caller;
-
-    fn url_awaits_caller(url: &str) -> bool {
-        awaits_caller(url, None)
-    }
-
-    #[test]
-    fn listener_and_rendezvous_urls_wait_to_be_called() {
-        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=listener"));
-        assert!(url_awaits_caller("srt://0.0.0.0:7000?mode=rendezvous"));
-        assert!(url_awaits_caller("rist://0.0.0.0:7000?listen=1"));
-        assert!(url_awaits_caller(
-            "srt://0.0.0.0:7000?latency=200000&mode=listener"
-        ));
-    }
-
-    /// The field OBS shows next to the URL is where many people put it, and
-    /// libsrt does not care which: the two land in one dictionary.
-    #[test]
-    fn listener_mode_in_the_ffmpeg_options_counts_too() {
-        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=listener")));
-        assert!(awaits_caller(
-            "srt://0.0.0.0:7654",
-            Some("latency=2000000 mode=listener")
-        ));
-        assert!(awaits_caller("srt://0.0.0.0:7654", Some("mode=rendezvous")));
-        assert!(awaits_caller("rist://0.0.0.0:7654", Some("listen=1")));
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("mode=caller")
-        ));
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("latency=2000000")
-        ));
-        assert!(!awaits_caller("srt://host.example:7000", Some("")));
-        // A value that merely contains the word is not the option.
-        assert!(!awaits_caller(
-            "srt://host.example:7000",
-            Some("passphrase=mode=listener")
-        ));
-    }
-
-    #[test]
-    fn caller_urls_dial_out() {
-        assert!(!url_awaits_caller("srt://host.example:7000"));
-        assert!(!url_awaits_caller("srt://host.example:7000?mode=caller"));
-        assert!(!url_awaits_caller("rtmp://host.example/app/key"));
-        assert!(!url_awaits_caller(""));
-    }
-
-    #[test]
-    fn only_the_query_decides() {
-        // A path or a passphrase containing the word must not flip it: a
-        // caller URL that never times out would hang on a dead host forever.
-        assert!(!url_awaits_caller("file:///media/mode=listener/clip.ts"));
-        assert!(!url_awaits_caller("srt://host.example:7000#mode=listener"));
-        assert!(url_awaits_caller(
-            "srt://host:7000?passphrase=mode%3Dlistener&mode=listener"
-        ));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -374,5 +309,60 @@ mod tests {
                 "x",
             ]
         );
+    }
+
+    /// Whether the stall deadline waits for a connection: only for a URL that
+    /// waits to be called, which the query or the FFmpeg Options can say.
+    #[test]
+    fn awaits_caller_reads_the_query_and_the_ffmpeg_options() {
+        let table = [
+            // Listener and rendezvous URLs wait to be called.
+            ("srt://0.0.0.0:7000?mode=listener", None, true),
+            ("srt://0.0.0.0:7000?mode=rendezvous", None, true),
+            ("rist://0.0.0.0:7000?listen=1", None, true),
+            (
+                "srt://0.0.0.0:7000?latency=200000&mode=listener",
+                None,
+                true,
+            ),
+            // Caller URLs dial out.
+            ("srt://host.example:7000", None, false),
+            ("srt://host.example:7000?mode=caller", None, false),
+            ("rtmp://host.example/app/key", None, false),
+            ("", None, false),
+            // Only the query decides. A path or a passphrase containing the
+            // word must not flip it: a caller URL that never times out would
+            // hang on a dead host forever.
+            ("file:///media/mode=listener/clip.ts", None, false),
+            ("srt://host.example:7000#mode=listener", None, false),
+            (
+                "srt://host:7000?passphrase=mode%3Dlistener&mode=listener",
+                None,
+                true,
+            ),
+            // The field OBS shows next to the URL is where many people put
+            // it, and libsrt does not care which: the two land in one
+            // dictionary.
+            ("srt://0.0.0.0:7654", Some("mode=listener"), true),
+            (
+                "srt://0.0.0.0:7654",
+                Some("latency=2000000 mode=listener"),
+                true,
+            ),
+            ("srt://0.0.0.0:7654", Some("mode=rendezvous"), true),
+            ("rist://0.0.0.0:7654", Some("listen=1"), true),
+            ("srt://host.example:7000", Some("mode=caller"), false),
+            ("srt://host.example:7000", Some("latency=2000000"), false),
+            ("srt://host.example:7000", Some(""), false),
+            // A value that merely contains the word is not the option.
+            (
+                "srt://host.example:7000",
+                Some("passphrase=mode=listener"),
+                false,
+            ),
+        ];
+        for (url, extra, expected) in table {
+            assert_eq!(awaits_caller(url, extra), expected, "{url} with {extra:?}");
+        }
     }
 }

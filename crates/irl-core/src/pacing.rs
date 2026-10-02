@@ -269,9 +269,9 @@ mod tests {
         push(&mut q, frame(0), 0);
         push(&mut q, frame(1), 0);
         assert_eq!(q.bytes(), 2 * FRAME_BYTES);
-        q.pop();
+        assert_eq!(q.pop().unwrap().pts_ns, 0, "frames come back in push order");
         assert_eq!(q.bytes(), FRAME_BYTES);
-        q.pop();
+        assert_eq!(q.pop().unwrap().pts_ns, 1);
         assert_eq!(q.bytes(), 0);
         assert!(q.is_empty());
         assert_eq!(q.pop(), None);
@@ -490,14 +490,5 @@ mod tests {
         assert_eq!(q.bytes(), 0);
         assert!(q.has_room());
         assert_eq!(q.drain().len(), 0);
-    }
-
-    #[test]
-    fn frames_come_back_in_push_order() {
-        let mut q = queue();
-        push(&mut q, frame(10), 1);
-        push(&mut q, frame(20), 2);
-        assert_eq!(q.pop().unwrap().pts_ns, 10);
-        assert_eq!(q.pop().unwrap().pts_ns, 20);
     }
 }

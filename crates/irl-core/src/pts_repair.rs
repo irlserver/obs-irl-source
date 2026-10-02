@@ -346,61 +346,36 @@ mod tests {
         assert_eq!(r.last(), Some((12_345, DUR)));
     }
 
+    /// The three tiers and their edges: under 70 ms is interpolated onto the
+    /// expected PTS, 70 ms up to 2 s gets that much silence, and 2 s or more
+    /// resets the timeline.
     #[test]
-    fn contiguous_frames_pass() {
-        let mut r = repair();
-        r.evaluate(0, DUR);
-        let v = r.evaluate(DUR, DUR);
-        assert_eq!(v.action, PtsAction::Pass);
-        assert_eq!(v.corrected_pts, DUR);
-        assert_eq!(v.gap_ms, 0);
-    }
-
-    #[test]
-    fn gap_of_69ms_interpolates() {
-        let mut r = repair();
-        r.evaluate(0, DUR);
-        let v = r.evaluate(DUR + ms(69), DUR);
-        assert_eq!(v.action, PtsAction::Interpolate);
-        assert_eq!(v.gap_ms, 69);
-        // Interpolation snaps to the expected PTS, discarding the gap.
-        assert_eq!(v.corrected_pts, DUR);
-        assert_eq!(r.last(), Some((DUR, DUR)));
-    }
-
-    #[test]
-    fn gap_of_70ms_inserts_silence() {
-        let mut r = repair();
-        r.evaluate(0, DUR);
-        let pts = DUR + ms(70);
-        let v = r.evaluate(pts, DUR);
-        assert_eq!(v.action, PtsAction::Silence);
-        assert_eq!(v.gap_ms, 70);
-        assert_eq!(v.silence_ms, 70);
-        assert_eq!(v.corrected_pts, pts);
-    }
-
-    #[test]
-    fn gap_of_1999ms_inserts_silence() {
-        let mut r = repair();
-        r.evaluate(0, DUR);
-        let pts = DUR + ms(1999);
-        let v = r.evaluate(pts, DUR);
-        assert_eq!(v.action, PtsAction::Silence);
-        assert_eq!(v.silence_ms, 1999);
-        assert_eq!(v.corrected_pts, pts);
-    }
-
-    #[test]
-    fn gap_of_2000ms_resets() {
-        let mut r = repair();
-        r.evaluate(0, DUR);
-        let pts = DUR + ms(2000);
-        let v = r.evaluate(pts, DUR);
-        assert_eq!(v.action, PtsAction::Reset);
-        assert_eq!(v.gap_ms, 2000);
-        assert_eq!(v.silence_ms, 0);
-        assert_eq!(v.corrected_pts, pts);
+    fn forward_gaps_take_the_tier_their_size_falls_in() {
+        let table = [
+            (0, PtsAction::Pass, 0),
+            (69, PtsAction::Interpolate, 0),
+            (70, PtsAction::Silence, 70),
+            (1999, PtsAction::Silence, 1999),
+            (2000, PtsAction::Reset, 0),
+        ];
+        for (gap, action, silence_ms) in table {
+            let mut r = repair();
+            r.evaluate(0, DUR);
+            let pts = DUR + ms(i64::from(gap));
+            let v = r.evaluate(pts, DUR);
+            assert_eq!(v.action, action, "{gap}ms");
+            assert_eq!(v.gap_ms, gap, "{gap}ms");
+            assert_eq!(v.silence_ms, silence_ms, "{gap}ms");
+            // Interpolation snaps to the expected PTS, discarding the gap;
+            // every other tier keeps the PTS the stream sent.
+            let corrected = if action == PtsAction::Interpolate {
+                DUR
+            } else {
+                pts
+            };
+            assert_eq!(v.corrected_pts, corrected, "{gap}ms");
+            assert_eq!(r.last(), Some((corrected, DUR)), "{gap}ms");
+        }
     }
 
     #[test]
