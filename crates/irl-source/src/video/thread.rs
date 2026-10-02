@@ -98,8 +98,6 @@ pub struct VideoThread {
     pub(crate) ts_init: bool,
     pub(crate) sys_base: u64,
     pub(crate) pts_base: i64,
-    /// Throttle for the "Video lead" line.
-    pub(crate) lead_warn_time_ns: u64,
     /// Set while libobs's async play head is unanchored, so the next frame out
     /// goes at its due time rather than a lead early. See
     /// [`Self::emit_slack_ns`] and [`Self::settle_anchor_candidate`].
@@ -159,7 +157,6 @@ impl VideoThread {
             ts_init: false,
             sys_base: 0,
             pts_base: 0,
-            lead_warn_time_ns: 0,
             // A fresh source has libobs's `last_frame_ts` at 0 too.
             anchor_pending: true,
             anchor_wait: AnchorWait::Idle,

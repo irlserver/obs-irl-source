@@ -239,16 +239,10 @@ pub const VIDEO_PACKET_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 // ── Video timing / pacing ──
 
-/// Reporting budget for frames parked in libobs's async queue.
-pub const OBS_ASYNC_FRAME_BUDGET: i64 = 24;
-/// Throttle for the video lead warning.
-pub const VIDEO_LEAD_WARN_INTERVAL_NS: u64 = 10_000_000_000;
 /// Bounds on the measured frame interval (250fps..10fps).
 pub const VIDEO_INTERVAL_MIN_NS: i64 = 4_000_000;
 /// Bounds on the measured frame interval (250fps..10fps).
 pub const VIDEO_INTERVAL_MAX_NS: i64 = 100_000_000;
-/// Interval estimate before enough frames have arrived.
-pub const VIDEO_INTERVAL_DEFAULT_NS: i64 = 33_333_333;
 /// Pacing queue frame ceiling.
 ///
 /// It has to carry the largest Target Buffer at the highest frame rate anyone
@@ -475,11 +469,8 @@ mod tests {
         assert_eq!(VIDEO_PACKET_QUEUE_MAX_BYTES, 67_108_864);
 
         // ── video timing / pacing ──
-        assert_eq!(OBS_ASYNC_FRAME_BUDGET, 24);
-        assert_eq!(VIDEO_LEAD_WARN_INTERVAL_NS, 10_000_000_000);
         assert_eq!(VIDEO_INTERVAL_MIN_NS, 4_000_000);
         assert_eq!(VIDEO_INTERVAL_MAX_NS, 100_000_000);
-        assert_eq!(VIDEO_INTERVAL_DEFAULT_NS, 33_333_333);
         assert_eq!(VIDEO_PACING_MAX_FRAMES, 1024);
         assert_eq!(VIDEO_PACING_MAX_BYTES, 1_073_741_824);
         assert_eq!(VIDEO_PACING_SLACK_NS, 1_000_000);

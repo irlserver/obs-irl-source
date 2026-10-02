@@ -1,7 +1,6 @@
 //! Video timestamp arithmetic outside the audio playout mapping
-//! ([`crate::PlayoutMapping`]): the video-only fallback, the lead libobs can
-//! absorb and the frame interval. Locking and logging stay in the plugin
-//! crate.
+//! ([`crate::PlayoutMapping`]): the video-only fallback and the frame
+//! interval. Locking and logging stay in the plugin crate.
 
 use crate::consts;
 
@@ -20,28 +19,6 @@ pub fn fallback_anchor(pts_ns: i64, pts_base_ns: i64, sys_base_ns: u64, now_ns: 
         now_ns + consts::VIDEO_TS_CAP_NS
     } else {
         computed
-    }
-}
-
-/// Lead libobs can absorb: `OBS_ASYNC_FRAME_BUDGET × frame_interval`, floored
-/// at the audio re-anchor margin.
-///
-/// The caller adds the jitter buffer's own contribution to the lead
-/// (`buffer_target_ms × 1e6`). The budget is expressed in frames because that
-/// is what libobs counts: the same 400 ms is 12 frames at 30 fps and 48 at
-/// 120 fps.
-pub fn queue_safe_ns(frame_interval_ns: i64) -> i64 {
-    let interval = if frame_interval_ns <= 0 {
-        consts::VIDEO_INTERVAL_DEFAULT_NS
-    } else {
-        frame_interval_ns
-    };
-    let budget_ns = consts::OBS_ASYNC_FRAME_BUDGET * interval;
-    let floor_ns = consts::AUDIO_OFFSET_REANCHOR_MARGIN_MS * 1_000_000;
-    if budget_ns < floor_ns {
-        floor_ns
-    } else {
-        budget_ns
     }
 }
 
@@ -98,19 +75,6 @@ mod tests {
         );
         // Exactly 500 ms is still inside the window.
         assert_eq!(fallback_anchor(500_000_000, 0, now, now), now + 500_000_000);
-    }
-
-    #[test]
-    fn queue_safe_floors_at_the_reanchor_margin() {
-        // 24 frames at 120 fps is 200 ms, below the 400 ms floor.
-        assert_eq!(queue_safe_ns(8_333_333), 400_000_000);
-        // At 60 fps, 24 frames is a hair under 400 ms, so the floor still wins.
-        assert_eq!(queue_safe_ns(16_666_666), 400_000_000);
-        // At 30 fps it is 800 ms, and the budget wins.
-        assert_eq!(queue_safe_ns(33_333_333), 24 * 33_333_333);
-        // No measurement yet: the 30 fps default stands in.
-        assert_eq!(queue_safe_ns(0), 24 * consts::VIDEO_INTERVAL_DEFAULT_NS);
-        assert_eq!(queue_safe_ns(-1), 24 * consts::VIDEO_INTERVAL_DEFAULT_NS);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
 use ffmpeg::{AVPixelFormat, Frame, FramePool, Scaler};
-use irl_core::{consts, timing, video_time};
+use irl_core::{consts, video_time};
 use obs::{ColorRange, ColorSpace, VideoFormat, VideoFrame};
 
 use crate::video::thread::VideoThread;
@@ -183,7 +183,6 @@ impl VideoThread {
             let state = self.shared.audio_state();
             (state.playout_mapping(), state.startup_warmup_remaining_ms)
         };
-        let frame_interval_ns = self.shared.conn.video_frame_interval_ns.load(Relaxed);
 
         // No audio-stream test: a published mapping already implies the pump
         // handed OBS a real chunk, so it implies the audio stream.
@@ -192,9 +191,7 @@ impl VideoThread {
         let delay_ns = self.delay.delay_ns();
 
         if let Some(mapped) = mapping.map(pts_ns) {
-            let mapped = mapped.saturating_add(delay_ns);
-            self.record_lead(mapped as i64, now, frame_interval_ns);
-            return mapped;
+            return mapped.saturating_add(delay_ns);
         }
 
         // `conn.video_ts_init` is the authority here: it is cleared on a
@@ -229,7 +226,6 @@ impl VideoThread {
             }
         }
 
-        self.record_lead(computed as i64, now, frame_interval_ns);
         computed
     }
 
@@ -245,9 +241,9 @@ impl VideoThread {
     /// The current stream-PTS → OBS-clock offset, for re-deriving the due time
     /// of frames already queued.
     ///
-    /// Free of the side effects in [`Self::due_time`]: the lead warning and the
-    /// fallback anchor belong to a frame arriving, and running them for every
-    /// queued frame would report the queue rather than the stream.
+    /// Free of the side effects in [`Self::due_time`]: the fallback anchor
+    /// belongs to a frame arriving, and running it for every queued frame
+    /// would report the queue rather than the stream.
     /// `None` when there is no audio to slave to, or when the mapping has been
     /// gone long enough that holding it would be a guess; the caller then
     /// keeps the due times the frames arrived with. The standing video delay
@@ -266,42 +262,6 @@ impl VideoThread {
         }
 
         Some(self.playout_offset_ns + self.delay.delay_ns() as i64)
-    }
-
-    /// Warn when the mapping placed this frame further ahead of wall clock
-    /// than libobs can queue.
-    ///
-    /// The lead is never clamped. What libobs queues is the lead's *growth*
-    /// since its play head last anchored, not its size, so a large but steady
-    /// lead queues nothing and clamping it would only shift video ahead of
-    /// audio.
-    pub fn record_lead(&mut self, ts: i64, now: u64, frame_interval_ns: i64) {
-        let lead_ns = ts - now as i64;
-        let frame_interval_ns = if frame_interval_ns <= 0 {
-            consts::VIDEO_INTERVAL_DEFAULT_NS
-        } else {
-            frame_interval_ns
-        };
-        let queue_safe_ns = self.shared.hot.watermarks().target_ms as i64 * 1_000_000
-            + video_time::queue_safe_ns(frame_interval_ns);
-        if lead_ns <= queue_safe_ns {
-            return;
-        }
-
-        // Only a risk while the lead is still climbing — a steady lead of any
-        // size is free — so this is a "watch this" line, not a fault.
-        if timing::throttle(
-            &mut self.lead_warn_time_ns,
-            now,
-            consts::VIDEO_LEAD_WARN_INTERVAL_NS,
-        ) {
-            irl_info!(
-                "Video lead {}ms is beyond what OBS can queue ({}ms at {:.0}fps); harmless while it holds steady, but a rise of that size would make OBS drop queued video",
-                lead_ns / 1_000_000,
-                queue_safe_ns / 1_000_000,
-                1_000_000_000.0 / frame_interval_ns as f64
-            );
-        }
     }
 
     /* ── Output ───────────────────────────────────────────── */
