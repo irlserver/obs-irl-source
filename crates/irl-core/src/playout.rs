@@ -86,12 +86,6 @@ impl PlayoutMapping {
         Some(offset_ns - baseline.offset_ns - hold_moved_ns)
     }
 
-    /// Forget the latest chunk and keep the baseline.
-    pub fn unpublish(&mut self) {
-        self.obs_end_ns = 0;
-        self.pts_end_ns = 0;
-    }
-
     /// Forget the latest chunk and the baseline.
     pub fn clear(&mut self) {
         *self = Self::default();
@@ -174,15 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn unpublishing_keeps_the_baseline_and_clearing_does_not() {
+    fn clearing_forgets_the_baseline() {
         let mut mapping = published(3_000_000_000, 10_000_000_000);
         assert!(mapping.take_baseline(0));
-
-        mapping.unpublish();
-        assert!(!mapping.has_output());
-        assert_eq!(mapping.drift_ns(0), None);
-        mapping.publish(3_050_000_000, 10_000_000_000);
-        assert_eq!(mapping.drift_ns(0), Some(50_000_000));
 
         mapping.clear();
         assert_eq!(mapping, PlayoutMapping::default());

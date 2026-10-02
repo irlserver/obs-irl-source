@@ -246,7 +246,7 @@ impl AudioIntake {
 
         state.clock.stand_down();
         state.out_last.forget();
-        state.mapping.unpublish();
+        state.mapping.clear();
         state.latest_audio_stream_pts_ns = 0;
         state.startup_warmup_remaining_ms = consts::STARTUP_AUDIO_WARMUP_MS;
         reconfigured
