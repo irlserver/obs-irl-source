@@ -79,7 +79,6 @@ pub fn parse_query(request_line: &str) -> HashMap<String, String> {
     out
 }
 
-/// How a redirect resolves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Code(String),
