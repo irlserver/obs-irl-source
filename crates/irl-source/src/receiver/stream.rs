@@ -10,8 +10,8 @@ use crate::audio;
 use crate::receiver::{Receiver, probe};
 use crate::shared::{AudioState, Shared, VideoDecoder};
 
-/// `nvdec_get_format`. Installed only for forced NVDEC, where a software
-/// fallback is exactly what must not happen.
+/// Installed only for forced NVDEC, where a software fallback is exactly what
+/// must not happen.
 fn nvdec_get_format(codec: &Codec, offered: &[AVPixelFormat]) -> AVPixelFormat {
     let picked = probe::pick_cuda_format(codec, offered);
     if picked == AVPixelFormat::AV_PIX_FMT_NONE {
@@ -20,7 +20,7 @@ fn nvdec_get_format(codec: &Codec, offered: &[AVPixelFormat]) -> AVPixelFormat {
     picked
 }
 
-/// Open one decoder for `stream` (port of `open_decoder`).
+/// Open one decoder for `stream`.
 ///
 /// `hw_device` is the connection's shared device slot: the video decoder
 /// creates it, and the software-fallback path releases it. `using_hw_decode`
@@ -226,9 +226,9 @@ impl Receiver {
             irl_info!("Listening for the sender to call in; no I/O deadline until it does");
         }
 
-        // Unrecognised options are dropped without a word, as `av_dict_free`
-        // does in the C: FFmpeg option names differ per protocol, so the
-        // table above deliberately sets keys most inputs ignore.
+        // Unrecognised options are dropped silently: FFmpeg option names
+        // differ per protocol, so the table above deliberately sets keys most
+        // inputs ignore.
         let fmt = match ffmpeg::FormatContext::open(&url, opts, self.shared.interrupt.clone()) {
             Ok((fmt, _unrecognised)) => fmt,
             Err(err) => {
@@ -365,8 +365,8 @@ impl Receiver {
         }
     }
 
-    /// `irl_open_stream`: fast probe when the previous session on this thread
-    /// showed what the stream carries, full probe otherwise.
+    /// Fast probe when the previous session on this thread showed what the
+    /// stream carries, full probe otherwise.
     ///
     /// The short probe can miss a stream some encoders advertise late, so a
     /// result thinner than the previous session is thrown away and re-probed
@@ -398,9 +398,8 @@ impl Receiver {
         true
     }
 
-    /// `irl_close_ffmpeg`. The hardware device goes with the connection it was
-    /// created for; the software scaler belongs to the video thread and is not
-    /// touched here.
+    /// The hardware device goes with the connection it was created for; the
+    /// software scaler belongs to the video thread and is not touched here.
     pub(super) fn close_ffmpeg(&mut self) {
         self.audio_dec = None;
         // The video decoder belongs to the video thread; it drops it on the
@@ -420,7 +419,6 @@ impl Receiver {
         self.flags.reset();
     }
 
-    /// `irl_prepare_new_connection`.
     pub(super) fn prepare_new_connection(&mut self) {
         self.shared.flags.reconnecting.store(false, Relaxed);
         self.shared.video_flags.first_keyframe.store(false, Relaxed);
@@ -436,7 +434,7 @@ impl Receiver {
         crate::audio::hold::reset_connection(&self.shared, &mut state);
     }
 
-    /// `irl_wait_for_reconnect`. Returns whether the run is still active.
+    /// Returns whether the run is still active.
     pub(super) fn wait_for_reconnect(&mut self) -> bool {
         self.shared.flags.reconnecting.store(true, Relaxed);
         // Sampled once: a delay edited mid-wait should apply to the next
@@ -448,9 +446,9 @@ impl Receiver {
         self.shared.is_active()
     }
 
-    /// `irl_handle_stream_read_error`: log, tear the connection down, blank
-    /// the source, fade the buffered audio out and reset the per-connection
-    /// counters. The read loop reconnects immediately afterwards.
+    /// Log, tear the connection down, blank the source, fade the buffered
+    /// audio out and reset the per-connection counters. The read loop
+    /// reconnects immediately afterwards.
     pub(super) fn handle_stream_read_error(&mut self, err: ffmpeg::Error) {
         let shared = self.shared.clone();
         shared.flags.reconnecting.store(true, Relaxed);
@@ -523,9 +521,9 @@ impl Receiver {
         // from separate reads: its three inputs are only meaningful against
         // each other, and the audio thread updates them together.
         //
-        // The rest of what other threads write are atomics, so unlike the C
-        // they need no lock at all — and the stats line is the last place the
-        // audio_state / video queue lock edge should be introduced.
+        // The rest of what other threads write are atomics and need no lock,
+        // and the stats line must not introduce an audio_state / video queue
+        // lock edge.
         let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
             let skew = crate::source::av_skew_ms(shared, &state);
@@ -581,11 +579,9 @@ impl Receiver {
                 0.0
             },
             lifetime.video_queue_drops.load(Relaxed),
-            // The compressed video queue: where the stream's latency is
-            // actually held. Its duration should track the Target Buffer, and
-            // its size is what a deep buffer costs at this bitrate — the
-            // decoded side is bounded by VIDEO_DECODE_LEAD_MS whatever this
-            // says.
+            // The compressed video queue holds the stream's latency: its
+            // duration should track the Target Buffer, and its size is what a
+            // deep buffer costs at this bitrate.
             shared.video.len(),
             lifetime.video_queue_peak.load(Relaxed),
             shared.video.bytes() / 1024,

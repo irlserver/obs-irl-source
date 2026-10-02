@@ -95,20 +95,14 @@ fn drain_audio_frames(
 }
 
 /// The video decoder is never flushed on a corruption burst, unlike the audio
-/// one. `avcodec_flush_buffers` empties the reference picture buffer and clears
-/// the decoder's recovery state, and neither the H.264 nor the HEVC decoder can
-/// produce a real picture again until the next IDR/CRA: h264dec paints every
-/// frame gray until it sees a recovery point, and the HEVC decoder synthesizes
-/// each missing reference as a flat mid-gray frame that every later P-frame is
-/// predicted from. So the flush turned "a few damaged frames" into a whole GOP
-/// of gray — one to two seconds at the keyframe intervals IRL encoders use — on
-/// exactly the lossy streams it was meant to help. A decoder error on a live
-/// stream is a property of the packet, not of the decoder's state; the next
-/// intact packet decodes fine without any reset, and the reference chain heals
-/// at the next keyframe either way. The burst is still counted and logged so it
-/// shows up in diagnostics.
+/// one. `avcodec_flush_buffers` empties the reference picture buffer, and
+/// neither the H.264 nor the HEVC decoder produces a real picture again until
+/// the next IDR/CRA (h264dec paints gray until a recovery point; the HEVC
+/// decoder synthesizes each missing reference as flat mid-gray). A flush
+/// would turn a few damaged frames into one to two seconds of gray. The next
+/// intact packet decodes fine without a reset, and the reference chain heals
+/// at the next keyframe either way.
 impl Receiver {
-    /// `irl_handle_audio_packet`.
     pub(super) fn handle_audio_packet(&mut self) {
         let audio_tb = self.audio_tb;
         let Self {
@@ -149,10 +143,7 @@ impl Receiver {
 
     /// The video half of the read loop: hand the packet to the video thread.
     ///
-    /// Nothing is decoded here. The stream's latency is held as compressed
-    /// packets and decoded just before display, which is what makes a deep
-    /// Target Buffer affordable at 4K — and it has to be the video thread that
-    /// decodes, because this one spends a stall blocked in `av_read_frame`.
+    /// Nothing is decoded here; see [`crate::shared::VideoChannel`] for why.
     pub(super) fn push_video_packet(&mut self) {
         // Only used to bound the queue by media duration; output timing comes
         // from the decoded frame's own PTS, after repair.

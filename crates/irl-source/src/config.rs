@@ -1,5 +1,4 @@
-//! Settings loading, restart diffing and hot apply (port of
-//! `config_load` / `config_requires_restart` / `config_apply_hot`).
+//! Settings loading, restart diffing and hot apply.
 
 use std::ffi::{CStr, CString};
 use std::sync::atomic::Ordering::Relaxed;
@@ -25,12 +24,11 @@ pub struct Config {
 }
 
 impl Config {
-    /// `config_load`.
     pub fn load(settings: &Data<'_>) -> Self {
-        // `Data::get_str` already returns `None` for an empty string, which
-        // is the C `url && *url` idiom. An interior NUL cannot survive
-        // `obs_data_get_string`, but a lossy conversion is still cheaper than
-        // a panic path: an unusable URL becomes "no URL".
+        // `Data::get_str` already returns `None` for an empty string. An
+        // interior NUL cannot survive `obs_data_get_string`, but a lossy
+        // conversion is still cheaper than a panic path: an unusable URL
+        // becomes "no URL".
         let url = settings
             .get_str(c"url")
             .and_then(|s| CString::new(s).ok())
@@ -63,8 +61,7 @@ impl Config {
                     .clamp(consts::CATCHUP_PERCENT_MIN, consts::CATCHUP_PERCENT_MAX),
                 wait_for_keyframe: settings.get_bool(c"wait_for_keyframe"),
                 clear_on_disconnect: settings.get_bool(c"clear_on_disconnect"),
-                // A non-positive target falls back to the default, as
-                // `config_load` does.
+                // A non-positive target falls back to the default.
                 watermarks: Watermarks::derive(settings.get_i64(c"buffer_target_ms") as i32),
             },
             close_when_inactive: settings.get_bool(c"close_when_inactive"),
@@ -89,7 +86,7 @@ impl Config {
             || self.stream.low_latency_audio != other.stream.low_latency_audio
     }
 
-    /// `config_apply_hot`: swap the live settings into a running receiver.
+    /// Swap the live settings into a running receiver.
     ///
     /// Lock order is the documented one: `audio_state`, then the jitter
     /// buffer, then the watermark mutex. Nothing below takes any of them.

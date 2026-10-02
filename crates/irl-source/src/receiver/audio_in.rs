@@ -22,8 +22,7 @@ pub struct AudioIntake {
 }
 
 impl AudioIntake {
-    /// Per-connection reset (`irl_prepare_new_connection` for the audio
-    /// fields): drops the resampler, resets PTS repair.
+    /// Per-connection reset: drops the resampler, resets PTS repair.
     pub fn reset(&mut self) {
         self.swr = None;
         if let Some(pts) = self.pts.as_mut() {
@@ -32,8 +31,8 @@ impl AudioIntake {
         self.last_sample = LastSample::default();
     }
 
-    /// (Re)initialise PTS repair for the audio stream's time base
-    /// (`pts_repair_init` at decoder open and after a decoder flush).
+    /// (Re)initialise PTS repair for the audio stream's time base, at decoder
+    /// open and after a decoder flush.
     pub fn init_pts_repair(&mut self, tb: ffmpeg::Rational) {
         self.pts = Some(PtsRepair::new(
             consts::SMALL_GAP_MS,
@@ -98,8 +97,7 @@ impl AudioIntake {
                     consts::AUDIO_RECOVERY_HOLD_US,
                 );
                 drop(state);
-                // The video half of `irl_reset_stream_timing_state`. Video
-                // decode runs on its own thread now, so this is a request
+                // Video decode runs on its own thread, so this is a request
                 // rather than a write: it picks it up on its next cycle.
                 shared.video_flags.corrupted.store(false, Relaxed);
                 shared.video_flags.timeline_reset.store(true, Relaxed);
@@ -130,9 +128,8 @@ impl AudioIntake {
                 None => return,
             }
         } else if inserted_silence {
-            // The C faded the decoder's own buffer in place; a decoded frame
-            // is borrowed immutably here, so the (rare) fade path copies it
-            // into the scratch first.
+            // A decoded frame is borrowed immutably, so the (rare) fade path
+            // copies it into the scratch first.
             let Some(bytes) = frame.interleaved_f32_bytes() else {
                 return;
             };
@@ -180,7 +177,7 @@ impl AudioIntake {
         state.decoded_frame_samples = out_samples;
     }
 
-    /// The PTS half of `irl_handle_audio_frame`: the frame's timestamp (or an
+    /// The PTS half of [`Self::handle_frame`]: the frame's timestamp (or an
     /// extrapolated one), its duration, and the repair verdict. `None` drops
     /// the frame.
     fn evaluate_pts(
@@ -215,7 +212,7 @@ impl AudioIntake {
         Some((verdict, Rational::new(tb_num, tb_den), duration))
     }
 
-    /// The format-change half of `irl_handle_audio_frame`: (re)build the
+    /// The format-change half of [`Self::handle_frame`]: (re)build the
     /// jitter buffer and restart the output clock. Returns false when the
     /// buffer could not be configured (the frame is then dropped).
     fn ensure_buffer_format(&mut self, shared: &Shared, out_rate: i32, out_channels: i32) -> bool {
@@ -260,7 +257,7 @@ impl AudioIntake {
         reconfigured
     }
 
-    /// The `PTS_ACTION_SILENCE` branch: shaped silence, timestamped to end
+    /// The [`PtsAction::Silence`] branch: shaped silence, timestamped to end
     /// where the repaired frame begins.
     fn insert_silence(
         &mut self,
@@ -351,7 +348,6 @@ impl AudioIntake {
     }
 }
 
-/// `audio_frame_duration_ms`.
 fn audio_frame_duration_ms(samples: i32, sample_rate: i32) -> i32 {
     if samples <= 0 || sample_rate <= 0 {
         return 0;

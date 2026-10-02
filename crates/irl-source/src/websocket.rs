@@ -1,4 +1,4 @@
-//! obs-websocket vendor extension (port of `src/websocket-vendor.c`).
+//! obs-websocket vendor extension.
 //!
 //! Exposes the per-source stats over obs-websocket so an overlay, a bot or an
 //! IRL dashboard can read them from another machine, without the Lua or
@@ -21,7 +21,6 @@ use irl_core::consts;
 use irl_core::stats::{FIELDS, StatKind};
 use obs::{CallData, Data, DataArray, OwnedData, OwnedSource, SourceHandle};
 
-/// One vendor request handler.
 type RequestFn = fn(&Data<'_>, &OwnedData);
 
 /// Register the vendor and its requests.
@@ -166,7 +165,7 @@ fn get_stats(request: &Data<'_>, response: &OwnedData) {
     // calldata is a typed blob that cannot be enumerated, so the fields to
     // copy out have to be named: `FIELDS` is that list, shared with the proc
     // declaration and the snapshot writer. The names are the JSON keys
-    // clients see. An absent field copies as zero, as in the C.
+    // clients see. An absent field copies as zero.
     for (name, kind) in FIELDS {
         let Ok(key) = CString::new(*name) else {
             continue;

@@ -1,4 +1,4 @@
-//! Properties UI and defaults (port of `src/settings.c`).
+//! Properties UI and defaults.
 
 use std::ffi::CString;
 
@@ -8,10 +8,6 @@ use obs::{Data, Properties, TextType};
 use crate::module_text;
 use crate::source::IrlSource;
 
-/// `irl_source_get_defaults`.
-///
-/// `network_buffer_mb` is deliberately gone: nothing ever read it (the
-/// demuxer options use the constant), so it was removed rather than ported.
 pub fn defaults(settings: &Data<'_>) {
     settings.set_default_str(c"url", c"");
     crate::providers::defaults(settings);
@@ -29,7 +25,6 @@ pub fn defaults(settings: &Data<'_>) {
     settings.set_default_bool(c"clear_on_disconnect", consts::DEFAULT_CLEAR_ON_DISCONNECT);
 }
 
-/// `irl_source_get_properties`.
 pub fn properties(instance: Option<&IrlSource>) -> Properties {
     let props = Properties::new();
 
@@ -57,8 +52,8 @@ pub fn properties(instance: Option<&IrlSource>) -> Properties {
     // gaps with 287 underruns at the 120ms default), and riding those out is
     // the only way to avoid the concealment that inflates the A/V mapping and
     // holds video back with it. High-bitrate senders with deep buffering of
-    // their own stall for longer still, which is why the ceiling is
-    // `BUFFER_TARGET_MAX_MS` rather than the 2s it was.
+    // their own stall for longer still, hence the `BUFFER_TARGET_MAX_MS`
+    // ceiling.
     props.add_int(
         c"buffer_target_ms",
         module_text(c"TargetBuffer"),

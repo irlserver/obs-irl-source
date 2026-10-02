@@ -33,7 +33,7 @@ use irl_core::{
 };
 
 /// Settings latched when the stream opens; changing any of them forces a
-/// restart (`config_requires_restart`).
+/// restart (`Config::requires_restart`).
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub url: CString,
@@ -42,7 +42,7 @@ pub struct StreamConfig {
     pub low_latency_audio: bool,
 }
 
-/// Settings swapped in place while the workers run (`config_apply_hot`).
+/// Settings swapped in place while the workers run (`Config::apply_hot`).
 pub struct HotConfig {
     pub reconnect_delay_s: AtomicI32,
     pub adaptive_speed: AtomicBool,
@@ -79,13 +79,10 @@ impl HotConfig {
     }
 }
 
-/// The two video-decode flags the audio path also touches, now that decode
-/// lives on the video thread.
-///
-/// `first_keyframe` gates audio intake as well as video output (audio is not
-/// admitted before the first keyframe), and the receiver clears `corrupted`
-/// when PTS repair resets the timeline. Everything else about video decode is
-/// owned outright by the video thread and is not here.
+/// The video-decode flags the audio path also touches. `first_keyframe` gates
+/// audio intake as well as video output, and the receiver clears `corrupted`
+/// when PTS repair resets the timeline. The rest of video decode state is the
+/// video thread's own.
 #[derive(Default)]
 pub struct VideoFlags {
     pub first_keyframe: AtomicBool,
@@ -98,20 +95,19 @@ pub struct VideoFlags {
 
 /// Run-level flags.
 pub struct RunFlags {
-    /// `thread_active`. An `Arc` because the FFmpeg interrupt watch shares it,
-    /// so a stop request reaches a receiver blocked inside `av_read_frame`.
+    /// An `Arc` because the FFmpeg interrupt watch shares it, so a stop
+    /// request reaches a receiver blocked inside `av_read_frame`.
     pub thread_active: Arc<AtomicBool>,
-    /// `reconnecting`.
     pub reconnecting: AtomicBool,
-    /// `audio_stream_present`: "this connection carries audio", mirrored for
-    /// the video thread, which must not touch `audio_stream_idx`.
+    /// "This connection carries audio", mirrored for the video thread, which
+    /// must not touch the receiver's `audio_stream_idx`.
     pub audio_present: AtomicBool,
     /// "This connection carries video", for the audio pump, which waits for a
     /// skew reading before it primes (`audio::hold::prime_may_wait`).
     pub video_present: AtomicBool,
 }
 
-/// Everything the C guarded with `audio_state_lock` that is not a counter.
+/// Audio timing state that is not a counter, under `Shared::audio_state`.
 #[derive(Debug, Default)]
 pub struct AudioState {
     // Output clock: `ts = anchor + samples / rate`, anchored once at prime.
@@ -238,15 +234,11 @@ impl ConnStats {
     }
 }
 
-/// Counters cumulative for the source's life: exactly the set the C
-/// `reset_runtime_state()` left alone.
+/// Counters cumulative for the source's life, carried across runs.
 #[derive(Default)]
 pub struct LifetimeStats {
     pub video_queue_drops: AtomicU64,
-    /// Peak packets queued for decode. Was the peak count of *decoded* frames
-    /// pinning hardware surfaces, which no longer exist: the receiver queues
-    /// compressed packets and the video thread decodes them just before
-    /// display.
+    /// Peak packets queued for decode.
     pub video_queue_peak: AtomicI32,
     pub pacing_now: AtomicI32,
     pub pacing_peak: AtomicI32,
@@ -264,22 +256,17 @@ pub struct LifetimeStats {
 
 /// The receiver → video queue: **compressed packets**, not decoded frames.
 ///
-/// This is where the stream's configured latency is held. Video has to be
-/// delayed by the same amount as audio (its due time is the frame PTS plus the
-/// audio playout offset), and holding that as decoded frames does not scale:
-/// 1080p NV12 is ~3.1MB a frame and 4K P010 ~24.9MB, so an 8s Target Buffer at
-/// 4K60 would be ~6GB. The same 8s of packets is ~20MB.
-///
-/// So the receiver decodes nothing: it pushes packets here and the video thread
-/// decodes them just before they are due, keeping only
-/// [`consts::VIDEO_DECODE_LEAD_MS`] of decoded frames alive at a time. That is
-/// also why video decode cannot live on the receiver thread — during a network
-/// stall the receiver is blocked in `av_read_frame`, which is exactly when the
-/// video thread must keep draining the buffer it has.
+/// This is where video's share of the configured latency is held. Held as
+/// decoded frames it would not scale (8s of 4K60 is ~6GB; the same 8s of
+/// packets is ~20MB), so the video thread decodes each packet just before it
+/// is due and keeps only [`irl_core::consts::VIDEO_DECODE_LEAD_MS`] of
+/// decoded frames alive. Decode cannot live on the receiver thread either:
+/// during a network stall it is blocked in `av_read_frame`, which is exactly
+/// when video must keep draining the buffer it has.
 ///
 /// Bounded by media duration and bytes. Overflow drops from the front, which
-/// costs artifacts until the next keyframe; it should not happen, because the
-/// receiver's own read backpressure stops ingest long before this fills.
+/// costs artifacts until the next keyframe; the receiver's read backpressure
+/// stops ingest long before this fills.
 #[derive(Default)]
 pub struct VideoChannel {
     q: Mutex<VideoQueue>,
@@ -287,8 +274,8 @@ pub struct VideoChannel {
 }
 
 /// A packet waiting to be decoded, with everything the queue needs to bound
-/// itself. `pts_ns` is approximate — it is only used for the span bound, while
-/// output timing comes from the decoded frame's own PTS.
+/// itself. `pts_ns` is approximate: it only feeds the span bound, and output
+/// timing comes from the decoded frame's own PTS.
 pub struct TimedPacket {
     pub packet: ffmpeg::Packet,
     pub pts_ns: i64,
@@ -448,11 +435,9 @@ impl VideoChannel {
     /// Whether the video thread has something to do right now.
     ///
     /// A queued packet is only work if there is somewhere to put what it
-    /// decodes: `has_room` is the pacing queue's. Treating a queued message as
-    /// proof of work spins the thread at full CPU whenever the pacing queue is
-    /// at its decode lead and the head frame is not due — which, once the
-    /// channel carries the whole configured latency as packets, is the *normal*
-    /// steady state at any Target Buffer above that lead.
+    /// decodes (`has_room` is the pacing queue's). Counting any queued message
+    /// as work would spin the thread at full CPU whenever the pacing queue
+    /// sits at its decode lead, which is the normal steady state.
     pub fn has_work(&self, has_room: bool) -> bool {
         self.q.lock().has_work(has_room)
     }

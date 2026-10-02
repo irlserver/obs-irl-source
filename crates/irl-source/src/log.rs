@@ -32,7 +32,7 @@ pub fn emit(level: obs::log::Level, args: std::fmt::Arguments<'_>) {
 /// The redacted form of an input URL: protocol, hostname and port only.
 /// Paths, userinfo, query parameters and fragments can all contain
 /// credentials (SRT passphrases, RTMP stream keys), so they are never copied
-/// into the log. Port of the C `irl_log_input_url` (master 706372c).
+/// into the log.
 pub fn redacted_input_url(url: &std::ffi::CStr) -> String {
     let p = ffmpeg::url_split(url);
     if p.protocol.is_empty() {
@@ -75,13 +75,11 @@ const SENSITIVE_PARAMS: &[&str] = &[
 
 /// One line of FFmpeg's own logging, with every credential removed.
 ///
-/// FFmpeg logs whole URLs at warning and error level — `libavformat/libsrt.c`
-/// prints `h->filename` for "Connection to %s failed", which is the user's
-/// full `srt://host:port?passphrase=…&streamid=…` — so routing its log into
-/// the OBS log (see [`route_ffmpeg_log`]) would otherwise undo the redaction
-/// [`redacted_input_url`] exists for. Every `scheme://…` token is cut down to
-/// the same protocol/host/port form, and the value of any
-/// [`SENSITIVE_PARAMS`] key that survives outside a URL is dropped.
+/// FFmpeg logs whole URLs at warning and error level (`libavformat/libsrt.c`
+/// prints `h->filename`, the user's full `srt://…?passphrase=…&streamid=…`,
+/// for "Connection to %s failed"). Every `scheme://…` token is cut down to the
+/// [`redacted_input_url`] form, and the value of any `SENSITIVE_PARAMS` key
+/// that survives outside a URL is dropped.
 pub fn redacted_log_line(line: &str) -> String {
     redact_sensitive_params(&redact_urls(line))
 }
@@ -190,9 +188,8 @@ fn is_param_terminator(c: char) -> bool {
 /// Route the bundled FFmpeg's warnings and errors into the OBS log as
 /// `[irl-source] [ffmpeg] <line>`, redacted.
 ///
-/// Port of the C `irl_ffmpeg_log` (master f06d705), which the plugin needs
-/// because its FFmpeg is statically linked and hidden behind the module's
-/// symbol map: the host's own `av_log` callback cannot see it, and FFmpeg's
+/// The bundled FFmpeg is statically linked and hidden behind the module's
+/// symbol map, so the host's own `av_log` callback cannot see it, and FFmpeg's
 /// default one writes to a stderr a Windows OBS does not have.
 pub fn route_ffmpeg_log() {
     ffmpeg::log::route_to(|level, line| {

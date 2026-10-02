@@ -1,5 +1,5 @@
-//! Source lifecycle (port of `src/irl-source.c`): create, destroy, update,
-//! tick, the show/activate gating, the media controls and the stats proc.
+//! Source lifecycle: create, destroy, update, tick, the show/activate gating,
+//! the media controls and the stats proc.
 
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
@@ -40,8 +40,7 @@ struct ObsState {
 /// The IRL source instance.
 pub struct IrlSource {
     source: SourceHandle,
-    /// Counters that outlive a connection (the set the C `reset_runtime_state`
-    /// deliberately skipped).
+    /// Counters that outlive a connection.
     lifetime: Arc<LifetimeStats>,
     /// Owns the `get_stats` closure; dropped in [`Drop`], before libobs tears
     /// the source's proc handler down.
@@ -89,10 +88,8 @@ impl Source for IrlSource {
             running: None,
         }));
 
-        // Register the stats proc so scripts and overlays can query state.
-        // The obs-websocket vendor extension calls this same proc, so both
-        // transports are guaranteed to report the same numbers. The field
-        // list itself lives in `irl_core::stats::FIELDS`.
+        // The obs-websocket vendor extension calls this same proc, so scripts
+        // and websocket clients see the same numbers.
         let proc_cb = match CString::new(proc_declaration()) {
             Ok(decl) => {
                 let state = Arc::clone(&obs_state);
@@ -306,8 +303,8 @@ impl Source for IrlSource {
 }
 
 impl Drop for IrlSource {
-    /// `irl_source_destroy`. The frame is not cleared: the source itself is
-    /// going away, so there is nothing left to show it on.
+    /// The frame is not cleared: the source itself is going away, so there is
+    /// nothing left to show it on.
     fn drop(&mut self) {
         stop_receiver(&mut self.obs_state.lock(), self.source, false);
         // Explicit for order's sake: the closure the callback owns holds an
@@ -328,9 +325,8 @@ fn should_run_receiver(state: &ObsState, source: SourceHandle) -> bool {
         && (!state.config.close_when_inactive || source.showing())
 }
 
-/// Start the three workers for a fresh [`Shared`] (which is what replaces the
-/// C `reset_runtime_state`: every per-connection field starts zeroed and the
-/// lifetime counters are carried over untouched).
+/// Start the three workers for a fresh [`Shared`]: every per-connection field
+/// starts zeroed and the lifetime counters carry over untouched.
 fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<LifetimeStats>) {
     if state.running.is_some() || !should_run_receiver(state, source) {
         return;
@@ -344,8 +340,8 @@ fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<Lif
     );
     shared.flags.thread_active.store(true, Relaxed);
 
-    // Spawned in the order the C created them, with the same staged rollback:
-    // a thread that never started must not leave the others running.
+    // Staged rollback: a thread that never started must not leave the others
+    // running.
     let audio = match spawn_worker("irl-audio", Arc::clone(&shared), audio::audio_thread) {
         Ok(handle) => handle,
         Err(err) => {
@@ -461,13 +457,10 @@ fn fit_to_canvas(source: SourceHandle) {
 // ── Stats ─────────────────────────────────────────────────────
 
 /// `av_skew_ms`: video PTS minus audio PTS of what last reached the plugin,
-/// in ms. Both values are stamped by the receiver at arrival (audio as it
-/// writes the jitter buffer, video as it pushes the packet), so the
-/// difference is the sender's timestamp skew before any buffering here. The
-/// decoded-frame PTS would not do for the video side: a packet waits in the
-/// channel for its due time, standing video delay included, so that PTS
-/// trails arrival by the queue depth and the delay would read as a skew.
-/// Zero until both streams have delivered something.
+/// in ms. Both are stamped by the receiver at arrival, so the difference is
+/// the sender's skew before any buffering here. The decoded-frame PTS would
+/// trail arrival by the queue depth and read the video delay as skew. Zero
+/// until both streams have delivered something.
 pub(crate) fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     let video_pts_ns = shared.conn.video_arrival_pts_ns.load(Relaxed);
     if video_pts_ns == 0 || audio.latest_audio_stream_pts_ns == 0 {
