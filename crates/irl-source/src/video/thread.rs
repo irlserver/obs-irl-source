@@ -111,6 +111,9 @@ pub struct VideoThread {
     /// hold_built_ns`) as of the last cycle; `None` until the first read after
     /// a reset. See [`Self::absorb_audio_hold`].
     hold_built_seen_ns: Option<u64>,
+    /// The OBS clock, read for every timing decision this thread makes.
+    /// Injectable so tests can step it; production reads `os_gettime_ns`.
+    now_ns: Box<dyn Fn() -> u64 + Send>,
     /// The OBS canvas tick. Injectable so tests can drive pacing without a
     /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
     /// video state and faults when `obs_startup` never ran.
@@ -155,6 +158,7 @@ impl VideoThread {
             delay: VideoDelay::default(),
             arrival: ArrivalFloor::default(),
             hold_built_seen_ns: None,
+            now_ns: Box::new(obs::time::gettime_ns),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
             sink,
         }
@@ -162,7 +166,7 @@ impl VideoThread {
 
     pub fn run(&mut self) {
         while self.shared.is_active() {
-            let wait = self.run_once(obs::time::gettime_ns());
+            let wait = self.run_once();
             if wait.is_zero() {
                 continue;
             }
@@ -180,9 +184,10 @@ impl VideoThread {
         self.finish();
     }
 
-    /// One pass of the loop body, at OBS clock `now_ns`. Returns how long to
-    /// sleep before the next pass; zero means "go round again immediately".
-    pub fn run_once(&mut self, now_ns: u64) -> Duration {
+    /// One pass of the loop body. Returns how long to sleep before the next
+    /// pass; zero means "go round again immediately".
+    pub fn run_once(&mut self) -> Duration {
+        let now_ns = self.now_ns();
         if self.shared.video.take_clear() {
             // The receiver already dropped `video_queue`; the paced frames
             // behind it must go too, or the blank would be repainted a lead
@@ -227,7 +232,7 @@ impl VideoThread {
         self.publish_counters();
         // Fresh clock for the sleep: the emit above may have taken long
         // enough to make the next frame due already.
-        self.sleep_hint(obs::time::gettime_ns(), slack_ns)
+        self.sleep_hint(self.now_ns(), slack_ns)
     }
 
     /// Exit path: drop everything, including the decoder this thread owns.
@@ -668,6 +673,10 @@ impl VideoThread {
         self.shared.conn.video_delay_ns.store(0, Relaxed);
     }
 
+    pub(crate) fn now_ns(&self) -> u64 {
+        (self.now_ns)()
+    }
+
     /// The canvas tick, or the default when libobs has not reported one.
     fn canvas_tick_ns(&self) -> u64 {
         (self.canvas_tick_ns)().unwrap_or(consts::VIDEO_CANVAS_TICK_DEFAULT_NS)
@@ -731,6 +740,14 @@ impl VideoThread {
     }
 
     /* ── Test seams ───────────────────────────────────────── */
+
+    /// Replace the OBS clock (tests only: `os_gettime_ns` is libobs's
+    /// monotonic clock and cannot be stepped from here).
+    #[must_use]
+    pub fn with_clock(mut self, now_ns: Box<dyn Fn() -> u64 + Send>) -> Self {
+        self.now_ns = now_ns;
+        self
+    }
 
     /// Replace the canvas-tick source (tests only).
     #[must_use]

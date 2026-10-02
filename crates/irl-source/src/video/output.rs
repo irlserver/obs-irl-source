@@ -177,7 +177,7 @@ impl VideoThread {
         // time base captured at stream open, because the video thread must not
         // touch the format context (it can be freed mid-reconnect).
         let pts_ns = frame.pts();
-        let now = obs::time::gettime_ns();
+        let now = self.now_ns();
 
         let (mapping, startup_warmup_ms) = {
             let state = self.shared.audio_state();
@@ -254,7 +254,7 @@ impl VideoThread {
     /// rides on the offset, so a reschedule keeps it.
     pub fn playout_offset(&mut self) -> Option<i64> {
         let offset_ns = self.shared.audio_state().playout_mapping().offset_ns();
-        let now = obs::time::gettime_ns();
+        let now = self.now_ns();
 
         if let Some(offset_ns) = offset_ns {
             self.playout_offset_ns = offset_ns;
