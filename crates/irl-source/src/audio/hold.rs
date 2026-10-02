@@ -39,7 +39,7 @@ pub fn observe_video_packet(shared: &Shared, received_ns: u64, dts_ns: i64) {
     state.hold.observe(received_ns, audio_pts_ns - dts_ns);
 
     let covered_ms = covered_ms(shared, &state);
-    let change = if !state.primed {
+    let change = if !state.clock.is_primed() {
         state.hold.before_prime(state.hold_ms, covered_ms)
     } else if regulates(shared) {
         state.hold.regulate(received_ns, state.hold_ms, covered_ms)
@@ -190,7 +190,7 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
         }
     }
 
-    if state.primed {
+    if state.clock.is_primed() {
         let moved_ns = u64::from(to_ms.abs_diff(from_ms)) * 1_000_000;
         state.hold_unbuilt_ns = if to_ms > from_ms {
             state.hold_unbuilt_ns + moved_ns
@@ -215,7 +215,7 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
             "Video has arrived at most {skew_ms}ms behind its audio for {}s; releasing the audio hold from {from_ms}ms to {to_ms}ms{in_effect}",
             consts::AUDIO_HOLD_RELAX_WINDOW_MS / 1000
         );
-    } else if state.primed {
+    } else if state.clock.is_primed() {
         irl_info!(
             "Video has arrived {skew_ms}ms behind its audio for {}s; holding audio back {to_ms}ms instead of {from_ms}ms to keep lip sync, built up by playing up to 2% slow{in_effect}",
             consts::AUDIO_HOLD_RAISE_WINDOW_MS / 1000

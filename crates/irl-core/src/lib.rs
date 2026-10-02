@@ -37,5 +37,6 @@ pub use speed::{
     DrainWatch, SpeedCarry, SpeedController, SpeedInputs, SpeedTrim, StuckReport, catchup_speed_max,
 };
 pub use stats::{StatKind, StatValue, StatsSnapshot};
+pub use timing::OutputClock;
 pub use url_opts::awaits_caller;
 pub use video_delay::{DelayRaise, DelayRelax, RampStep, VideoDelay};

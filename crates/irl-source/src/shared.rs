@@ -29,7 +29,8 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use irl_core::arrival::ArrivalFloor;
 use irl_core::{
-    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, SpeedCarry, SpeedTrim, Watermarks,
+    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, OutputClock, SpeedCarry, SpeedTrim,
+    Watermarks,
 };
 
 /// Settings latched when the stream opens; changing any of them forces a
@@ -110,10 +111,7 @@ pub struct RunFlags {
 /// Audio timing state that is not a counter, under `Shared::audio_state`.
 #[derive(Debug, Default)]
 pub struct AudioState {
-    // Output clock: `ts = anchor + samples / rate`, anchored once at prime.
-    pub primed: bool,
-    pub anchor_ns: u64,
-    pub samples: u64,
+    pub clock: OutputClock,
 
     // Playout mapping (audio → OBS clock), the lip-sync source for video.
     pub latest_obs_end_ts_ns: u64,

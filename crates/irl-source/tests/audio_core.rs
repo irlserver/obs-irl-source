@@ -197,12 +197,12 @@ fn a_pump_burst_stops_when_disconnect_pauses_playback() {
     }
     assert!(pump.pump_once());
     let count = recorder.len();
-    let samples = shared.audio_state().samples;
+    let samples = shared.audio_state().clock.samples();
     shared.flags.reconnecting.store(true, Relaxed);
     clock.fetch_add(1_000_000_000, Relaxed);
     assert!(!pump.pump_once());
     assert_eq!(recorder.len(), count);
-    assert_eq!(shared.audio_state().samples, samples);
+    assert_eq!(shared.audio_state().clock.samples(), samples);
 }
 
 /// A slow transport close must not submit a fade from the stopped clock:
@@ -222,8 +222,7 @@ fn disconnect_fade_does_not_submit_stale_audio() {
                 .unwrap()
                 .write_pts(&data, 1_000_000_000);
             let mut state = shared.audio_state();
-            state.primed = true;
-            state.anchor_ns = now + 80_000_000;
+            state.clock.restart(now + 80_000_000);
             obs_irl_source::receiver::stream::fade_out_buffered_audio(
                 &shared,
                 &mut state,
@@ -241,7 +240,8 @@ fn disconnect_fade_does_not_submit_stale_audio() {
                     "{rate}Hz disconnect submitted audio 920ms late"
                 );
                 assert_eq!(
-                    state.samples, 0,
+                    state.clock.samples(),
+                    0,
                     "a discarded fade must not claim output samples"
                 );
             }
@@ -459,7 +459,7 @@ fn an_idle_pump_reports_when_it_next_has_work() {
 
     // Primed and queued ahead: it now knows when the lead runs down, and that
     // is further away than a 1ms poll.
-    assert!(shared.audio_state().primed);
+    assert!(shared.audio_state().clock.is_primed());
     let hint = pump.idle_sleep_ms();
     assert!(
         hint > consts::AUDIO_PUMP_SLEEP_MS && hint <= consts::AUDIO_PUMP_MAX_SLEEP_MS,
@@ -491,7 +491,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     let mut pts_ns = 0i64;
     write_chunks(&shared, &mut pts_ns, 6, 0.1);
     while pump.pump_once() {}
-    assert!(shared.audio_state().primed, "never primed");
+    assert!(shared.audio_state().clock.is_primed(), "never primed");
 
     // The input goes quiet. Wall clock runs well past the stall threshold.
     for _ in 0..40 {
@@ -505,7 +505,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
         "a quiet low-latency source must not restart the output clock"
     );
     assert!(
-        !shared.audio_state().primed,
+        !shared.audio_state().clock.is_primed(),
         "the clock should be stood down, not left running"
     );
 
@@ -513,7 +513,7 @@ fn a_quiet_low_latency_input_suspends_the_clock_instead_of_restart_looping() {
     write_chunks(&shared, &mut pts_ns, 6, 0.2);
     while pump.pump_once() {}
     assert!(
-        shared.audio_state().primed,
+        shared.audio_state().clock.is_primed(),
         "did not re-prime on real audio"
     );
     assert_eq!(shared.conn.audio_output_restarts.load(Relaxed), 0);
@@ -577,7 +577,7 @@ fn the_buffer_settles_on_the_configured_target_with_aac_chunks() {
         clock.fetch_add(AAC_NS, Relaxed);
     }
 
-    assert!(shared.audio_state().primed, "never primed");
+    assert!(shared.audio_state().clock.is_primed(), "never primed");
     let tail = &levels[levels.len() - 1000..];
     let mean = tail.iter().map(|&f| f as f64).sum::<f64>() / tail.len() as f64;
     let chunk_ms = (AAC_NS / 1_000_000) as f64;

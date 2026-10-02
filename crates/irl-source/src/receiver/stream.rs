@@ -147,7 +147,7 @@ pub fn fade_out_buffered_audio(
     let Some(buf) = guard.as_mut() else { return };
 
     let buffered_ms = buf.fill_ms();
-    if buffered_ms <= 0 || !state.primed {
+    if buffered_ms <= 0 || !state.clock.is_primed() {
         return;
     }
 
@@ -179,10 +179,10 @@ pub fn fade_out_buffered_audio(
     // after a slow teardown or a stalled worker: OBS would compensate for
     // the late audio by growing its global buffering. A disconnect already
     // discards the remaining input, so discard an expired fade as well.
-    if irl_core::timing::output_next_ts(state.anchor_ns, state.samples, sample_rate) < now_ns() {
+    if state.clock.next_ts(sample_rate) < now_ns() {
         return;
     }
-    let timestamp = audio::output_claim(state, frames, sample_rate);
+    let timestamp = state.clock.claim(frames, sample_rate);
     sink.output_audio(&obs::AudioFrame::interleaved(
         &fade_buf[..got],
         frames,

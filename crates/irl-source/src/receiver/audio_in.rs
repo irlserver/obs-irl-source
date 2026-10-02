@@ -244,9 +244,7 @@ impl AudioIntake {
             }
         };
 
-        state.primed = false;
-        state.anchor_ns = 0;
-        state.samples = 0;
+        state.clock.stand_down();
         state.out_last.forget();
         state.latest_buffered_end_pts_ns = 0;
         state.latest_audio_stream_pts_ns = 0;

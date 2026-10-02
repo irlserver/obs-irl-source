@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 use irl_core::consts;
-use irl_core::timing;
 
 use crate::shared::{AudioState, Shared};
 
@@ -62,20 +61,10 @@ impl AudioSink for obs::SourceHandle {
     }
 }
 
-/// Reserve `frames` on the sample-counter clock and return the OBS timestamp
-/// for them. Caller holds `audio_state`.
-pub fn output_claim(state: &mut AudioState, frames: u32, rate: u32) -> u64 {
-    let ts = timing::output_next_ts(state.anchor_ns, state.samples, rate);
-    state.samples += frames as u64;
-    ts
-}
-
 /// Output clock, playout mapping, fades and concealment back to the
 /// not-yet-primed state. Caller holds `audio_state`.
 pub fn reset_audio_timing_state(state: &mut AudioState) {
-    state.primed = false;
-    state.anchor_ns = 0;
-    state.samples = 0;
+    state.clock.stand_down();
     state.conceal_fade_pending = false;
     state.out_last = irl_core::LastSample::default();
     state.offset_baseline_ns = 0;

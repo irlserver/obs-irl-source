@@ -146,7 +146,7 @@ impl AudioPump {
         let lead_ns = timing::output_lead_ns(base_samples, fmt.rate, low_latency);
         let now = (self.now_ns)();
 
-        if !state.primed {
+        if !state.clock.is_primed() {
             // The speed is only computed after priming, so the controller
             // re-arms from 1.0 for as long as playback is unprimed, which is
             // the window every connection prep and runtime reset opens.
@@ -177,7 +177,7 @@ impl AudioPump {
             return true;
         }
 
-        if state.primed {
+        if state.clock.is_primed() {
             // Cap runaway concealment latency before it desyncs A/V. Runs
             // even on a healthy-lead cycle: the offset inflates from past
             // outages, not from the current queue depth.
@@ -185,7 +185,7 @@ impl AudioPump {
                 maybe_reanchor_offset(shared, state, now, chunk_ns, fmt.target_ms);
             }
 
-            let next_ts = timing::output_next_ts(state.anchor_ns, state.samples, fmt.rate as u32);
+            let next_ts = state.clock.next_ts(fmt.rate as u32);
 
             // Enough queued ahead of wall clock — nothing to do until the
             // lead runs down, and the output clock says exactly when that is.
@@ -215,13 +215,12 @@ impl AudioPump {
                     "Audio output stalled {}ms; restarting output clock",
                     (now - next_ts) / 1_000_000
                 );
-                state.anchor_ns = now + chunk_ns;
-                state.samples = 0;
+                state.clock.restart(now + chunk_ns);
                 state.conceal_fade_pending = true;
             }
         }
 
-        if !state.primed {
+        if !state.clock.is_primed() {
             let mut prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
             // Elsewhere the hold is part of the target already; low-latency
             // mode has none, and keeps the hold queued instead.
@@ -238,10 +237,8 @@ impl AudioPump {
                 return false;
             }
 
-            state.primed = true;
             state.hold_unbuilt_ns = 0;
-            state.anchor_ns = now + chunk_ns;
-            state.samples = 0;
+            state.clock.restart(now + chunk_ns);
             // Reads and writes are both whole decoded chunks, so the residual
             // can only ever be a multiple of one: a 120ms target is not a
             // level the buffer can hold, and the loop straddles it at 106 or
@@ -421,7 +418,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
             }
         }
 
-        let timestamp = super::output_claim(state, frames_out, fmt.rate as u32);
+        let timestamp = state.clock.claim(frames_out, fmt.rate as u32);
         let emitted: &[u8] = if use_speed_buf {
             &self.speed_scratch[..emit_bytes]
         } else {
@@ -484,7 +481,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
         // subsequent ones are pure silence.
         state.out_last.forget();
 
-        let timestamp = super::output_claim(state, frames as u32, fmt.rate as u32);
+        let timestamp = state.clock.claim(frames as u32, fmt.rate as u32);
         self.sink.output_audio(&obs::AudioFrame::interleaved(
             &self.pump_scratch[..silence_bytes],
             frames as u32,
@@ -599,9 +596,7 @@ impl BufferFormat {
 /// never gets here: its concealment keeps the counter moving, so a late clock
 /// there really is an output-side stall.
 fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u64, now_us: u64) {
-    state.primed = false;
-    state.anchor_ns = 0;
-    state.samples = 0;
+    state.clock.stand_down();
     state.latest_obs_end_ts_ns = 0;
     state.latest_buffered_end_pts_ns = 0;
     state.offset_baseline_set = false;
@@ -676,8 +671,7 @@ fn maybe_reanchor_offset(
         return;
     }
 
-    state.anchor_ns = now + chunk_ns;
-    state.samples = 0;
+    state.clock.restart(now + chunk_ns);
     state.latest_obs_end_ts_ns = 0;
     state.latest_buffered_end_pts_ns = 0;
     state.offset_baseline_set = false;
@@ -706,7 +700,7 @@ fn maybe_trim_hidden_backlog(
     if !shared.hot.adaptive_speed.load(Relaxed) {
         return false;
     }
-    if low_latency || state.primed {
+    if low_latency || state.clock.is_primed() {
         return false;
     }
     if chunk_count <= 1 {
