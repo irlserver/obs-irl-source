@@ -71,7 +71,7 @@ impl InterruptWatch {
     }
 
     /// Record the start of a blocking call (`av_gettime()`).
-    pub fn arm(&self) {
+    pub(crate) fn arm(&self) {
         self.io_start_us
             .store(crate::gettime_us() as u64, Ordering::Relaxed);
     }
@@ -104,7 +104,7 @@ impl InterruptWatch {
     /// Reported as "IRL Source fails to open an SRT stream that OBS's Media
     /// Source opens immediately" (irlserver/obs-irl-source#28): the media
     /// source's interrupt callback only checks for shutdown, so it just waits.
-    pub fn should_abort(&self) -> bool {
+    pub(crate) fn should_abort(&self) -> bool {
         if !self.active.load(Ordering::Relaxed) {
             return true;
         }
@@ -232,8 +232,7 @@ impl StreamRef<'_> {
         }
     }
 
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *const ffmpeg_sys_next::AVStream {
+    pub(crate) fn as_ptr(&self) -> *const ffmpeg_sys_next::AVStream {
         self.ptr
     }
 }
@@ -313,7 +312,7 @@ impl FormatContext {
         (0..count).filter_map(move |i| self.stream(i))
     }
 
-    pub fn stream(&self, index: usize) -> Option<StreamRef<'_>> {
+    fn stream(&self, index: usize) -> Option<StreamRef<'_>> {
         // SAFETY: `self.ptr` is an open context; `streams` is an array of
         // `nb_streams` non-null pointers.
         unsafe {
@@ -335,15 +334,6 @@ impl FormatContext {
         // SAFETY: `self.ptr` is an open context and `pkt` a live packet we own;
         // av_read_frame unrefs it before filling it in.
         Error::check(unsafe { ffmpeg_sys_next::av_read_frame(self.ptr, pkt.as_mut_ptr()) })
-    }
-
-    pub fn watch(&self) -> &Arc<InterruptWatch> {
-        &self.watch
-    }
-
-    #[doc(hidden)]
-    pub fn as_mut_ptr(&mut self) -> *mut ffmpeg_sys_next::AVFormatContext {
-        self.ptr
     }
 }
 
@@ -446,6 +436,6 @@ mod tests {
         let err = FormatContext::open(c"irl-nonexistent://nowhere", opts, watch)
             .err()
             .expect("opening a bogus protocol must fail");
-        assert!(err.code() < 0);
+        assert!(err.0 < 0);
     }
 }

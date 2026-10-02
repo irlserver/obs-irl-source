@@ -30,11 +30,6 @@ impl Packet {
         (unsafe { (*self.0).flags } & ffmpeg_sys_next::AV_PKT_FLAG_KEY) != 0
     }
 
-    pub fn pts(&self) -> i64 {
-        // SAFETY: as above.
-        unsafe { (*self.0).pts }
-    }
-
     /// Presentation timestamp, falling back to the decode timestamp, `None`
     /// when neither is set. Mirrors [`crate::Frame::best_effort_pts`]: live
     /// demuxers leave one or both unset often enough that the caller must not
@@ -90,13 +85,11 @@ impl Packet {
         unsafe { ffmpeg_sys_next::av_packet_unref(self.0) };
     }
 
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *const ffmpeg_sys_next::AVPacket {
+    pub(crate) fn as_ptr(&self) -> *const ffmpeg_sys_next::AVPacket {
         self.0
     }
 
-    #[doc(hidden)]
-    pub fn as_mut_ptr(&mut self) -> *mut ffmpeg_sys_next::AVPacket {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut ffmpeg_sys_next::AVPacket {
         self.0
     }
 }
@@ -119,7 +112,7 @@ mod tests {
         assert_eq!(pkt.size(), 0);
         assert_eq!(pkt.stream_index(), 0);
         assert!(!pkt.is_key());
-        assert_eq!(pkt.pts(), ffmpeg_sys_next::AV_NOPTS_VALUE);
+        assert_eq!(pkt.pts_or_dts(), None);
         pkt.unref();
         pkt.unref();
         assert_eq!(pkt.size(), 0);

@@ -29,7 +29,7 @@ fn opening_a_missing_file_fails_with_a_hard_error() {
 
     // The receiver logs `av_strerror` text and reconnects; neither EAGAIN nor
     // EOF, which are the two codes the decode path treats as "not an error".
-    assert!(err.code() < 0);
+    assert!(err.0 < 0);
     assert!(!err.is_eagain());
     assert!(!err.is_eof());
     assert!(!err.to_string().is_empty());
@@ -45,7 +45,7 @@ fn an_unknown_protocol_fails_rather_than_hanging() {
     .err()
     .expect("an unknown protocol must fail");
 
-    assert!(err.code() < 0);
+    assert!(err.0 < 0);
     assert!(!err.is_eagain());
 }
 

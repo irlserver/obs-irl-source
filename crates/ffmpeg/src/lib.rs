@@ -57,11 +57,6 @@ impl Error {
         self.0 == sys::AVERROR_EOF
     }
 
-    /// `AVERROR(ERANGE)` and friends, for option-setting diagnostics.
-    pub fn code(&self) -> c_int {
-        self.0
-    }
-
     /// `AVERROR(ENOMEM)` — every allocation failure in this crate.
     pub(crate) const fn nomem() -> Self {
         Error(-(sys::ENOMEM as c_int))
@@ -223,7 +218,12 @@ pub fn hwdevice_type_name(kind: AVHWDeviceType) -> &'static str {
 }
 
 /// `av_image_get_buffer_size(fmt, w, h, align)`.
-pub fn image_buffer_size(fmt: AVPixelFormat, width: i32, height: i32, align: i32) -> Result<usize> {
+pub(crate) fn image_buffer_size(
+    fmt: AVPixelFormat,
+    width: i32,
+    height: i32,
+    align: i32,
+) -> Result<usize> {
     // SAFETY: pure computation over scalars and the static pixel format table.
     let size = unsafe { sys::av_image_get_buffer_size(fmt, width, height, align) };
     if size <= 0 {

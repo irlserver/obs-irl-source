@@ -1,6 +1,6 @@
 //! Decoders.
 
-use core::ffi::{CStr, c_void};
+use core::ffi::c_void;
 use core::mem::ManuallyDrop;
 
 use crate::format::StreamRef;
@@ -56,21 +56,6 @@ impl Codec {
             }
             index += 1;
         }
-    }
-
-    pub fn name(&self) -> &'static str {
-        // SAFETY: `self.0` is a live static descriptor with a static `name`.
-        let ptr = unsafe { (*self.0).name };
-        if ptr.is_null() {
-            return "unknown";
-        }
-        // SAFETY: `name` is a NUL-terminated string constant inside libavcodec.
-        unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("unknown")
-    }
-
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *const ffmpeg_sys_next::AVCodec {
-        self.0
     }
 }
 
@@ -248,7 +233,10 @@ impl CodecBuilder {
             return Err(Error(ret));
         }
 
-        Ok(CodecContext { ptr, codec, opaque })
+        Ok(CodecContext {
+            ptr,
+            _opaque: opaque,
+        })
     }
 }
 
@@ -264,9 +252,8 @@ impl Drop for CodecBuilder {
 /// An open decoder.
 pub struct CodecContext {
     ptr: *mut ffmpeg_sys_next::AVCodecContext,
-    codec: Codec,
     // Box<CtxOpaque> behind ctx->opaque, kept so it outlives the context.
-    opaque: Option<Box<CtxOpaque>>,
+    _opaque: Option<Box<CtxOpaque>>,
 }
 
 // SAFETY: an AVCodecContext has no thread affinity of its own (its internal
@@ -274,22 +261,12 @@ pub struct CodecContext {
 // single thread and never shares one.
 unsafe impl Send for CodecContext {}
 
-#[doc(hidden)]
-pub struct CtxOpaque {
-    pub get_format: GetFormatFn,
-    pub codec: Codec,
+struct CtxOpaque {
+    get_format: GetFormatFn,
+    codec: Codec,
 }
 
 impl CodecContext {
-    pub fn codec(&self) -> Codec {
-        self.codec
-    }
-
-    pub fn codec_id(&self) -> AVCodecID {
-        // SAFETY: `self.ptr` is an open context we own.
-        unsafe { (*self.ptr).codec_id }
-    }
-
     /// `hw_device_ctx != NULL` after open (FFmpeg may drop it on failure).
     pub fn has_hw_device(&self) -> bool {
         // SAFETY: as above.
@@ -319,18 +296,12 @@ impl CodecContext {
         // SAFETY: `self.ptr` is an open decoder.
         unsafe { ffmpeg_sys_next::avcodec_flush_buffers(self.ptr) };
     }
-
-    #[doc(hidden)]
-    pub fn as_mut_ptr(&mut self) -> *mut ffmpeg_sys_next::AVCodecContext {
-        let _ = &self.opaque;
-        self.ptr
-    }
 }
 
 impl Drop for CodecContext {
     fn drop(&mut self) {
         // SAFETY: `&mut self.ptr` is our sole owning pointer. Rust runs this
-        // body before dropping `self.opaque`, so the get_format opaque stays
+        // body before dropping `self._opaque`, so the get_format opaque stays
         // alive until libavcodec can no longer call back into it.
         unsafe { ffmpeg_sys_next::avcodec_free_context(&mut self.ptr) };
     }
@@ -343,7 +314,6 @@ mod tests {
     #[test]
     fn finds_a_built_in_decoder() {
         let codec = Codec::find_decoder(AVCodecID::AV_CODEC_ID_H264).expect("h264 decoder");
-        assert_eq!(codec.name(), "h264");
         // The bundled build has hardware configs compiled in; the list must at
         // least be readable and terminate.
         let configs = codec.hw_configs();

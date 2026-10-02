@@ -6,7 +6,7 @@ use crate::{AVHWDeviceType, AVPixelFormat, Error, Result, ffalign};
 /// Plane alignment for pooled transfer destinations; what
 /// `av_frame_get_buffer()` would pick on a modern x86 (AVX-512 stores), and
 /// what lets FFmpeg's uncached-copy fast path engage on D3D11VA.
-pub const XFER_PLANE_ALIGN: i32 = 64;
+const XFER_PLANE_ALIGN: i32 = 64;
 
 /// Surface dimensions are padded to this before allocating a transfer
 /// destination: hardware backends copy in aligned blocks, and every one of
@@ -61,8 +61,7 @@ impl HwDeviceContext {
         self.kind
     }
 
-    #[doc(hidden)]
-    pub fn as_ptr(&self) -> *mut ffmpeg_sys_next::AVBufferRef {
+    pub(crate) fn as_ptr(&self) -> *mut ffmpeg_sys_next::AVBufferRef {
         self.ptr
     }
 }
