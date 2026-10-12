@@ -1,12 +1,9 @@
-//! The IRL Sync dock's view of the plugin: the backend the `sync-dock` crate's
-//! Qt widget reads settings and status through, and writes the three global
-//! settings back through.
+//! The backend the `sync-dock` crate's Qt widget reads settings and status
+//! through, and writes the three global settings back through.
 //!
-//! The dock itself is the C branch's `sync-dock.cpp`, compiled into the
-//! `sync-dock` crate when Qt6 is found at build time. Without Qt that crate is
-//! a stub and this registers nothing; sync still runs headless and its status
-//! stays readable over the obs-websocket vendor (`GetSyncStatus`), which can
-//! also set the three settings (`SetSyncConfig`).
+//! The widget is compiled only when Qt6 is found at build time. Without Qt the
+//! crate is a stub and this registers nothing; sync still runs headless and
+//! the obs-websocket vendor (`GetSyncStatus`, `SetSyncConfig`) covers it.
 
 use irl_core::consts;
 use irl_core::sync::{SyncStatus, TcReason};
@@ -124,7 +121,7 @@ impl DockBackend for Backend {
     }
 }
 
-/// `irl_sync_dock_register`, from `obs_module_post_load`.
+/// Called from `obs_module_post_load`.
 pub fn register() {
     if !sync_dock::available() {
         irl_info!(
@@ -135,7 +132,7 @@ pub fn register() {
     sync_dock::register(&BACKEND);
 }
 
-/// `irl_sync_dock_unregister`, from `obs_module_unload`.
+/// Called from `obs_module_unload`.
 pub fn unregister() {
     sync_dock::unregister();
 }
