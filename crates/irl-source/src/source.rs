@@ -2,8 +2,8 @@
 //! the media controls and the stats proc.
 
 use std::ffi::{CStr, CString};
-use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 use irl_core::stats::{FIELDS, StatValue, StatsSnapshot, proc_declaration};
@@ -24,6 +24,15 @@ struct Running {
     video: JoinHandle<()>,
 }
 
+/// What happens to the frame on screen once a stopped run's workers exit.
+#[derive(Debug, Clone, Copy)]
+enum AfterStop {
+    Keep,
+    Clear,
+    /// The stream stopped: clear subject to `clear_on_disconnect`.
+    ClearOnDisconnect,
+}
+
 /// Everything only the OBS thread touches. Behind one uncontended mutex
 /// because the stats proc (obs-websocket's thread, a script's thread) reads
 /// the running state too.
@@ -35,6 +44,13 @@ struct ObsState {
     /// The user pressed Stop in the media controls; survives show/activate.
     media_stopped: bool,
     running: Option<Running>,
+    /// The reaper of the last stop. It joins every reaper before it, so
+    /// joining this one waits for every run this source ever started.
+    stopping: Option<JoinHandle<()>>,
+    /// Disconnects when that reaper finishes. The next run's receiver takes it
+    /// and waits on it before opening, so the old connection, and the port a
+    /// listener URL holds, is gone before the new one starts.
+    stop_done: Option<mpsc::Receiver<()>>,
 }
 
 /// The IRL source instance.
@@ -86,6 +102,8 @@ impl Source for IrlSource {
             fit_pending,
             media_stopped: false,
             running: None,
+            stopping: None,
+            stop_done: None,
         }));
 
         // The obs-websocket vendor extension calls this same proc, so scripts
@@ -143,29 +161,23 @@ impl Source for IrlSource {
             // close_when_inactive may have just turned on while the source is
             // hidden.
             if !should_run_receiver(&state, self.source) {
-                stop_receiver(&mut state, self.source, true);
+                stop_receiver(&mut state, self.source, AfterStop::ClearOnDisconnect);
             }
             return;
         }
 
-        stop_receiver(&mut state, self.source, false);
         state.config = next;
-        apply_async_audio_mode(self.source, &state.config);
-
         // Either the source is not going to run at all, or a restart-forcing
         // edit just dropped the connection: both leave a frame on screen that
         // belongs to a stream that is gone. Clearing is decided against the
         // config that was just installed, not the one being replaced.
-        //
-        // Ordering matters: this has to happen before the receiver restarts,
-        // or the NULL frame could land after the new stream delivered its
-        // first one and blank a live picture. Safe to do directly rather than
-        // through `VideoChannel::request_clear` because the threads are
-        // stopped here, so no frame is in flight to repaint over the clear.
-        if !should_run_receiver(&state, self.source) || state.config.hot.clear_on_disconnect {
-            self.source.output_video_none();
-        }
-
+        let after = if should_run_receiver(&state, self.source) {
+            AfterStop::ClearOnDisconnect
+        } else {
+            AfterStop::Clear
+        };
+        stop_receiver(&mut state, self.source, after);
+        apply_async_audio_mode(self.source, &state.config);
         start_receiver(&mut state, self.source, &self.lifetime);
     }
 
@@ -198,7 +210,7 @@ impl Source for IrlSource {
             return;
         }
         if !self.source.showing() {
-            stop_receiver(&mut state, self.source, true);
+            stop_receiver(&mut state, self.source, AfterStop::ClearOnDisconnect);
         }
     }
 
@@ -215,7 +227,7 @@ impl Source for IrlSource {
         if !state.config.close_when_inactive {
             return;
         }
-        stop_receiver(&mut state, self.source, true);
+        stop_receiver(&mut state, self.source, AfterStop::ClearOnDisconnect);
     }
 
     // ── Media controls ──
@@ -245,7 +257,7 @@ impl Source for IrlSource {
             let mut state = self.obs_state.lock();
             // An explicit restart overrides a previous Stop.
             state.media_stopped = false;
-            stop_receiver(&mut state, self.source, true);
+            stop_receiver(&mut state, self.source, AfterStop::ClearOnDisconnect);
             start_receiver(&mut state, self.source, &self.lifetime);
             state.running.is_some()
         };
@@ -264,11 +276,10 @@ impl Source for IrlSource {
 
         let mut state = self.obs_state.lock();
         state.media_stopped = true;
-        stop_receiver(&mut state, self.source, false);
         // Unconditional, unlike a disconnect: the frame is gone because the
         // user asked for the source to stop, which is not what
         // clear_on_disconnect decides. Matches ffmpeg_source_stop().
-        self.source.output_video_none();
+        stop_receiver(&mut state, self.source, AfterStop::Clear);
         // No media_ended here: libobs already fires "media_stopped" for the
         // stop action, and a live stream has no end to report.
     }
@@ -306,7 +317,15 @@ impl Drop for IrlSource {
     /// The frame is not cleared: the source itself is going away, so there is
     /// nothing left to show it on.
     fn drop(&mut self) {
-        stop_receiver(&mut self.obs_state.lock(), self.source, false);
+        {
+            let mut state = self.obs_state.lock();
+            stop_receiver(&mut state, self.source, AfterStop::Keep);
+            // The workers and the reapers hold this source's handle, so none of
+            // them may outlive it. The one blocking stop.
+            if let Some(reaper) = state.stopping.take() {
+                let _ = reaper.join();
+            }
+        }
         // Explicit for order's sake: the closure the callback owns holds an
         // `Arc<Mutex<ObsState>>`, and dropping it here (before libobs tears
         // down the source's proc handler) is what makes the borrow safe.
@@ -359,11 +378,14 @@ fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<Lif
             return;
         }
     };
-    let receiver = match spawn_worker(
-        "irl-receiver",
-        Arc::clone(&shared),
-        receiver::receiver_thread,
-    ) {
+    let predecessor = state.stop_done.take();
+    let receiver = match spawn_worker("irl-receiver", Arc::clone(&shared), move |shared| {
+        if let Some(done) = predecessor {
+            // Returns once the reaper drops its sender.
+            let _ = done.recv();
+        }
+        receiver::receiver_thread(shared);
+    }) {
         Ok(handle) => handle,
         Err(err) => {
             irl_error!("Failed to create receiver thread: {err}");
@@ -383,35 +405,84 @@ fn start_receiver(state: &mut ObsState, source: SourceHandle, lifetime: &Arc<Lif
     });
 }
 
-/// Stop the workers and drop the run state.
+/// Stop the workers and drop the run state without waiting for them.
 ///
-/// `clear_video` asks for the frame to be dropped because the stream stopped,
-/// so it is subject to `clear_on_disconnect`. Callers that stop the source
-/// outright (no URL, teardown, an explicit media Stop) decide for themselves.
-fn stop_receiver(state: &mut ObsState, source: SourceHandle, clear_video: bool) {
-    if let Some(running) = state.running.take() {
-        let stop_start_ns = obs::time::gettime_ns();
+/// Every caller but `Drop` runs on OBS's graphics thread (show/hide,
+/// activate/deactivate and the media controls run inside the video tick), and
+/// a worker can take a while to exit: FFmpeg closing a connection, a hardware
+/// decoder releasing its device. Joining here would stall the whole render
+/// loop for that long, so a reaper thread joins the workers instead. The frame
+/// clear runs on the reaper too, after the workers have exited, so a frame
+/// still in flight cannot paint over the blank, and the next run's receiver
+/// waits for the reaper (`stop_done`), so the clear cannot blank its picture.
+fn stop_receiver(state: &mut ObsState, source: SourceHandle, after: AfterStop) {
+    let clear = match after {
+        AfterStop::Keep => false,
+        AfterStop::Clear => true,
+        AfterStop::ClearOnDisconnect => state.config.hot.clear_on_disconnect,
+    };
+    let running = state.running.take();
+    let previous = state.stopping.take();
+    if running.is_none() && previous.is_none() {
+        if clear {
+            source.output_video_none();
+        }
+        return;
+    }
+
+    if let Some(running) = &running {
         // Clearing the flag also trips the FFmpeg interrupt watch, so a
         // receiver blocked in `av_read_frame` returns instead of waiting out
         // its I/O timeout.
         running.shared.flags.thread_active.store(false, Relaxed);
         running.shared.video.wake_all();
-        let _ = running.video.join();
-        let _ = running.audio.join();
-        let _ = running.receiver.join();
-        // Whatever the video thread never got to.
-        running.shared.video.drain();
-        // The joins block the calling thread, which for the media controls
-        // and show/hide is OBS's graphics thread: this is how long the whole
-        // render loop stood still.
-        irl_info!(
-            "Receiver stopped in {}ms",
-            obs::time::gettime_ns().saturating_sub(stop_start_ns) / 1_000_000
-        );
     }
 
-    if clear_video && state.config.hot.clear_on_disconnect {
-        source.output_video_none();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    // Behind a slot rather than moved into the closure, so a failed spawn can
+    // still run it here.
+    let slot = Arc::new(Mutex::new(Some(move || {
+        let _done = done_tx;
+        if let Some(previous) = previous {
+            let _ = previous.join();
+        }
+        if let Some(running) = running {
+            let stop_start_ns = obs::time::gettime_ns();
+            let _ = running.video.join();
+            let _ = running.audio.join();
+            let _ = running.receiver.join();
+            // Whatever the video thread never got to.
+            running.shared.video.drain();
+            irl_info!(
+                "Receiver stopped in {}ms",
+                obs::time::gettime_ns().saturating_sub(stop_start_ns) / 1_000_000
+            );
+        }
+        if clear {
+            source.output_video_none();
+        }
+    })));
+    let reaper_slot = Arc::clone(&slot);
+    let spawned = std::thread::Builder::new()
+        .name("irl-stop".to_owned())
+        .spawn(move || {
+            let reap = reaper_slot.lock().take();
+            if let Some(reap) = reap {
+                reap();
+            }
+        });
+    match spawned {
+        Ok(reaper) => {
+            state.stopping = Some(reaper);
+            state.stop_done = Some(done_rx);
+        }
+        Err(err) => {
+            irl_warn!("Failed to create the stop thread, stopping inline: {err}");
+            let reap = slot.lock().take();
+            if let Some(reap) = reap {
+                reap();
+            }
+        }
     }
 }
 

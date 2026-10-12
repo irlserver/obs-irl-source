@@ -547,13 +547,14 @@ pub struct HotValues {
 pub fn spawn_worker(
     name: &'static str,
     shared: Arc<Shared>,
-    body: fn(Arc<Shared>),
+    body: impl FnOnce(Arc<Shared>) + Send + 'static,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || {
+            let worker_shared = shared.clone();
             let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shared.clone())));
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || body(worker_shared)));
             if let Err(payload) = result {
                 let msg = obs::panic::payload_message(payload.as_ref());
                 irl_error!("{name} thread panicked: {msg}; stopping the stream");
