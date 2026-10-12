@@ -306,10 +306,14 @@ reason, and no amount of tuning here can beat them.
   is placed open loop by the seed, with no bias, and never corrected.
 - **Low Latency Audio is left alone.** It has no speed controller to absorb a
   hold change and no jitter buffer to anchor in, so sync does not act on it.
-- **A mid-stream re-engage is a step.** If a source's timecodes go away for
-  longer than `SYNC_TC_STALE_NS` and come back, the hold is seeded again on a
-  running pipeline, which starves it for the size of the step. The priming
-  gate only covers the first engage.
+- **Stale timecodes keep the hold.** When a feed's timecodes stop for longer
+  than `SYNC_TC_STALE_NS` (or the NTP reference goes), it reads No timecode
+  but keeps its hold: the last placement is the best estimate, and the line
+  keeps releasing on the timeline. When timecodes return the loop resumes.
+  Engaging again would seed a step on a running pipeline and starve it. The
+  hold is given back only when sync is switched off for the source; switching
+  it on again on a running feed seeds anew, which is a step the user asked
+  for.
 - **`now` cancels out of the target.** `target = now + offset - (now - capture)`
   is `capture + offset`, so arrival jitter is not in the error signal. Filtering
   the latency would put it back in.

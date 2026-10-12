@@ -1070,13 +1070,12 @@ impl SyncController {
             self.observe_timecode(&tc, &mut obs, control, &mut out);
         }
 
-        // Hold is handed back gradually, not dropped in one go. engaged=false
-        // so re-enabling re-seeds from scratch.
-        let mut give_back_hold = !control;
-
         // No timecode for a while: either the sender never sends them or it
-        // stopped. Both leave the source unalignable, and the delay line has
-        // to let go rather than hold a stale amount forever.
+        // stopped. The hold stays where it is. The last placement is the best
+        // estimate there is, and the line keeps releasing on the timeline, so
+        // a feed whose timecodes come back is still where it was and the loop
+        // just resumes. Giving the hold back would move a running feed, and
+        // engaging again would step it back and starve the pipeline.
         if self.last_tc_ns == 0 || now.wrapping_sub(self.last_tc_ns) > consts::SYNC_TC_STALE_NS {
             if control && self.status != SyncStatus::NoTimecode {
                 self.status = SyncStatus::NoTimecode;
@@ -1090,10 +1089,11 @@ impl SyncController {
             }
             // The stamp goes too: a frozen timecode is worse than none.
             self.tc = None;
-            give_back_hold = true;
         }
 
-        if give_back_hold {
+        // Switched off: the hold is handed back gradually, not dropped in one
+        // go, and engaged=false so switching on again seeds from scratch.
+        if !control {
             self.engaged = false;
             self.release_hold(now);
             out.forget_bias = true;
@@ -2255,9 +2255,20 @@ mod tests {
         assert_eq!(w.status(), SyncStatus::NoTimecode);
         assert_eq!(w.ctl.snapshot().tc_reason, TcReason::Absent);
         assert_eq!(w.ctl.snapshot().timecode, None);
+        // The hold stays put: the feed keeps its place, and when timecodes
+        // come back the loop resumes instead of seeding a step.
         let hold = w.ctl.hold_ns();
-        w.run(1.0);
-        assert!(w.ctl.hold_ns() < hold);
+        w.run(5.0);
+        assert_eq!(w.ctl.hold_ns(), hold);
+        w.stamp = true;
+        w.run(3.0);
+        let engaged = w
+            .events
+            .iter()
+            .filter(|e| matches!(e, SyncEvent::Engaged { .. }))
+            .count();
+        assert_eq!(engaged, 1, "resumed, not engaged again");
+        assert!((w.ctl.hold_ns() - hold).abs() < 50 * MS);
     }
 
     #[test]

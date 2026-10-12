@@ -162,6 +162,9 @@ struct Scenario {
     net_ns: u64,
     /// Timecode sync on, at this offset.
     sync_offset_ms: Option<i32>,
+    /// Captured between these times after the open, frames carry no
+    /// timecode.
+    timecode_gap: Option<(u64, u64)>,
 }
 
 impl Scenario {
@@ -183,6 +186,7 @@ impl Scenario {
             events: Vec::new(),
             net_ns: NET_NS,
             sync_offset_ms: None,
+            timecode_gap: None,
         }
     }
 
@@ -222,6 +226,13 @@ impl Scenario {
     /// `offset_ms`, against an NTP reference that agrees with the sender's.
     fn timecode_sync(mut self, offset_ms: i32) -> Self {
         self.sync_offset_ms = Some(offset_ms);
+        self
+    }
+
+    /// The sender stops stamping timecodes for a while.
+    fn timecode_gap(mut self, at_s: f64, len_ms: u64) -> Self {
+        let at = (at_s * SEC as f64) as u64;
+        self.timecode_gap = Some((at, at + len_ms * MS));
         self
     }
 
@@ -732,6 +743,7 @@ struct SimSync {
     stage: SyncStage<Media>,
     offset_ms: i32,
     fps: u64,
+    gap: Option<(u64, u64)>,
 }
 
 impl SimSync {
@@ -740,6 +752,13 @@ impl SimSync {
     /// the timecode of UTC `c + utc_offset_ns`.
     fn utc_now_ns(&self, now_ns: u64) -> i64 {
         now_ns as i64 + UTC_FRAMES_AT_START * SEC as i64 / self.fps as i64 - START_NS as i64
+    }
+
+    /// Whether the sender stamps the frame with `pts_ns` at all.
+    fn stamps(&self, pts_ns: i64) -> bool {
+        let capture = (pts_ns - FIRST_PTS_NS) as u64;
+        self.gap
+            .is_none_or(|(from, to)| !(from..to).contains(&capture))
     }
 
     /// The timecode the sender stamps on the frame with `pts_ns`.
@@ -805,6 +824,7 @@ impl Sim {
             stage: SyncStage::new(Arc::clone(&shared), 0),
             offset_ms,
             fps: scenario.fps,
+            gap: scenario.timecode_gap,
         });
 
         Self {
@@ -846,7 +866,7 @@ impl Sim {
             Media::Video(pts) => PacketInfo {
                 stream: 0,
                 dts_ns: Some(pts),
-                timecode: Some(sync.timecode(pts)),
+                timecode: sync.stamps(pts).then(|| sync.timecode(pts)),
                 pts_ns: Some(pts),
                 bytes: 4096,
             },
@@ -2058,4 +2078,22 @@ fn timecode_sync_leaves_low_latency_audio_alone() {
     let snap = report.sync.expect("synced");
     assert_eq!(snap.added_ms, 0);
     assert_eq!(snap.status, SyncStatus::Off);
+}
+
+/// A sender that stops stamping for a few seconds: the feed keeps its place
+/// while there is nothing to measure, and the loop resumes when timecodes
+/// return, without engaging again.
+#[test]
+fn timecodes_that_drop_out_and_return_do_not_move_the_feed() {
+    let report = Scenario::new(60)
+        .network_latency(300)
+        .timecode_sync(3000)
+        .timecode_gap(20.0, 6000)
+        .run();
+    let settled = report.assert_settled(15.0, 60.0);
+    report.print("sync through a timecode dropout", &settled);
+
+    report.assert_on_offset(15.0, 60.0, report.frame_ns as i64);
+    report.assert_healthy();
+    assert_eq!(report.underruns, 0);
 }
