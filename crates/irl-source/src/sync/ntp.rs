@@ -152,8 +152,10 @@ pub fn set_server(host: &str) {
     if !host.is_empty() {
         if state.server != host {
             state.server = host.to_owned();
-            // The old offset belongs to the old reference.
-            state.estimate.synced = false;
+            // The old estimate stays in force until the new server answers:
+            // both are on UTC, and dropping it would take every synced source
+            // through a stale timecode and a fresh engage on a running
+            // pipeline, which starves it.
             state.config_dirty = true;
             NTP.wake.notify_all();
         }
@@ -265,6 +267,11 @@ fn query_once(addr: SocketAddr) -> QueryResult {
 /// trips vary by hundreds of milliseconds, and the minimum of a burst is far
 /// closer to the truth than any single sample.
 fn poll(host: &str, samples: usize) -> QueryResult {
+    // Resolving can block for as long as the resolver takes, and module
+    // unload joins this thread.
+    if should_stop() {
+        return QueryResult::Fail;
+    }
     let Some(addr) = (host, consts::NTP_PORT)
         .to_socket_addrs()
         .ok()

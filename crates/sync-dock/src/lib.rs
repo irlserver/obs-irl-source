@@ -292,7 +292,12 @@ mod ffi {
     /// `snprintf(buf, sizeof buf, "%s", s)` would.
     fn copy_str(dst: &mut [c_char], s: &str) {
         let bytes = s.as_bytes();
-        let n = bytes.len().min(dst.len().saturating_sub(1));
+        // Cut on a character boundary: Qt reads the field as UTF-8, and half
+        // a character would show as a replacement glyph.
+        let mut n = bytes.len().min(dst.len().saturating_sub(1));
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
         for (d, &b) in dst.iter_mut().zip(&bytes[..n]) {
             *d = b as c_char;
         }

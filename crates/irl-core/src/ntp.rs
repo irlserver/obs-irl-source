@@ -57,11 +57,20 @@ fn read_be32(p: &[u8]) -> u32 {
 }
 
 /// An NTP 64-bit timestamp is seconds since 1900 plus a 32-bit binary
-/// fraction. Converted to nanoseconds since the Unix epoch; 0 for a value
-/// before 1970 (which includes the all-zero "unset" timestamp).
+/// fraction. Converted to nanoseconds since the Unix epoch; 0 for the
+/// all-zero "unset" timestamp and for a time before 1970.
+///
+/// The seconds field wraps on 2036-02-07. As RFC 4330 suggests, a value with
+/// its top bit clear is read as the next era, which covers 1968 to 2104.
 pub fn ntp_ts_to_unix_ns(p: &[u8]) -> i64 {
-    let seconds = u64::from(read_be32(p));
+    let mut seconds = u64::from(read_be32(p));
     let fraction = u64::from(read_be32(&p[4..]));
+    if seconds == 0 && fraction == 0 {
+        return 0;
+    }
+    if seconds & 0x8000_0000 == 0 {
+        seconds += 1 << 32;
+    }
     if seconds < consts::NTP_UNIX_EPOCH_DELTA {
         return 0;
     }
@@ -88,10 +97,11 @@ pub fn parse_reply(reply: &[u8], t1_ns: u64, t4_ns: u64) -> QueryResult {
         return QueryResult::Fail;
     }
 
-    // Mode 4 = server.
+    // Mode 4 = server. Leap indicator 3 is a server that says its own clock
+    // is not synchronized.
     let mode = reply[0] & 0x07;
     let stratum = reply[1];
-    if mode != 4 {
+    if mode != 4 || reply[0] >> 6 == 3 {
         return QueryResult::Fail;
     }
 
@@ -476,8 +486,14 @@ mod tests {
         // The 32-bit fraction resolves to ~0.23ns, so the tail is exact to
         // within a nanosecond.
         assert!((back - ns).abs() <= 1, "{back} vs {ns}");
-        // Before 1970 (or unset) reads as zero.
+        // Unset reads as zero.
         assert_eq!(ntp_ts_to_unix_ns(&[0; 8]), 0);
+        // Past the 2036 wrap the seconds field starts over; it is read as the
+        // next era, not as 1900.
+        let after_wrap = 2_085_978_496 * S as i64 + 5 * S as i64;
+        write_ts(&mut p, after_wrap);
+        assert_eq!(&p[..4], &5u32.to_be_bytes());
+        assert!((ntp_ts_to_unix_ns(&p) - after_wrap).abs() <= 1);
         assert_eq!(request_packet()[0], 0x23);
         assert!(request_packet()[1..].iter().all(|&b| b == 0));
     }
@@ -519,6 +535,9 @@ mod tests {
         assert_eq!(parse_reply(&other, 0, 1), QueryResult::Fail);
 
         assert_eq!(parse_reply(&reply(16, 1, 1), 0, 1), QueryResult::Fail);
+        let mut unsynchronized = reply(2, S as i64, S as i64);
+        unsynchronized[0] |= 0xC0;
+        assert_eq!(parse_reply(&unsynchronized, 0, 1), QueryResult::Fail);
         let mut client = reply(2, S as i64, S as i64);
         client[0] = 0x23;
         assert_eq!(parse_reply(&client, 0, 1), QueryResult::Fail);
