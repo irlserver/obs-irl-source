@@ -30,7 +30,9 @@ use crate::playout::PlayoutMapping;
 use crate::sei::Timecode;
 
 const NS_PER_MS: i64 = 1_000_000;
-const NS_PER_HOUR: i64 = 3600 * 1_000_000_000;
+/// Latency is read modulo a quarter hour: every time zone is a whole number
+/// of quarter hours from UTC.
+const NS_PER_FOLD: i64 = 15 * 60 * 1_000_000_000;
 
 // ── Status ───────────────────────────────────────────────────
 
@@ -164,23 +166,22 @@ pub fn clamp_offset_ms(offset_ms: i32) -> i32 {
 
 /// How old the content stamped `tc` is, from its timecode against NTP.
 ///
-/// Compared modulo one hour, reduced to the nearest representative. The sender
-/// writes local calendar components, so senders in different time zones differ
-/// by whole hours, and the timecode carries no date, so it wraps at midnight.
-/// A real arrival latency is seconds and never mistaken for half an hour, so
-/// working modulo an hour absorbs both. A sender on a half-hour time zone
-/// offset lands exactly on the fold and cannot be resolved.
-pub fn latency_in_hour_ns(utc_now_ns: i64, tc: &Timecode, frame_interval_ns: i64) -> i64 {
-    let now_in_hour = ((utc_now_ns % NS_PER_HOUR) + NS_PER_HOUR) % NS_PER_HOUR;
-    let tc_in_hour = (i64::from(tc.minutes) * 60 + i64::from(tc.seconds)) * 1_000_000_000
+/// Compared modulo a quarter hour, reduced to the nearest representative. A
+/// sender may write local calendar components, and every time zone (India's
+/// +5:30 and Nepal's +5:45 included) is a whole number of quarter hours from
+/// UTC; the timecode carries no date either, so it wraps at midnight. A real
+/// arrival latency is seconds, never minutes, so the fold absorbs both.
+pub fn timecode_latency_ns(utc_now_ns: i64, tc: &Timecode, frame_interval_ns: i64) -> i64 {
+    let now_in_fold = utc_now_ns.rem_euclid(NS_PER_FOLD);
+    let tc_in_fold = (i64::from(tc.minutes) * 60 + i64::from(tc.seconds)) * 1_000_000_000
         + i64::from(tc.n_frames) * frame_interval_ns;
 
-    let mut diff = now_in_hour - tc_in_hour;
-    diff = ((diff % NS_PER_HOUR) + NS_PER_HOUR) % NS_PER_HOUR;
-    if diff >= NS_PER_HOUR / 2 {
-        diff -= NS_PER_HOUR;
+    let diff = (now_in_fold - tc_in_fold).rem_euclid(NS_PER_FOLD);
+    if diff >= NS_PER_FOLD / 2 {
+        diff - NS_PER_FOLD
+    } else {
+        diff
     }
-    diff
 }
 
 // ── Playout anchor ───────────────────────────────────────────
@@ -698,6 +699,9 @@ pub struct Outcome {
     pub bias_sample_ns: Option<i64>,
     /// Whether the audio output must not prime yet.
     pub prime_hold: bool,
+    /// Drop the folded playout bias: sync has stopped placing this source,
+    /// and a later restart of the output clock must not use a stale one.
+    pub forget_bias: bool,
     /// A snapshot to publish to the registry (about 5Hz).
     pub publish: Option<SyncSnapshot>,
 }
@@ -745,6 +749,11 @@ pub enum SyncEvent {
     },
     /// The feed is back within the offset (after the leave hysteresis).
     BackInReach,
+    /// A timecode read as a latency no network has, so it was ignored.
+    Implausible {
+        /// The latency it read as.
+        latency_ms: i64,
+    },
     /// The delay line took over the audio output's pre-roll.
     PreRollTaken {
         /// The pre-roll absorbed.
@@ -804,6 +813,8 @@ pub struct SyncController {
     /// has, and seeding the hold or the peak from it would be wrong for as
     /// long as each lasts.
     live: ArrivalFloor,
+    /// An implausible latency was logged and none plausible has come since.
+    implausible_reported: bool,
 }
 
 impl SyncController {
@@ -835,6 +846,7 @@ impl SyncController {
             fps: FpsLearner::default(),
             peak: PeakTracker::default(),
             live: ArrivalFloor::default(),
+            implausible_reported: false,
         }
     }
 
@@ -890,6 +902,7 @@ impl SyncController {
         // gap this opens is one the output is already waiting through.
         if let Some(defer_ns) = obs.anchor_defer_ns
             && defer_ns > 0
+            && obs.wanted
         {
             self.hold_ns += defer_ns;
             out.shift_delay_ns = defer_ns;
@@ -953,6 +966,7 @@ impl SyncController {
         if give_back_hold {
             self.engaged = false;
             self.release_hold(now);
+            out.forget_bias = true;
         }
 
         out.prime_hold = self.prime_hold(now, control);
@@ -1067,7 +1081,21 @@ impl SyncController {
             self.set_tc_reason(TcReason::NoClock, None, out);
             return;
         };
-        let latency_ns = latency_in_hour_ns(utc_now_ns, tc, frame_interval_ns);
+        let latency_ns = timecode_latency_ns(utc_now_ns, tc, frame_interval_ns);
+        // A corrupt SEI or a sender clock that is not on NTP reads minutes
+        // off. Taken as latency it would seed a hold of that size, so it is
+        // not taken at all: the source goes stale like one without
+        // timecodes, and the log says why.
+        if !(consts::SYNC_LATENCY_MIN_NS..=consts::SYNC_LATENCY_MAX_NS).contains(&latency_ns) {
+            if !self.implausible_reported {
+                self.implausible_reported = true;
+                out.events.push(SyncEvent::Implausible {
+                    latency_ms: latency_ns / NS_PER_MS,
+                });
+            }
+            return;
+        }
+        self.implausible_reported = false;
 
         self.tc = Some(*tc);
         self.last_tc_ns = now;
@@ -1486,13 +1514,18 @@ mod tests {
         // (15 frames at the truncated 1/30s interval are 5ns short of half a
         // second; the sub-microsecond tail is that.)
         let utc = 700 * MS;
-        let latency = latency_in_hour_ns(utc, &tc, FRAME_30);
+        let latency = timecode_latency_ns(utc, &tc, FRAME_30);
         assert!((latency - 2200 * MS).abs() < 1000, "{latency}");
-        // The same stamp seen 29 minutes early folds negative rather than to
-        // 31 minutes.
-        let utc_early = (59 * 60 + 58) * S + 500 * MS - 29 * 60 * S;
-        let early = latency_in_hour_ns(utc_early, &tc, FRAME_30);
-        assert!((early + 29 * 60 * S).abs() < 1000, "{early}");
+        // A sender on +5:30 stamps the same instant half an hour off any
+        // whole-hour zone; the quarter-hour fold takes it out.
+        let india = Timecode { minutes: 29, ..tc };
+        let latency = timecode_latency_ns(utc, &india, FRAME_30);
+        assert!((latency - 2200 * MS).abs() < 1000, "{latency}");
+        // The same stamp seen 7 minutes early folds negative rather than to
+        // 8 minutes.
+        let utc_early = (59 * 60 + 58) * S + 500 * MS - 7 * 60 * S;
+        let early = timecode_latency_ns(utc_early, &tc, FRAME_30);
+        assert!((early + 7 * 60 * S).abs() < 1000, "{early}");
     }
 
     #[test]
@@ -1965,6 +1998,36 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// A sender whose clock is minutes off (or a corrupt stamp) must not
+    /// seed a hold of minutes: the reading is ignored and said once.
+    #[test]
+    fn an_implausible_latency_is_ignored_not_held() {
+        let mut w = World::new();
+        w.latency_ns = 5 * 60 * S;
+        w.run(6.0);
+        assert_eq!(w.ctl.hold_ns(), 0);
+        assert!(!w.has_event(|e| matches!(e, SyncEvent::Engaged { .. })));
+        let said = w
+            .events
+            .iter()
+            .filter(|e| matches!(e, SyncEvent::Implausible { .. }))
+            .count();
+        assert_eq!(said, 1);
+        assert_eq!(w.status(), SyncStatus::NoTimecode);
+    }
+
+    /// Switching sync off forgets where the stream was placed, so a later
+    /// restart of the audio clock does not place it again.
+    #[test]
+    fn switching_sync_off_forgets_the_placement() {
+        let mut w = World::new();
+        w.run(3.0);
+        assert!(!w.last.forget_bias);
+        w.wanted = false;
+        w.packet();
+        assert!(w.last.forget_bias);
     }
 
     #[test]

@@ -138,6 +138,7 @@ pub struct SyncStage<P> {
     shared: Arc<Shared>,
     ctl: SyncController,
     delay: DelayLine<P>,
+    low_latency_said: bool,
 }
 
 impl<P> SyncStage<P> {
@@ -148,6 +149,7 @@ impl<P> SyncStage<P> {
             shared,
             ctl: SyncController::new(offset_generation),
             delay: DelayLine::new(consts::SYNC_DELAY_MAX_PACKETS, consts::SYNC_DELAY_MAX_BYTES),
+            low_latency_said: false,
         };
         this.reset(offset_generation);
         this
@@ -216,7 +218,25 @@ impl<P> SyncStage<P> {
     }
 
     fn observe(&mut self, ctx: &Context, info: &PacketInfo) {
-        let Self { shared, ctl, delay } = self;
+        let Self {
+            shared,
+            ctl,
+            delay,
+            low_latency_said,
+        } = self;
+
+        // Low Latency Audio has no speed controller to absorb a hold change
+        // and no jitter buffer to anchor in, so every correction would be an
+        // audible skip or gap. The two settings ask for opposite things.
+        let low_latency = &shared.cfg.low_latency_audio;
+        if *low_latency
+            && ctx.enabled
+            && shared.hot.sync_enabled.load(Relaxed)
+            && !*low_latency_said
+        {
+            *low_latency_said = true;
+            irl_warn!("Sync: not applied while Low Latency Audio is on; turn one of them off");
+        }
 
         // The pre-roll the audio output handed back at prime, if any. The
         // flag is checked first so nearly every packet skips the lock.
@@ -242,7 +262,7 @@ impl<P> SyncStage<P> {
         let out = ctl.observe(Observation {
             now_ns: ctx.now_ns,
             utc_now_ns: ctx.utc_now_ns,
-            wanted: ctx.enabled && shared.hot.sync_enabled.load(Relaxed),
+            wanted: ctx.enabled && shared.hot.sync_enabled.load(Relaxed) && !*low_latency,
             offset_ms: ctx.offset_ms,
             offset_generation: ctx.offset_generation,
             // Without audio, the fallback shows video about as it is released.
@@ -263,7 +283,9 @@ impl<P> SyncStage<P> {
         if out.shift_delay_ns > 0 {
             delay.shift_later(out.shift_delay_ns);
         }
-        if let Some(raw_ns) = out.bias_sample_ns {
+        if out.forget_bias {
+            shared.audio_state().sync.present_bias_ns = None;
+        } else if let Some(raw_ns) = out.bias_sample_ns {
             let mut state = shared.audio_state();
             state.sync.present_bias_ns =
                 Some(fold_present_bias(state.sync.present_bias_ns, raw_ns));
@@ -357,6 +379,9 @@ fn log_event(event: &SyncEvent) {
             "Sync: feed arrives {latency_ms}ms late, past the {offset_ms}ms offset; raise the offset to at least {required_ms}ms"
         ),
         SyncEvent::BackInReach => irl_info!("Sync: feed back within the offset"),
+        SyncEvent::Implausible { latency_ms } => irl_warn!(
+            "Sync: timecode reads {latency_ms}ms from this machine's clock, which no network explains; ignoring it. Check that the sender's clock is on NTP"
+        ),
         SyncEvent::PreRollTaken { defer_ms, hold_ms } => {
             irl_info!("Sync: delay line took over the {defer_ms}ms pre-roll; holding {hold_ms}ms")
         }
