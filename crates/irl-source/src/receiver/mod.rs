@@ -18,6 +18,7 @@ use irl_core::consts;
 
 use crate::receiver::audio_in::AudioIntake;
 use crate::shared::Shared;
+use crate::sync::control::SyncControl;
 
 /// Receiver-thread state shared between the packet path (`decode.rs`) and
 /// the audio intake. Every field is receiver-thread-only.
@@ -73,6 +74,9 @@ pub struct Receiver {
     using_hw_decode: bool,
     flags: ReceiverFlags,
     audio_in: AudioIntake,
+    /// Timecode sync: the delay line in front of the decoders and its
+    /// controller. Every packet the demuxer delivers goes through it.
+    sync: SyncControl,
     last_stats_time: u64,
     /// The packet the read loop reuses. `None` only while a packet is out on
     /// loan to the dispatch path, which borrows the rest of `self` mutably.
@@ -87,6 +91,7 @@ impl Receiver {
         let pkt = ffmpeg::Packet::new().ok()?;
         let frame = ffmpeg::Frame::new().ok()?;
         let audio_in = AudioIntake::default();
+        let sync = SyncControl::new(Arc::clone(&shared));
         Some(Self {
             shared,
             fmt: None,
@@ -102,6 +107,7 @@ impl Receiver {
             using_hw_decode: false,
             flags: ReceiverFlags::default(),
             audio_in,
+            sync,
             last_stats_time: 0,
             pkt: Some(pkt),
             frame,
@@ -164,6 +170,13 @@ impl Receiver {
                 break;
             }
 
+            // Timecode sync: block while the delay line is at its ceiling,
+            // draining as room appears, so the excess is held by the
+            // transport rather than by this process.
+            if !self.sync_wait_for_room() {
+                break;
+            }
+
             // The packet is taken out of `self` for the read and the dispatch
             // so both can borrow the rest of the receiver mutably.
             let Some(mut pkt) = self.pkt.take() else {
@@ -194,16 +207,26 @@ impl Receiver {
                 continue;
             }
 
-            self.dispatch_packet(&pkt);
+            // Timecode sync sees every packet first: it measures the timecode
+            // and either keeps the packet in its delay line or hands it back.
+            if !self.sync.intercept(&pkt) {
+                self.dispatch_packet(&pkt);
+            }
 
             pkt.unref();
             self.pkt = Some(pkt);
+
+            // Release everything whose moment has come.
+            self.sync_drain();
+
             self.log_receiver_stats();
         }
 
         self.close_ffmpeg();
-        // The run is over: free the queued packets rather than leave them
-        // behind on the shared state.
+        // The run is over: drop the delay line and tell the registry, and
+        // free the queued packets rather than leave them behind on the
+        // shared state.
+        self.sync.reset();
         self.shared.video.drain();
     }
 
@@ -216,6 +239,26 @@ impl Receiver {
         } else if index == self.video_stream_idx {
             self.push_video_packet(pkt);
         }
+    }
+
+    /// `irl_sync_drain`: dispatch every delayed packet that has come due.
+    fn sync_drain(&mut self) {
+        let now_ns = obs::time::gettime_ns();
+        while let Some(pkt) = self.sync.pop_due(now_ns) {
+            self.dispatch_packet(&pkt);
+        }
+    }
+
+    /// `irl_sync_wait_for_room`: while the delay line is at its ceiling, stop
+    /// reading and drain. Draining inside the wait is what makes the room, so
+    /// this cannot deadlock while packets are becoming due. Returns false when
+    /// the run was stopped while waiting.
+    fn sync_wait_for_room(&mut self) -> bool {
+        while self.shared.is_active() && self.sync.is_full() {
+            self.sync_drain();
+            obs::time::sleep_ms(2);
+        }
+        self.shared.is_active()
     }
 
     /// Backlog backpressure: above the fill ceiling, stop reading so the

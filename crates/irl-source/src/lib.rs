@@ -20,6 +20,7 @@ mod websocket;
 pub mod config;
 pub mod shared;
 pub mod source;
+pub mod sync;
 
 obs::declare_module! {
     module_name: "obs-irl-source",
@@ -48,15 +49,21 @@ fn module_load() -> bool {
     spawn_deadlock_poller();
     obs::register_source::<source::IrlSource>();
     providers::init();
+    sync::module_load();
     irl_info!("IRL Source plugin loaded (version {})", PLUGIN_VERSION);
     true
 }
 
+/// Runs after every module's `obs_module_load`, which is the only point at
+/// which obs-websocket is guaranteed to have published its API and the
+/// frontend is guaranteed to exist for the sync dock.
 fn module_post_load() {
     websocket::register();
+    sync::module_post_load();
 }
 
 fn module_unload() {
+    sync::module_unload();
     ffmpeg::srt::release();
 }
 

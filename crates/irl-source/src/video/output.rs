@@ -207,6 +207,10 @@ impl VideoThread {
             self.sys_base = now;
             self.pts_base = pts_ns;
             self.ts_init = true;
+            self.shared
+                .conn
+                .video_fallback_offset_ns
+                .store(now as i64 - pts_ns, Relaxed);
             self.shared.conn.video_ts_init.store(true, Relaxed);
         }
 
