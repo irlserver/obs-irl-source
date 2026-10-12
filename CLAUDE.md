@@ -57,7 +57,7 @@ scripts/package.sh linux target/release dist       # the release archive, locall
 - **Lock order** is `audio_state` → `audio_buf` → `hot.watermarks`. `video.q` is never held together with any of them. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down; parking_lot mutexes are not recursive, so a nested acquire deadlocks.
 - **Clocks.** OBS timestamps come from `obs::time::gettime_ns`, never `std::time::Instant`. FFmpeg-side timers stay in the `av_gettime` microsecond domain. `irl-core` takes both as parameters so they cannot be mixed.
 - **Audio timestamps** submitted to OBS stay contiguous and the submitted sample rate never changes. Speed is applied inside the plugin. See `docs/architecture.md`.
-- **Panics** never cross an FFI boundary: `obs::panic::guard` wraps every `extern "C"` shim and `shared::spawn_worker` wraps every worker thread.
+- **Panics** never cross an FFI boundary: `obs::panic::guard` wraps every `extern "C"` shim, `shared::spawn_worker` wraps every worker thread, and `receiver::read_ahead` catches its reader's.
 - **Logging** goes through `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, never `blog` directly.
 - **URLs** never reach the log whole. Plugin lines go through `log::redacted_input_url`, FFmpeg's through `log::redacted_log_line`, because FFmpeg prints the user's URL (with `passphrase=` and `streamid=`) in its own errors.
 - **UI strings** never pass English to `module_text`. A new string goes in the call site and `data/locale/en-US.ini`; `tests/locale_keys.rs` checks both directions.

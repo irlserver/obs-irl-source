@@ -342,6 +342,11 @@ impl<T> DelayLine<T> {
         Some(entry.item)
     }
 
+    /// When the head packet comes due, if anything is queued.
+    pub fn next_release_ns(&self) -> Option<u64> {
+        self.entries.front().map(|entry| entry.release_ns)
+    }
+
     /// Move every queued release time later by `shift_ns`.
     ///
     /// Only ever later. Shifting earlier would make the whole line due at
