@@ -3,12 +3,9 @@
 //! The dock is Spillmaker's Qt widget from the C plugin (`cxx/sync-dock.cpp`),
 //! compiled in by `build.rs` when Qt6 is found and stubbed out otherwise. It
 //! talks to the plugin through a table of C function pointers
-//! (`cxx/irl-sync-dock.h`); this crate owns that boundary — the only unsafe
-//! code the dock needs — and exposes it as [`DockBackend`], which the plugin
-//! implements in safe Rust.
-//!
-//! Like `obs` and `ffmpeg`, this is an FFI crate: every raw pointer the dock
-//! touches lives here, and the plugin crate keeps `#![forbid(unsafe_code)]`.
+//! (`cxx/irl-sync-dock.h`). This crate owns that boundary, the only unsafe code
+//! the dock needs, and exposes it as [`DockBackend`] for the plugin to
+//! implement in safe Rust, so the plugin crate keeps `#![forbid(unsafe_code)]`.
 
 #![deny(missing_docs)]
 

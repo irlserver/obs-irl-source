@@ -399,18 +399,14 @@ pub const DEFAULT_SYNC_ENABLED: bool = false;
 pub const SYNC_DEFAULT_OFFSET_MS: i32 = 5000;
 /// Offset floor.
 pub const SYNC_MIN_OFFSET_MS: i32 = 0;
-/// Offset ceiling. Held as compressed packets, so the cost is bitrate × offset
-/// rather than decoded frames: 30s of a 6Mbit/s feed is about 22MB. The
-/// ceiling is here to bound a typo, not because the buffering is expensive.
+/// Offset ceiling. It bounds a typo, not memory: the hold is compressed
+/// packets, and 30s of a 6Mbit/s feed is about 22MB.
 pub const SYNC_MAX_OFFSET_MS: i32 = 30000;
-/// The offset is set, and reported, in whole seconds: it is a number
-/// co-streamers read to each other, and "six" is a thing two people can agree
-/// on over a call in a way that 6123ms is not. Stored in milliseconds because
-/// everything downstream computes in time.
+/// The offset is set and reported in whole seconds: co-streamers read it to
+/// each other, and "six" is easier to agree on over a call than 6123ms.
 pub const SYNC_OFFSET_STEP_MS: i32 = 1000;
-/// A server run for this plugin, so a fresh install lands on the burst polling
-/// policy and the drift correction that comes with it. Only a default: any
-/// host can be typed in, and one not on the burst list is polled at the
+/// A server run for this plugin, so a fresh install gets the burst polling
+/// policy and its drift correction. Any other host is polled at the
 /// public-pool cadence.
 pub const SYNC_DEFAULT_NTP_SERVER: &str = "ntp.kringkast.com";
 /// Rolling window over which arrival latency is peak-held, in buckets of
@@ -471,9 +467,7 @@ pub const SYNC_PUBLISH_INTERVAL_NS: u64 = 200_000_000;
 /// Published status older than this is reported as stale rather than as
 /// whatever it last said. Comfortably longer than the publish interval.
 pub const SYNC_PUBLISH_STALE_NS: u64 = 3_000_000_000;
-/// Anchor smoothing: eight samples is a third of a second at 30fps and
-/// averages the timecode's one-frame grid away without lagging an offset
-/// change. See `present_bias` in the controller.
+/// Anchor smoothing divisor; see `sync::fold_present_bias`.
 pub const SYNC_BIAS_SMOOTHING_DIV: i64 = 8;
 
 // ── NTP client ──

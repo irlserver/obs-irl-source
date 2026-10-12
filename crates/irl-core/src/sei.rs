@@ -1,25 +1,19 @@
-//! HEVC `time_code` SEI extraction (ITU-T H.265 D.2.27), port of the C
-//! branch's `sync-sei.c`.
+//! HEVC `time_code` SEI extraction (ITU-T H.265 D.2.27).
 //!
 //! Parsed here rather than taken from FFmpeg's `AV_FRAME_DATA_S12M_TIMECODE`
-//! side data, which the HEVC decoder does produce for this payload. That side
-//! data is packed through `av_timecode_get_smpte(avctx->framerate, ...)`, which
-//! squeezes the wire format's 9-bit `n_frames` into SMPTE 12M's two-digit frame
-//! field (`ff % 40`) and only handles rates above 30fps when
-//! `avctx->framerate` is populated. Live MPEG-TS routinely leaves the frame
-//! rate unset — the same reason the video thread measures the frame interval
-//! itself — so a 60fps sender's frame 45 would silently arrive as 5. Reading
-//! the SEI directly keeps the full field and needs no frame rate at all.
+//! side data. FFmpeg packs that through
+//! `av_timecode_get_smpte(avctx->framerate, ...)`, which squeezes the 9-bit
+//! `n_frames` into SMPTE 12M's two-digit frame field (`ff % 40`) and only
+//! handles rates above 30fps when `avctx->framerate` is set. Live MPEG-TS
+//! routinely leaves it unset, so a 60fps sender's frame 45 would arrive as 5.
+//! Reading the SEI directly keeps the full field and needs no frame rate.
 //!
-//! HEVC only, deliberately. Moblin — the only encoder in the IRL ecosystem
-//! currently emitting these — has its H.264 path disabled at the source, so
-//! there is nothing to read on that codec. H.264's `pic_timing` SEI is also not
-//! parseable in isolation: its leading `cpb_removal_delay` /
-//! `dpb_output_delay` fields are present only when the SPS VUI says so, so a
-//! correct reader has to track sequence parameter sets. Adding that for a
-//! payload no encoder sends would be untestable code, so this returns `None`
-//! for H.264 and the source reports "no timecode" — which is the honest
-//! answer.
+//! HEVC only. Moblin, the only IRL encoder emitting these, has its H.264 path
+//! disabled. H.264's `pic_timing` SEI is also not parseable in isolation: its
+//! leading `cpb_removal_delay` / `dpb_output_delay` fields exist only when the
+//! SPS VUI says so, so a correct reader has to track sequence parameter sets.
+//! That would be untestable code for a payload no encoder sends, so H.264
+//! reports "no timecode", which is the honest answer.
 
 use core::fmt;
 

@@ -1,29 +1,26 @@
-//! Timecode sync: absolute-time presentation control (port of the C branch's
-//! `sync-control.c`, minus the pipeline it steers).
+//! Timecode sync: absolute-time presentation control. Designed by Spillmaker
+//! for the C plugin's `nal-timecodes` branch.
 //!
-//! Every synced source targets the same rule: the frame stamped T is presented
-//! at NTP time T + offset. Sources do not negotiate; the alignment falls out of
-//! both ends sharing a clock. Two OBS instances anywhere, on the same NTP
-//! reference and the same offset, composite the same captured moment at the
-//! same instant — which is why the offset is one global number rather than a
-//! per-source setting.
+//! Every synced source follows one rule: the frame stamped T is presented at
+//! NTP time T + offset. Sources do not negotiate; the alignment falls out of
+//! sharing a clock. Two OBS instances anywhere, on the same NTP reference and
+//! offset, composite the same captured moment at the same instant, which is
+//! why the offset is one global number rather than a per-source setting.
 //!
-//! There is exactly one actuator — a delay line of *encoded* packets in front
-//! of the decoders ([`DelayLine`]) — and one loop driving it
-//! ([`SyncController`]). Holding compressed packets is a requirement, not an
-//! optimisation: a second of a 6Mbit/s feed is under a megabyte compressed and
-//! ~190MB decoded at 1080p60.
+//! There is one actuator, a delay line of *encoded* packets in front of the
+//! decoders ([`DelayLine`]), and one loop driving it ([`SyncController`]).
+//! Holding compressed packets is a requirement, not an optimisation: a second
+//! of a 6Mbit/s feed is under a megabyte compressed and ~190MB decoded at
+//! 1080p60.
 //!
 //! Nothing in the audio pipeline changes. Delaying the input shifts the whole
 //! PTS-to-OBS mapping with it, so the jitter buffer, the speed controller and
-//! the video pacing all keep doing exactly what they did — they simply see the
-//! stream arrive later. Every rate below is set under the speed controller's
-//! -2%/+5% authority for that reason.
+//! the video pacing simply see the stream arrive later. Every rate below is
+//! set under the speed controller's -2%/+5% authority for that reason.
 //!
-//! This module is the arithmetic and the state machine, with every input —
-//! the clocks, the NTP reference, the audio playout mapping, the settings —
-//! passed in per packet, so the whole loop is testable on a virtual clock. The
-//! plugin crate owns the packets, the locks and the log lines.
+//! Every input (clocks, NTP reference, playout mapping, settings) is passed in
+//! per packet, so the whole loop runs on a virtual clock in tests. The plugin
+//! crate owns the packets, the locks and the log lines.
 
 use std::collections::VecDeque;
 
@@ -39,23 +36,19 @@ const NS_PER_HOUR: i64 = 3600 * 1_000_000_000;
 /// Per-source sync status.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SyncStatus {
-    /// Nothing to align: sync switched off globally, this source not opted
-    /// in, or — the common one — no stream arriving. Deliberately not an
-    /// alarm state: a feed that is not connected is the normal condition
-    /// before someone goes live.
+    /// Sync off globally, this source not opted in, or no stream arriving.
+    /// Not an alarm state: a disconnected feed is normal before going live.
     #[default]
     Off,
-    /// Opted in, but nothing to align against: no SEI timecode in the stream
-    /// (H.264, RTMP, or timecodes not enabled on the sender), or no NTP
-    /// reference on this machine. By far the most common reason sync "does
-    /// not work", and not a failure of the sync itself.
+    /// Opted in, but no SEI timecode in the stream or no NTP reference on
+    /// this machine. The most common reason sync "does not work", and not a
+    /// failure of the sync itself.
     NoTimecode,
     /// The source stopped publishing status. Set by the registry, never by
     /// the controller.
     Stale,
-    /// The feed arrives later than the target offset, so its frames are
-    /// already past their slot when they get here. Nothing but a larger
-    /// offset (or a better uplink) fixes this.
+    /// The feed arrives later than the offset, so its frames are past their
+    /// slot on arrival. Only a larger offset or a better uplink fixes this.
     TooSlow,
     /// Converging. Expected at startup and after an offset change.
     Acquiring,
@@ -79,15 +72,14 @@ impl SyncStatus {
 
 /// Why a source that wants to sync has no timecode to align against.
 ///
-/// "No timecode" on its own sends people hunting in the wrong place — the
-/// cause is almost always one of three specific things, each with a different
-/// fix. Ordered by what the operator can act on soonest.
+/// "No timecode" alone sends people hunting in the wrong place; the cause is
+/// almost always one of three things, each with a different fix.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TcReason {
     /// Timecodes are arriving.
     #[default]
     Ok,
-    /// This machine has no NTP reference, so nothing can be compared.
+    /// This machine has no NTP reference.
     NoClock,
     /// The stream is not H.265. Moblin only writes the SEI on HEVC, and the
     /// `time_code` SEI this reads is HEVC-specific.
@@ -111,40 +103,36 @@ impl TcReason {
 
 /// What one source publishes for the dock and the websocket vendor.
 ///
-/// The three latency figures answer different questions and are deliberately
-/// not collapsed into one: `latency_ms` is how stale the freshest data is (a
-/// property of the sender and the network, unaffected by any setting),
-/// `added_ms` is how much extra hold this plugin is applying to reach the
-/// target, and `error_ms` is how far the actual presentation lands from it.
+/// The three latency figures answer different questions and stay separate:
+/// `latency_ms` is how stale the freshest data is (sender and network only),
+/// `added_ms` is the hold this plugin applies to reach the target, and
+/// `error_ms` is how far presentation lands from it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SyncSnapshot {
     /// Current status.
     pub status: SyncStatus,
     /// Only meaningful while `status` is [`SyncStatus::NoTimecode`].
     pub tc_reason: TcReason,
-    /// The most recent timecode from the sender, if one is on display.
+    /// The sender's most recent timecode, if one is on display.
     pub timecode: Option<Timecode>,
-    /// How stale the freshest received frame is, from its timecode against NTP.
+    /// How stale the freshest received frame is, by its timecode against NTP.
     pub latency_ms: i64,
     /// Rolling 60s maximum of `latency_ms`. Instantaneous latency reads fine
-    /// right up until a bitrate dip, so this is what an offset should be
-    /// chosen against.
+    /// right up until a bitrate dip, so an offset is chosen against this.
     pub latency_peak_ms: i64,
-    /// Extra hold currently applied to reach the target presentation time.
+    /// Extra hold applied to reach the target presentation time.
     pub added_ms: i64,
-    /// How far the actual presentation lands from the target, averaged over
-    /// about a second. Near zero when locked.
+    /// How far presentation lands from the target, averaged over about a
+    /// second. Near zero when locked.
     pub error_ms: i64,
-    /// The smallest settable offset at which this source could hold sync:
-    /// `latency_peak_ms` rounded up to a whole second. Deliberately not padded
-    /// with headroom: a source locks whenever the offset is at or above its
-    /// arrival latency, so a padded figure reads as a bug the first time
-    /// someone locks fine below it.
+    /// `latency_peak_ms` rounded up to a whole second. Not padded: a source
+    /// locks whenever the offset is at or above its arrival latency, so a
+    /// padded figure reads as a bug the first time someone locks below it.
     pub required_offset_ms: i64,
 }
 
-/// A source that has stopped publishing is stale, whatever it last said —
-/// unless it last said it was not participating, which stays true.
+/// A source that has stopped publishing is stale, whatever it last said,
+/// unless that was Off.
 pub fn apply_staleness(snap: &mut SyncSnapshot, updated_ns: u64, now_ns: u64) {
     if snap.status == SyncStatus::Off {
         return;
@@ -175,13 +163,12 @@ pub fn clamp_offset_ms(offset_ms: i32) -> i32 {
 
 /// How old the content stamped `tc` is, from its timecode against NTP.
 ///
-/// The comparison is modulo one hour, reduced to the nearest representative.
-/// That is not a shortcut: the sender writes local calendar components, so two
-/// senders in different time zones differ by whole hours, and the timecode
-/// carries no date at all, so it wraps at midnight. Working modulo an hour
-/// absorbs both, because a real arrival latency is seconds and can never be
-/// mistaken for half an hour. The one case it cannot resolve is a sender on a
-/// half-hour time zone offset, which lands exactly on the fold.
+/// Compared modulo one hour, reduced to the nearest representative. The sender
+/// writes local calendar components, so senders in different time zones differ
+/// by whole hours, and the timecode carries no date, so it wraps at midnight.
+/// A real arrival latency is seconds and never mistaken for half an hour, so
+/// working modulo an hour absorbs both. A sender on a half-hour time zone
+/// offset lands exactly on the fold and cannot be resolved.
 pub fn latency_in_hour_ns(utc_now_ns: i64, tc: &Timecode, frame_interval_ns: i64) -> i64 {
     let now_in_hour = ((utc_now_ns % NS_PER_HOUR) + NS_PER_HOUR) % NS_PER_HOUR;
     let tc_in_hour = (i64::from(tc.minutes) * 60 + i64::from(tc.seconds)) * 1_000_000_000
@@ -201,11 +188,10 @@ pub fn latency_in_hour_ns(utc_now_ns: i64, tc: &Timecode, frame_interval_ns: i64
 ///
 /// Where content should play for the stream to land on its offset, expressed
 /// as the audio playout offset it implies (`obs_ts - pts`). Smoothed, because
-/// a single reading inherits the timecode's one-frame grid — 33ms at 30fps,
-/// most of the lock tolerance — and the anchor is a one-shot placement with no
-/// second chance. Eight samples is a third of a second at 30fps and averages
-/// that grid away without lagging an offset change the loop would have to
-/// unpick.
+/// a single reading inherits the timecode's one-frame grid (33ms at 30fps,
+/// most of the lock tolerance) and the anchor is a one-shot placement. Eight
+/// samples, a third of a second at 30fps, average the grid away without
+/// lagging an offset change the loop would have to unpick.
 pub fn fold_present_bias(current: Option<i64>, raw_ns: i64) -> i64 {
     match current {
         Some(bias) => bias + (raw_ns - bias) / consts::SYNC_BIAS_SMOOTHING_DIV,
@@ -216,11 +202,10 @@ pub fn fold_present_bias(current: Option<i64>, raw_ns: i64) -> i64 {
 /// Where the audio holding `pts_ns` has to start playing, in the OBS clock,
 /// for the stream to land on its configured offset: `(anchor_ns, wait_ns)`.
 ///
-/// `None` when sync has nothing to say — no bias yet (no timecodes, no NTP
-/// reference, sync off) — or when the placement is already in the past, which
-/// anchoring cannot fix, or further out than the jitter buffer should be asked
-/// to hold. The wait is what the delay line takes over so the pre-roll does
-/// not land in the jitter buffer.
+/// `None` with no bias yet (no timecodes, no NTP reference, sync off), or when
+/// the placement is already in the past or further out than the jitter buffer
+/// should hold. The delay line takes over the wait so the pre-roll does not
+/// land in the jitter buffer.
 pub fn playout_anchor(
     pts_ns: i64,
     present_bias_ns: Option<i64>,
@@ -254,9 +239,8 @@ pub struct DelayLine<T> {
     /// Release times are clamped non-decreasing: the hold moves while packets
     /// are queued, and the decoder must never see them reordered.
     last_release_ns: u64,
-    /// Packets the line could not take. Should stay zero — the read loop
-    /// applies backpressure before the ceilings are reached — so a non-zero
-    /// count is reported rather than absorbed.
+    /// Packets the line could not take. The read loop applies backpressure
+    /// before the ceilings, so a non-zero count is reported, not absorbed.
     overflows: u64,
     max_packets: usize,
     max_bytes: usize,
@@ -349,11 +333,10 @@ impl<T> DelayLine<T> {
 
     /// Move every queued release time later by `shift_ns`.
     ///
-    /// Only ever later. Shifting earlier would make the whole line due at
-    /// once, which [`consts::SYNC_RELEASE_RATE`] exists to prevent. Later opens
-    /// a gap in the line, so it is safe exactly when something downstream is
-    /// holding enough to cover the gap — which is the one case it is used for
-    /// (the pre-roll takeover at prime).
+    /// Only ever later: earlier would make the whole line due at once, which
+    /// [`consts::SYNC_RELEASE_RATE`] exists to prevent. Later opens a gap, safe
+    /// only while something downstream holds enough to cover it (the pre-roll
+    /// takeover at prime).
     pub fn shift_later(&mut self, shift_ns: i64) {
         let shift = shift_ns.max(0) as u64;
         for entry in &mut self.entries {
@@ -420,23 +403,19 @@ impl PeakTracker {
 
 /// Trimmed mean of the presentation error over the last second.
 ///
-/// The per-packet reading carries about a frame of noise: it is the
-/// *predicted* presentation time of one access unit, taken from an audio
-/// playout mapping that steps as audio is submitted, against a capture
-/// timecode the sender can only express to frame resolution. That noise is
-/// zero-mean and the true error moves far slower, so filtering costs nothing
-/// real and buys two things: the loop corrects once per settle interval on a
-/// reading that is not a frame of dither, and the number the operator reads
-/// does not jitter while the alignment underneath it is steady.
+/// One reading carries about a frame of noise: it is the *predicted*
+/// presentation time of one access unit, from an audio playout mapping that
+/// steps as audio is submitted, against a timecode with frame resolution. The
+/// noise is zero-mean and the true error moves far slower, so filtering lets
+/// the loop correct on a reading that is not a frame of dither and keeps the
+/// operator's number steady while the alignment is.
 ///
-/// A trimmed mean rather than a median. Both reject the one wildly wrong
-/// sample a corrupt timecode produces, but a median *returns* one of the
-/// samples, so its output can only be a value the quantisation already
-/// permits; the loop then parks on the nearest step instead of on zero.
-/// Averaging what is left after the tails are cut lands between the steps.
+/// A trimmed mean rather than a median: both reject a corrupt timecode, but a
+/// median *returns* one of the samples, so the loop parks on the nearest
+/// quantisation step instead of on zero. Averaging what is left after the
+/// tails are cut lands between the steps.
 ///
-/// Bounded by time, not by sample count, so it behaves identically on a 25fps
-/// feed and a 240fps one.
+/// Bounded by time, not sample count, so 25fps and 240fps behave the same.
 #[derive(Debug, Clone)]
 pub struct ErrorFilter {
     window: [i64; consts::SYNC_ERROR_SAMPLES],
@@ -502,12 +481,11 @@ impl ErrorFilter {
         let sorted = &mut sorted[..self.count];
         sorted.sort_unstable();
 
-        // A tenth off each end, which is enough to lose a corrupt timecode
-        // without losing the shape of the distribution. Below ten samples a
-        // tenth rounds to nothing, so trim one instead: a window that small is
-        // a feed that has only just started, and one bad sample in three would
-        // otherwise pass straight through. The count kept is never less than
-        // one — at three samples this is exactly the median again.
+        // A tenth off each end loses a corrupt timecode without losing the
+        // distribution's shape. Below ten samples a tenth rounds to nothing,
+        // so trim one instead, or one bad sample in three on a feed that has
+        // just started passes straight through. At three samples this is the
+        // median.
         let mut trim = self.count / 10;
         if trim == 0 && self.count >= 3 {
             trim = 1;
@@ -520,20 +498,17 @@ impl ErrorFilter {
 
 // ── Frame rate ───────────────────────────────────────────────
 
-/// The frame rate as learned from the timecodes themselves, so converting
+/// The frame rate learned from the timecodes themselves, so converting
 /// `n_frames` to time never assumes one.
 ///
-/// Learned from the timecodes rather than from the decoder: `n_frames` is an
-/// index within its timecode second, so the highest index a second carries is
-/// that second's frame count, and using it to convert `n_frames` back to time
-/// is self-consistent by construction. It is also available on the receiver
-/// thread at the first complete second, where the decoder's own measurement is
-/// cross-thread and only written once frames come out the far side of the
-/// keyframe gate.
+/// Not from the decoder: `n_frames` is an index within its timecode second, so
+/// the highest index a second carries is its frame count, and converting with
+/// it is self-consistent by construction. It is also on the receiver thread at
+/// the first complete second, while the decoder's measurement is cross-thread
+/// and only exists once frames are past the keyframe gate.
 ///
-/// Taken from agreement between seconds rather than from any single one, so
-/// neither a lossy second nor a corrupt SEI can push a wrong figure into every
-/// latency measurement afterwards.
+/// Taken from agreement between seconds, so neither a lossy second nor a
+/// corrupt SEI can push a wrong figure into every later latency reading.
 #[derive(Debug, Clone, Default)]
 pub struct FpsLearner {
     interval_ns: i64,
@@ -564,10 +539,8 @@ impl FpsLearner {
         }
 
         // A second just ended, so its highest index is one full frame count.
-        //
-        // The second the stream was joined partway into counts the same as
-        // any other: frame indices ascend within a second, so joining late
-        // still observes that second's tail, which is where its maximum is.
+        // A second joined partway counts too: indices ascend within a second,
+        // so joining late still sees its tail, where the maximum is.
         let learned = if self.have_second {
             self.record(self.max_frames)
         } else {
@@ -587,20 +560,14 @@ impl FpsLearner {
             self.count += 1;
         }
 
-        // The count the recent seconds agree on — not the highest of them.
-        //
-        // Taking the maximum is the obvious choice and is wrong. It is robust
-        // to loss, which can only ever shorten a second, and that was the
-        // reasoning. But a corrupt SEI yields a garbage n_frames that is just
-        // as likely to be high as low, and a maximum adopts it outright: a
-        // 30fps sender read as "41 frames per second" across a reconnect,
-        // which put a quarter-second sawtooth into every latency measurement
-        // until it aged out.
-        //
-        // Requiring two of the recent seconds to agree rejects both failure
-        // modes at once, because loss and corruption both produce one-off
-        // values that nothing else matches. Ties go to the larger count, since
-        // between two plausible readings the short one is the damaged one.
+        // The count the recent seconds agree on, not the highest. A maximum
+        // survives loss, which only shortens a second, but a corrupt SEI's
+        // n_frames is as likely high as low and a maximum adopts it outright:
+        // a 30fps sender read as 41fps puts a quarter-second sawtooth into
+        // every latency reading until it ages out. Requiring two seconds to
+        // agree rejects both, because loss and corruption produce one-off
+        // values. Ties go to the larger count, since between two plausible
+        // readings the short one is the damaged one.
         let mut agreed: u16 = 0;
         let mut best_votes = 0;
         for i in 0..self.count {
@@ -623,10 +590,8 @@ impl FpsLearner {
         let frames = u32::from(agreed) + 1;
         let interval_ns = 1_000_000_000 / i64::from(frames);
 
-        // Outside what any real stream runs at: a corrupt SEI, or a sender
-        // counting something other than frames. Keep whatever was already
-        // learned rather than adopting a figure that would bias every
-        // conversion after it.
+        // Outside any real stream's rate: a corrupt SEI, or a sender counting
+        // something other than frames. Keep what was already learned.
         if !(consts::VIDEO_INTERVAL_MIN_NS..=consts::VIDEO_INTERVAL_MAX_NS).contains(&interval_ns) {
             return None;
         }
@@ -652,20 +617,19 @@ pub enum VideoCodec {
     Other(&'static str),
 }
 
-/// The audio playout mapping, as it stands, for predicting when a packet
-/// with a given PTS will reach the screen.
+/// The playout mapping as it stands, for predicting when a packet with a
+/// given PTS reaches the screen.
 ///
-/// The audio playout offset is the authoritative mapping — it is what the
-/// video path puts every frame through — and it already accounts for whatever
-/// the delay line is currently holding, because delaying the input shifts the
-/// mapping with it.
+/// The audio playout offset is authoritative: the video path puts every frame
+/// through it, and it already accounts for what the delay line holds, because
+/// delaying the input shifts the mapping with it.
 ///
-/// The video anchor is a fallback for streams that have no audio at all, never
-/// for the moments before audio primes. It describes video that has not been
-/// through the delay line yet, so on a stream that does have audio it reports
-/// a presentation time several seconds out — one such reading went straight
-/// into the loop as a -5747ms correction. A source with an audio track
-/// measures nothing until that audio is playing.
+/// The video anchor is a fallback for streams with no audio at all, never for
+/// the moments before audio primes. It describes video that has not been
+/// through the delay line yet, so on a stream with audio it reports a
+/// presentation time seconds out, which the loop would apply as a
+/// multi-second correction. A source with an audio track measures nothing
+/// until that audio is playing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PresentationMap {
     /// The audio playout mapping.
@@ -742,7 +706,7 @@ pub struct Outcome {
     pub publish: Option<SyncSnapshot>,
 }
 
-/// A log-worthy transition. The plugin renders each as the C branch's line.
+/// A log-worthy transition, rendered as a log line by the plugin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SyncEvent {
     /// The missing-timecode diagnosis changed (or timecodes were detected).
@@ -911,14 +875,13 @@ impl SyncController {
         let mut out = Outcome::default();
         let now = obs.now_ns;
 
-        // Take over the pre-roll the audio output is sitting out before it
-        // starts. Left alone it lands in the jitter buffer, which then starts
-        // playback several hundred milliseconds above target — and the speed
-        // controller drains that excess at +5%, which pulls the playout
-        // earlier and unwinds the placement it was there to make. Pausing the
-        // input for the same window the output is waiting leaves the buffer
-        // exactly where it was. Safe specifically because nothing is playing
-        // yet: the gap this opens is one the output is already waiting through.
+        // Take over the pre-roll the audio output sits out before it starts.
+        // Left alone it lands in the jitter buffer, which then starts playback
+        // several hundred milliseconds above target, and the speed controller
+        // drains that excess at +5%, pulling the playout earlier and undoing
+        // the placement. Pausing the input for the same window leaves the
+        // buffer where it was. Safe only because nothing is playing yet: the
+        // gap this opens is one the output is already waiting through.
         if let Some(defer_ns) = obs.anchor_defer_ns
             && defer_ns > 0
         {
@@ -941,10 +904,10 @@ impl SyncController {
             self.prime_deadline_ns = now + consts::SYNC_PRIME_WAIT_NS;
         }
 
-        // Whether the controller may act. Reading the timecodes does not
-        // depend on it: a source that is switched off still reports what it
-        // is receiving, which is the only way to tell a sender that is not
-        // stamping from one that is and simply has not been turned on yet.
+        // Reading the timecodes does not depend on `control`: a switched-off
+        // source still reports what it receives, which is the only way to
+        // tell a sender that is not stamping from one that is but has sync
+        // switched off here.
         let control = obs.wanted;
 
         if !control && self.status != SyncStatus::Off {
@@ -958,9 +921,8 @@ impl SyncController {
             self.observe_timecode(&tc, &mut obs, control, &mut out);
         }
 
-        // Whatever hold was built up is handed back gradually rather than
-        // dropped in one go. Stays engaged=false so re-enabling re-seeds from
-        // scratch.
+        // Hold is handed back gradually, not dropped in one go. engaged=false
+        // so re-enabling re-seeds from scratch.
         let mut give_back_hold = !control;
 
         // No timecode for a while: either the sender never sends them or it
@@ -977,8 +939,7 @@ impl SyncController {
                     diagnose_missing_timecode(obs.utc_now_ns.is_some(), obs.video_codec);
                 self.set_tc_reason(reason, codec, &mut out);
             }
-            // Nothing left to display either, so the stamp goes with it — a
-            // frozen timecode is worse than none.
+            // The stamp goes too: a frozen timecode is worse than none.
             self.tc = None;
             give_back_hold = true;
         }
@@ -1009,8 +970,7 @@ impl SyncController {
         out.events.push(SyncEvent::TcReason { reason, codec });
     }
 
-    /// Give back hold the source is no longer entitled to, at a rate the
-    /// pipeline downstream can absorb.
+    /// Give back unwanted hold at a rate the pipeline downstream can absorb.
     fn release_hold(&mut self, now: u64) {
         if self.hold_ns <= 0 {
             self.hold_ns = 0;
@@ -1038,14 +998,12 @@ impl SyncController {
     ///
     /// Engaging is not the finish line: seeding the hold stops the line for
     /// the length of the hold, so priming the instant it engages starves the
-    /// pipeline exactly as priming before it did. What the gate is waiting for
-    /// is the line flowing again — the first release. A source already
-    /// arriving late enough for the offset needs no hold, so the line never
-    /// queues anything and it is flowing the moment it engages.
+    /// pipeline exactly as priming before it would. The gate waits for the
+    /// line to flow again (the first release). A source already arriving late
+    /// enough needs no hold, so its line is flowing the moment it engages.
     ///
-    /// Released as soon as any of the reasons to wait stops applying: the
-    /// line is flowing, the source turns out to have nothing to align against,
-    /// sync is off, or the deadline passes.
+    /// Released once the line flows, the source turns out to have nothing to
+    /// align against, sync is off, or the deadline passes.
     fn prime_hold(&self, now: u64, wanted: bool) -> bool {
         let flowing = self.released_once || (self.engaged && self.hold_ns <= 0);
         wanted && !flowing && self.status != SyncStatus::NoTimecode && now < self.prime_deadline_ns
@@ -1054,10 +1012,8 @@ impl SyncController {
     /// Fold one timecoded video packet in.
     ///
     /// With `control` clear this measures and reports but changes nothing:
-    /// the stamp, the arrival latency and the peak are all still worth having
-    /// while sync is switched off, because they are what the operator looks at
-    /// to decide whether to switch it on. The controller stays out of it, and
-    /// the status stays Off.
+    /// the stamp, the latency and the peak are what the operator looks at to
+    /// decide whether to switch sync on. The status stays Off.
     fn observe_timecode(
         &mut self,
         tc: &Timecode,
@@ -1071,12 +1027,11 @@ impl SyncController {
             out.events.push(SyncEvent::FpsLearned(fps));
         }
 
-        // The interval to convert n_frames with. There is deliberately no
-        // default: an assumed rate would put n_frames × (assumed − actual) of
-        // error into every latency reading, seeded into the hold and held in
-        // the latency peak long after the real rate was known. Before the
-        // first complete second, the decoder's cadence will do if it has one
-        // — also measured, just from the other side of the pipe.
+        // No default interval: an assumed rate puts n_frames × (assumed −
+        // actual) of error into every latency reading, seeded into the hold
+        // and kept in the peak long after the real rate is known. Before the
+        // first complete second the decoder's cadence will do, since it is
+        // also measured.
         let interval = match self.fps.interval_ns() {
             Some(ns) => Some((ns, "timecodes")),
             None => (consts::VIDEO_INTERVAL_MIN_NS..=consts::VIDEO_INTERVAL_MAX_NS)
@@ -1084,11 +1039,10 @@ impl SyncController {
                 .then_some((obs.decoder_interval_ns, "decoder")),
         };
         let Some((frame_interval_ns, interval_origin)) = interval else {
-            // Timecodes are arriving, but nothing has established the frame
-            // rate yet, so n_frames cannot be turned into time. Hold the stamp
-            // for the dock and keep the staleness clock fed, but measure
-            // nothing: a guess here would seed the hold wrong and sit in the
-            // latency peak for a minute afterwards.
+            // No frame rate yet, so n_frames cannot become time. Keep the
+            // stamp for the dock and feed the staleness clock, but measure
+            // nothing: a guess would seed the hold wrong and sit in the peak
+            // for a minute.
             self.tc = Some(*tc);
             self.last_tc_ns = now;
             if !control {
@@ -1100,8 +1054,6 @@ impl SyncController {
         };
 
         let Some(utc_now_ns) = obs.utc_now_ns else {
-            // Timecodes are arriving but there is no NTP reference to compare
-            // them against, so nothing can be aligned.
             if !control {
                 return;
             }
@@ -1129,19 +1081,18 @@ impl SyncController {
         let needed_ns = offset_ns - latency_ns;
         let reachable = needed_ns >= 0;
 
-        // Engage: seed the hold so the pipeline primes already delayed,
-        // instead of priming undelayed and then taking a multi-second step
-        // that would starve the decoder. The nominal pipeline delay is the
-        // jitter cushion; the rest of the error is what the loop below is
-        // for, biased onto the cheap side of zero.
+        // Seed the hold so the pipeline primes already delayed, instead of
+        // priming undelayed and then taking a multi-second step that would
+        // starve the decoder. The nominal pipeline delay is the jitter
+        // cushion; the residual is the loop's, biased onto the cheap side of
+        // zero.
         if !self.engaged {
             let nominal_pipeline_ns = i64::from(obs.buffer_target_ms) * NS_PER_MS;
             self.hold_ns = (needed_ns - nominal_pipeline_ns + consts::SYNC_SEED_BIAS_NS).max(0);
             self.seed_reported = false;
 
-            // Hold off measuring until the line has filled and the first
-            // packets have come out the far end: every reading before then
-            // describes a pipeline that is not running yet.
+            // Every reading before the first packets leave the line describes
+            // a pipeline that is not running yet.
             self.settle_until_ns = now + self.hold_ns as u64 + consts::SYNC_SETTLE_MARGIN_NS as u64;
             self.engaged = true;
             self.locked = false;
@@ -1149,9 +1100,8 @@ impl SyncController {
             self.offset_generation = obs.offset_generation;
             self.error.reset();
 
-            // Now that the hold is known, the priming gate can be given the
-            // time it actually needs: the line goes quiet for the length of
-            // the hold before its first release.
+            // The line goes quiet for the length of the hold before its first
+            // release, so the priming gate gets that much longer.
             self.prime_deadline_ns = now + self.hold_ns as u64 + consts::SYNC_PRIME_WAIT_NS;
 
             out.events.push(SyncEvent::Engaged {
@@ -1164,9 +1114,9 @@ impl SyncController {
             });
         }
 
-        // The user turned the offset knob. Step by the delta rather than
-        // slewing: they asked for the change and expect a hitch, and slewing
-        // several seconds at the drift rate would take a minute.
+        // An offset change steps by the delta rather than slewing: the user
+        // asked for it and expects a hitch, and slewing seconds at the drift
+        // rate would take a minute.
         if obs.offset_generation != self.offset_generation {
             let delta_ns =
                 (i64::from(obs.offset_ms) - i64::from(self.applied_offset_ms)) * NS_PER_MS;
@@ -1174,40 +1124,35 @@ impl SyncController {
             self.applied_offset_ms = obs.offset_ms;
             self.offset_generation = obs.offset_generation;
             self.locked = false;
-            // The target just moved by seconds. Every sample in the window
-            // describes the old one, and an average of stale readings would
-            // hold the loop back from a change the user asked for.
+            // Every sample in the window describes the old target.
             self.error.reset();
         }
 
-        // Where this content should land, in the OBS clock. `now` cancels out
-        // of it — target = now + offset − (now − capture) = capture + offset —
-        // so this carries no arrival jitter, only the frame the timecode was
-        // quantised to.
+        // `now` cancels out (target = now + offset − (now − capture) =
+        // capture + offset), so this carries no arrival jitter, only the
+        // timecode's frame quantisation.
         let target_ns = now as i64 + needed_ns;
 
         if let Some(pts_ns) = obs.pkt_pts_ns {
-            // Publish it as the playout offset it implies, for the audio
-            // output to anchor on when it primes.
+            // The playout offset this implies, for the audio output to anchor
+            // on when it primes.
             out.bias_sample_ns = Some(target_ns - pts_ns);
 
             if let Some(presentation_ns) = (obs.presentation)().predict(pts_ns) {
                 self.error_ns = self.error.push(presentation_ns - target_ns, now);
 
-                // Wait for the last correction to reach the measurement before
-                // making another one. This loop's dead time is its own
-                // actuator: the error is derived from the audio playout
-                // offset, which describes audio that was *released* a hold
-                // ago, so a change to the hold does not show up in the error
-                // until roughly a hold later. Correcting per packet against a
-                // stale reading is positive feedback dressed as negative.
+                // Wait for the last correction to reach the measurement. The
+                // loop's dead time is its own actuator: the error comes from
+                // the audio playout offset, which describes audio *released* a
+                // hold ago, so a hold change shows up roughly a hold later.
+                // Correcting per packet on a stale reading is positive
+                // feedback dressed as negative.
                 if now >= self.settle_until_ns {
-                    // Positive error means we are late, so hold less. Unlocked
-                    // the correction is applied outright — nothing is aligned
-                    // yet, so there is no smoothness to protect, and the gate
-                    // above is what makes a full step safe. Once locked it is
-                    // rate limited, which keeps the resulting playback trim
-                    // inside the speed controller's inaudible band.
+                    // Positive error means late, so hold less. Unlocked, the
+                    // correction applies outright: nothing is aligned yet, and
+                    // the gate makes a full step safe. Locked, it is rate
+                    // limited to keep the playback trim inside the speed
+                    // controller's inaudible band.
                     let mut step_ns = -self.error_ns;
                     if self.locked {
                         let limit_ns = (elapsed_ns as f64 * consts::SYNC_SLEW_RATE) as i64;
@@ -1217,8 +1162,7 @@ impl SyncController {
                     self.last_adjust_ns = now;
 
                     // The first reading after engage is how far the seed
-                    // actually missed, and its sign says whether the bias is
-                    // doing its job. Said once per engage.
+                    // missed; its sign says whether the bias does its job.
                     if !self.seed_reported {
                         self.seed_reported = true;
                         out.events.push(SyncEvent::SeedMissed {
@@ -1229,13 +1173,12 @@ impl SyncController {
             }
         }
 
-        // Ceiling from first principles rather than the configured maximum.
-        // hold = (offset − latency) − pipeline, and the pipeline delay is
-        // never negative, so the hold can never legitimately exceed what is
-        // still needed. Plus headroom for the two deliberate overshoots — the
-        // seed bias, and the largest pre-roll the anchor may hand back — since
-        // the startup backlog trim discards audio after sync has chosen its
-        // hold, so the pipeline it subtracts can genuinely come out negative.
+        // Ceiling from first principles: hold = (offset − latency) −
+        // pipeline, and the pipeline delay is never negative. Plus headroom
+        // for the two deliberate overshoots (the seed bias and the largest
+        // pre-roll the anchor may hand back), because the startup backlog
+        // trim discards audio after sync chose its hold, so the pipeline it
+        // subtracts can come out negative.
         let max_hold_ns = if needed_ns > 0 {
             needed_ns + consts::SYNC_SEED_BIAS_NS + consts::SYNC_ANCHOR_MAX_WAIT_NS
         } else {
@@ -1248,13 +1191,11 @@ impl SyncController {
             self.hold_ns = 0;
         }
 
-        // The one invariant that keeps every path above safe, applied last so
-        // the ceiling cannot bypass it: the hold may grow as fast as it likes
-        // — that only makes packets wait longer — but it may never shrink
-        // faster than the pipeline can absorb. Shrinking it makes queued
-        // packets due sooner, and a large enough cut would make the whole
-        // line due at once and overrun the buffers downstream. Capping the
-        // decrease turns that into an ordinary drain instead.
+        // The invariant that keeps every path above safe, applied last so the
+        // ceiling cannot bypass it: the hold may grow freely (packets only
+        // wait longer) but never shrinks faster than the pipeline absorbs. A
+        // large enough cut makes the whole line due at once and overruns the
+        // buffers downstream; capped, it is an ordinary drain.
         let floor_ns = prev_hold_ns - (elapsed_ns as f64 * consts::SYNC_RELEASE_RATE) as i64;
         if self.hold_ns < floor_ns {
             self.hold_ns = floor_ns;
@@ -1263,10 +1204,9 @@ impl SyncController {
             self.hold_ns = 0;
         }
 
-        // Arm the gate whenever the hold actually moved. A change takes the
-        // larger of the old and new holds to work through the line — packets
-        // already queued drain at their existing release times — plus the
-        // rest of the pipeline.
+        // A hold change takes the larger of the old and new holds to work
+        // through the line (queued packets keep their release times), plus
+        // the rest of the pipeline.
         if self.hold_ns != prev_hold_ns {
             let propagation_ns = self.hold_ns.max(prev_hold_ns);
             self.settle_until_ns =
@@ -1278,10 +1218,9 @@ impl SyncController {
 
     /// Classify, with the alarm hysteresis applied.
     ///
-    /// Bonded cellular spikes constantly, and a feed will cross the threshold
-    /// for a second or two during a bitrate dip and recover on its own.
-    /// Alarming on that trains the operator to ignore the warning, which costs
-    /// more than the missed blip. Transient excursions still show up in the
+    /// Bonded cellular crosses the threshold for a second or two in every
+    /// bitrate dip and recovers on its own. Alarming on that trains the
+    /// operator to ignore the warning. Transient excursions still show in the
     /// peak column.
     fn update_status(&mut self, now: u64, reachable: bool, offset_ms: i32, out: &mut Outcome) {
         if reachable {
@@ -1321,11 +1260,9 @@ impl SyncController {
             return;
         }
 
-        // Nothing measured yet is not the same as measured zero. Between
-        // engage and the delay line's first release there is no reading at
-        // all, and error_ns is still the 0 it was reset to — which would
-        // otherwise be inside the lock tolerance and report Locked for the
-        // several seconds the line is filling.
+        // Nothing measured is not measured zero. Until the line's first
+        // release error_ns is the 0 it was reset to, inside the lock
+        // tolerance, and would report Locked while the line fills.
         if self.error.count() == 0 {
             self.locked = false;
             self.status = SyncStatus::Acquiring;
@@ -1349,10 +1286,9 @@ impl SyncController {
     }
 }
 
-/// Work out why nothing is arriving to align against. Ordered by what the
-/// operator can act on soonest: a missing clock is local, a wrong codec is
-/// one setting on the sender, and "absent" is everything else about how the
-/// sender is configured.
+/// Ordered by what the operator can act on soonest: a missing clock is local,
+/// a wrong codec is one sender setting, and "absent" is everything else about
+/// the sender's configuration.
 fn diagnose_missing_timecode(
     have_clock: bool,
     codec: VideoCodec,
@@ -1395,10 +1331,9 @@ mod tests {
         /// `pipeline_ns` after the delay line releases it. Negative by
         /// default, on purpose: the nominal pipeline is the 120ms target, but
         /// the startup backlog trim discards about half a second of audio
-        /// after the hold has been chosen, so the mapping a real pipeline
-        /// reports is shorter than nominal and the seed lands *early* — the
-        /// C branch's observed behaviour, and what the seed bias is shaped
-        /// around.
+        /// after the hold has been chosen, so a real pipeline reports less
+        /// than nominal and the seed lands *early*, which is what the seed
+        /// bias is shaped around.
         pipeline_ns: i64,
         mapping_valid: bool,
         /// Frames sent so far; the PTS is derived from it.

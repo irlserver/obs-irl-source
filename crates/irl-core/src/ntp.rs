@@ -1,29 +1,27 @@
 //! SNTP (RFC 4330) arithmetic for the timecode sync clock: the wire format,
 //! the offset/delay pair, the server policy, the drift fit and the offset
-//! filter. Port of the pure half of the C branch's `sync-ntp.c`; the socket,
-//! the thread and the poll schedule live in the plugin crate.
+//! filter. The socket, the thread and the poll schedule live in the plugin
+//! crate.
 //!
-//! The result of it all is an offset from the OBS monotonic clock
-//! (`os_gettime_ns`) to UTC, kept in the plugin and used only to place
-//! received frames on a shared timeline. Nothing system-wide is stepped.
+//! The result is an offset from the OBS monotonic clock (`os_gettime_ns`) to
+//! UTC, used only to place received frames on a shared timeline. Nothing
+//! system-wide is stepped.
 //!
 //! ## Drift
 //!
-//! `os_gettime_ns` counts this machine's crystal, and crystals are wrong: tens
-//! of ppm is normal, which is tens of milliseconds per minute of poll interval
-//! — the same order as the alignment sync is trying to hold. A rolling window
-//! of accepted samples is fitted (Theil–Sen, so one bad sample cannot tilt it)
-//! to recover that error as a slope, and under the burst policy the slope is
-//! used to extrapolate the offset between polls. Under the standard policy the
-//! slope is measured and shown but not applied: one sample a minute is too
-//! sparse to trust with the timeline.
+//! `os_gettime_ns` counts this machine's crystal, and tens of ppm of error is
+//! normal: tens of milliseconds per minute of poll interval, the same order as
+//! the alignment sync holds. A rolling window of accepted samples is fitted
+//! (Theil–Sen, so one bad sample cannot tilt it) to recover that error as a
+//! slope. The burst policy extrapolates the offset between polls with it; the
+//! standard policy only shows it, because one sample a minute is too sparse to
+//! trust with the timeline.
 //!
-//! Note what the number is measured against. `os_gettime_ns` is
-//! `QueryPerformanceCounter` on Windows, which nothing disciplines, so the fit
-//! is the raw crystal error. On Linux it is `CLOCK_MONOTONIC`, which the
-//! system NTP daemon does slew, so a machine already running chrony reports a
-//! drift near zero. Both are correct: it is the error of the clock this plugin
-//! actually schedules against.
+//! `os_gettime_ns` is `QueryPerformanceCounter` on Windows, which nothing
+//! disciplines, so the fit is the raw crystal error. On Linux it is
+//! `CLOCK_MONOTONIC`, which the system NTP daemon slews, so a machine running
+//! chrony reports a drift near zero. Both are correct: it is the error of the
+//! clock this plugin schedules against.
 
 use crate::consts;
 
@@ -136,7 +134,7 @@ pub fn parse_reply(reply: &[u8], t1_ns: u64, t4_ns: u64) -> QueryResult {
 /// Whether `host` is one of the servers run for this plugin, where the burst
 /// policy is both wanted and welcome. Matched case-insensitively, either
 /// exactly or as a parent domain, so an entry of `example.com` also covers
-/// `ntp1.example.com` — but not `notexample.com`.
+/// `ntp1.example.com` but not `notexample.com`.
 pub fn host_is_burst(host: &str) -> bool {
     if host.is_empty() {
         return false;
@@ -189,10 +187,10 @@ struct DriftSample {
 
 /// The rolling window of accepted samples the drift is fitted from.
 ///
-/// Offsets are a property of the path as much as of the clock — two servers
-/// disagree by their own asymmetry, which is the same order as the drift
-/// signal itself — so the window cannot span a change of server; the plugin
-/// resets it on every failover, recovery and reconfiguration.
+/// Offsets are a property of the path as much as of the clock: two servers
+/// disagree by their own asymmetry, the same order as the drift signal. The
+/// window cannot span a change of server, so the plugin resets it on every
+/// failover, recovery and reconfiguration.
 #[derive(Debug, Clone, Default)]
 pub struct DriftWindow {
     samples: Vec<DriftSample>,
@@ -380,7 +378,7 @@ impl OffsetEstimate {
             (true, Some(fit)) => {
                 // The fit is already a filtered estimate over minutes of
                 // samples, so it replaces the exponential average rather than
-                // feeding it — smoothing a smoothed value only adds lag.
+                // feeding it: smoothing a smoothed value only adds lag.
                 self.offset_ns = fit.offset_ns;
                 self.drift_slope = fit.slope;
                 self.drift_anchor_ns = fit.anchor_ns;
@@ -414,9 +412,9 @@ impl OffsetEstimate {
 
     /// The reference changed (new server, failover, recovery): the drift
     /// belongs to the reference it was measured against, so it goes with it.
-    /// The offset itself is kept — it is a few milliseconds stale at worst,
-    /// and dropping the sync would stall every source over an outage the
-    /// fallback is about to paper over.
+    /// The offset is kept: it is a few milliseconds stale at worst, and
+    /// dropping the sync would stall every source over an outage the fallback
+    /// is about to paper over.
     pub fn forget_drift(&mut self) {
         self.drift_valid = false;
         self.drift_ppm = 0.0;

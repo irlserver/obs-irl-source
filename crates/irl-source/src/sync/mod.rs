@@ -1,24 +1,14 @@
 //! Timecode sync: the global settings, the source registry behind the dock
 //! and the websocket vendor, their persistence, and the module lifecycle.
+//! [`control`] drives `irl_core::sync` per packet, [`ntp`] runs the clock over
+//! `irl_core::ntp`, and [`dock`] wraps the `sync-dock` crate.
 //!
-//! Port of the C branch's `src/sync/` (Spillmaker/obs-irl-source
-//! `nal-timecodes`): `sync-config.c` is this file, `sync-control.c` is
-//! [`control`] over the arithmetic in `irl_core::sync`, `sync-ntp.c` is
-//! [`ntp`] over `irl_core::ntp`, `sync-sei.c` is `irl_core::sei`, and
-//! `sync-dock.cpp` is the `sync-dock` crate behind [`dock`].
-//!
-//! The model is absolute, not relative. Every synced source independently
-//! presents the frame stamped T at NTP time T + offset; sources never
-//! negotiate with each other, and none of them needs to know the others
-//! exist. Two OBS instances anywhere, on the same NTP reference and the same
-//! offset, therefore composite the same captured moment at the same instant —
-//! which is the point, and is why the offset is one global number rather than
-//! a per-source setting.
-//!
-//! That choice also keeps the hot path free of cross-source coordination: the
-//! receiver thread reads two atomics and its own timecodes. What lives here is
-//! only the settings those atomics come from, plus a registry that exists so
-//! the dock and the websocket vendor have something to enumerate.
+//! The model is absolute: every synced source presents the frame stamped T at
+//! NTP time T + offset without knowing the others exist (see
+//! `irl_core::sync`). That keeps the hot path free of cross-source
+//! coordination: the receiver thread reads two atomics and its own timecodes.
+//! The registry here exists only so the dock and the vendor have something to
+//! enumerate.
 
 pub mod control;
 mod dock;
@@ -72,9 +62,8 @@ struct Slot {
     source: SourceHandle,
     sync_enabled: bool,
     snap: SyncSnapshot,
-    /// When the receiver thread last published. A source whose receiver has
-    /// stopped delivering stops publishing, and its last snapshot would
-    /// otherwise keep reading as healthy forever.
+    /// When the receiver thread last published, so a receiver that stopped
+    /// delivering does not read as healthy forever.
     updated_ns: u64,
 }
 
@@ -87,9 +76,8 @@ struct Global {
     /// Hot: read per packet by every receiver thread.
     enabled: AtomicBool,
     offset_ms: AtomicI32,
-    /// Bumped whenever the offset changes (or sync is switched on), so a
-    /// receiver notices and re-seats instead of slewing several seconds at
-    /// the drift rate.
+    /// Bumped whenever the offset changes or sync is switched on, so a
+    /// receiver re-seats instead of slewing seconds at the drift rate.
     offset_generation: AtomicU32,
     /// Cold: settings, dock and vendor only.
     cold: Mutex<Cold>,
@@ -124,12 +112,10 @@ pub fn offset_generation() -> u32 {
 
 // ── Settings ──────────────────────────────────────────────────
 
-/// Read the current settings. They persist in the module config directory,
-/// loaded at module load and written by each setter — global rather than
-/// per-source, so they live outside the scene collection: the offset is a
-/// number a group of streamers agrees on, not a property of one machine's
-/// layout. A scene collection copied to another machine therefore arrives
-/// without it, which is the intended behaviour.
+/// The settings persist in the module config directory, outside the scene
+/// collection: the offset is a number a group of streamers agrees on, not a
+/// property of one machine's layout, so a copied scene collection
+/// deliberately arrives without it.
 pub fn config() -> SyncConfig {
     SyncConfig {
         enabled: is_enabled(),
@@ -144,8 +130,8 @@ pub fn set_enabled(enabled: bool) {
         return;
     }
     SYNC.enabled.store(enabled, Relaxed);
-    // Turning sync on is a re-seat for every source, same as an offset
-    // change: their delay lines start from nothing.
+    // Turning sync on re-seats every source, like an offset change: their
+    // delay lines start from nothing.
     SYNC.offset_generation.fetch_add(1, Relaxed);
     irl_info!(
         "Timecode sync {} (offset {}ms)",
@@ -162,17 +148,14 @@ pub fn set_offset_ms(offset_ms: i32) {
         return;
     }
     SYNC.offset_ms.store(offset_ms, Relaxed);
-    // A user turning this knob is asking every synced source to shift at
-    // once and expects a hitch. Bumping the generation makes the receivers
-    // step rather than slew, which converges in one frame instead of the
-    // minute a drift-rate correction would take.
+    // The user expects a hitch. A new generation makes the receivers step
+    // rather than slew, converging in one frame instead of a minute.
     SYNC.offset_generation.fetch_add(1, Relaxed);
     irl_info!("Timecode sync offset set to {offset_ms}ms");
     save();
 }
 
-/// Change the NTP server. Takes effect on the next poll, and forces one
-/// immediately. An empty host stops polling.
+/// Takes effect immediately with a forced poll. An empty host stops polling.
 pub fn set_ntp_server(host: &str) {
     let applied = {
         let mut cold = SYNC.cold.lock();
@@ -198,8 +181,7 @@ fn config_path() -> Option<CString> {
 }
 
 fn load() {
-    // Defaults first, so a missing or unreadable file is simply "not
-    // configured yet" rather than a failure to start.
+    // Defaults first: a missing or unreadable file is "not configured yet".
     SYNC.enabled.store(false, Relaxed);
     SYNC.offset_ms
         .store(consts::SYNC_DEFAULT_OFFSET_MS, Relaxed);
@@ -300,8 +282,7 @@ pub fn publish(source: SourceHandle, snap: &SyncSnapshot) {
 pub fn collect() -> Vec<SyncEntry> {
     let now_ns = obs::time::gettime_ns();
     // The lock is held across `obs_source_get_name()` so a source cannot be
-    // unregistered — which `Drop` does before tearing anything down — while
-    // its name is being read.
+    // unregistered (which `Drop` does before teardown) mid-read.
     let cold = SYNC.cold.lock();
     cold.slots
         .iter()
@@ -319,16 +300,13 @@ pub fn collect() -> Vec<SyncEntry> {
 
 // ── Module lifecycle ──────────────────────────────────────────
 
-/// `irl_sync_module_load`: start the clock and load the settings. Ordering:
-/// the NTP client has to exist before the settings are loaded, because
-/// loading them applies the configured server to it.
+/// The NTP client has to exist before the settings load, because loading
+/// applies the configured server to it.
 ///
-/// Polling is not gated on the master switch. It was, to avoid sending
-/// packets to a third-party pool for users who never turn sync on, and the
-/// cost of that was a dock whose clock sat dead until sync had been enabled
-/// once — which is backwards, because the clock is what tells you whether
-/// sync would work before you commit to it. One request a minute is the
-/// price.
+/// Polling is not gated on the master switch: the clock is what tells you
+/// whether sync would work before you commit to it, so a dock whose clock
+/// sits dead until sync is enabled is backwards. One request a minute to the
+/// pool is the price.
 pub fn module_load() {
     ntp::start();
     load();
@@ -337,13 +315,12 @@ pub fn module_load() {
     ntp::set_enabled(true);
 }
 
-/// `irl_sync_module_post_load`: the dock needs the frontend, which is only
-/// guaranteed once module loading has finished.
+/// The dock needs the frontend, which is only guaranteed once module loading
+/// has finished.
 pub fn module_post_load() {
     dock::register();
 }
 
-/// `irl_sync_module_unload`.
 pub fn module_unload() {
     dock::unregister();
     ntp::stop();
@@ -357,15 +334,13 @@ fn set_string(data: &Data<'_>, key: &CStr, value: &str) {
     }
 }
 
-/// `GetSyncStatus`: the whole sync picture in one call — what the group is
-/// configured to do, whether this machine has a clock worth trusting, and
-/// every source's status.
+/// `GetSyncStatus`: the settings, whether this machine's clock is worth
+/// trusting, and every source's status in one call.
 ///
-/// This is the alerting path. A dock only helps when someone is looking at
-/// it, and during a live IRL show the operator may be nowhere near the
-/// machine — whereas the person who can actually fix an out-of-sync feed is
-/// the one holding the phone, and chat is how you reach them. A bot polling
-/// this can say "chase cam out of sync, needs 7.4s" where it will be seen.
+/// This is the alerting path. During a live IRL show the operator may be
+/// nowhere near the dock, and the person who can fix an out-of-sync feed is
+/// the one holding the phone, reachable through chat. A bot polling this can
+/// say "chase cam out of sync, needs 7.4s" where it will be seen.
 pub fn vendor_status(_request: &Data<'_>, response: &OwnedData) {
     let cfg = config();
     let response = response.data();
@@ -381,9 +356,8 @@ pub fn vendor_status(_request: &Data<'_>, response: &OwnedData) {
         clock.set_i64(c"offset_ms", status.offset_ns / 1_000_000);
         clock.set_i64(c"rtt_ms", status.rtt_ns / 1_000_000);
         clock.set_i64(c"age_ms", (status.age_ns / 1_000_000) as i64);
-        // Which server is answering, and whether it is the one that was asked
-        // for: a bot watching this is the thing most likely to notice that
-        // everyone quietly failed over to the public pool.
+        // A bot is the thing most likely to notice that everyone quietly
+        // failed over to the public pool.
         set_string(&clock, c"primary_server", &status.primary);
         clock.set_bool(c"burst_mode", status.burst_mode);
         clock.set_bool(c"fallback_active", status.fallback_active);
@@ -405,8 +379,6 @@ pub fn vendor_status(_request: &Data<'_>, response: &OwnedData) {
             set_string(&item, c"source_name", &entry.source_name);
             item.set_bool(c"sync_enabled", entry.sync_enabled);
             set_string(&item, c"status", entry.snap.status.name());
-            // Which of the three causes of "no timecode" this is, so a bot
-            // can say something actionable instead of just "not synced".
             set_string(&item, c"timecode_reason", entry.snap.tc_reason.name());
             item.set_i64(c"latency_ms", entry.snap.latency_ms);
             item.set_i64(c"latency_peak_ms", entry.snap.latency_peak_ms);
@@ -445,10 +417,9 @@ pub fn vendor_status(_request: &Data<'_>, response: &OwnedData) {
 /// and `ntp_server` (string; empty stops polling) is optional, and the
 /// response carries the settings as they stand afterwards.
 ///
-/// Not in the C branch, whose settings were only reachable through the Qt
-/// dock. Here the dock is built only when Qt is found, so the vendor needs a
-/// way to operate sync headless — and it gives a bot the other half of the
-/// alerting path: raising the offset to what `GetSyncStatus` recommends.
+/// The dock is built only when Qt is found, so this is how sync is operated
+/// headless. It is also the other half of the alerting path: a bot can raise
+/// the offset to what `GetSyncStatus` recommends.
 pub fn vendor_set_config(request: &Data<'_>, response: &OwnedData) {
     if request.has(c"sync_enabled") {
         set_enabled(request.get_bool(c"sync_enabled"));

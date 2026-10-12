@@ -1,35 +1,28 @@
-//! The module-wide SNTP client (port of the C branch's `sync-ntp.c`,
-//! Spillmaker/obs-irl-source `nal-timecodes`).
+//! The module-wide SNTP client, shared by every source.
 //!
 //! Timecode sync compares a sender's wall clock against this machine's, so
-//! both ends have to be disciplined against the same reference. The host
-//! system clock is not good enough for that: Windows' w32time defaults to a
-//! nine-hour poll and roughly one-second accuracy, two orders of magnitude
-//! past the frame-level alignment this feature promises. Moblin does not
-//! trust iOS's clock either — it runs its own NTP client and stamps frames
-//! from that — so the receiving end matches it.
-//!
-//! One client per module, shared by every source. Thread-safe. Polling runs
-//! from module load, not from the master sync switch: the clock is what an
-//! operator reads to decide whether sync is worth turning on.
+//! both ends have to be disciplined against the same reference. The system
+//! clock is not good enough: Windows' w32time defaults to a nine-hour poll and
+//! roughly one-second accuracy, two orders of magnitude past frame-level
+//! alignment. Moblin runs its own NTP client rather than trust iOS's clock, so
+//! the receiving end does the same.
 //!
 //! Two polling policies, chosen from the server name (see
 //! `irl_core::ntp::host_is_burst`):
 //!
-//! - **Burst** — servers this project runs, for users of this plugin. Four
-//!   packets on acquisition, lowest round trip wins, then one packet every 1
-//!   to 30 seconds at random. Roughly four packets a minute per client is
-//!   nothing to a server that exists for this, and it buys the sample density
-//!   the drift estimate needs.
-//! - **Standard** — public pools, which are donated capacity. One packet per
-//!   poll at the conventional 64 seconds, doubling that on a kiss-o'-death
-//!   rate code and stopping altogether on a denial.
+//! - **Burst**: servers this project runs. Four packets on acquisition,
+//!   lowest round trip wins, then one packet every 1 to 30 seconds at random.
+//!   About four packets a minute is nothing to a server that exists for this,
+//!   and it buys the sample density the drift estimate needs.
+//! - **Standard**: public pools, which are donated capacity. One packet every
+//!   64 seconds, doubling on a kiss-o'-death rate code and stopping on a
+//!   denial.
 //!
 //! A burst server that stops answering is a broken clock for everyone using
 //! it, so three failed polls hand over to a public pool at the standard
-//! cadence, while the configured server is probed again every 30 to 60
-//! seconds (randomised, so that everyone knocked off by the same outage does
-//! not come back in step).
+//! cadence, while the configured server is probed every 30 to 60 seconds
+//! (randomised, so everyone knocked off by one outage does not return in
+//! step).
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::thread::JoinHandle;
@@ -46,10 +39,9 @@ pub struct NtpStatus {
     /// `utc_ns = os_gettime_ns() + offset_ns`, drift correction included.
     /// Only meaningful when `synced`.
     pub offset_ns: i64,
-    /// Round-trip time of the sample the current offset came from, and how
-    /// long ago it was taken: an offset from a 400ms round trip is worth less
-    /// than one from 8ms, and a sync that stopped refreshing an hour ago is a
-    /// broken reference that would otherwise keep ticking plausibly.
+    /// Round trip and age of the sample the offset came from: an offset from
+    /// a 400ms round trip is worth less than one from 8ms, and a sync that
+    /// stopped refreshing an hour ago still ticks plausibly.
     pub rtt_ns: i64,
     pub age_ns: u64,
     /// The server actually being polled: the fallback pool rather than
@@ -58,9 +50,8 @@ pub struct NtpStatus {
     pub primary: String,
     pub burst_mode: bool,
     pub fallback_active: bool,
-    /// This machine's measured crystal error, positive when the local clock
-    /// runs fast. Measured under both policies once enough samples exist,
-    /// applied only under the burst policy.
+    /// This machine's crystal error, positive when the local clock runs fast.
+    /// Measured under both policies, applied only under burst.
     pub drift_valid: bool,
     pub drift_ppm: f64,
 }
@@ -154,8 +145,8 @@ pub fn stop() {
     }
 }
 
-/// Change the server. Takes effect on the next poll, and forces one
-/// immediately. An empty host stops polling and drops the sync.
+/// Takes effect immediately with a forced poll. An empty host stops polling
+/// and drops the sync.
 pub fn set_server(host: &str) {
     let mut state = NTP.state.lock();
     if !host.is_empty() {
@@ -174,9 +165,8 @@ pub fn set_server(host: &str) {
     }
 }
 
-/// Start or stop polling. Disabling keeps the last offset rather than
-/// dropping it — it simply ages, which [`status`] reports — so re-enabling
-/// has something usable before the first fresh sample arrives.
+/// Disabling keeps the last offset to age (which [`status`] reports), so
+/// re-enabling has something usable before the first fresh sample.
 pub fn set_enabled(enabled: bool) {
     let changed = {
         let mut state = NTP.state.lock();
@@ -222,8 +212,7 @@ pub fn status() -> NtpStatus {
     }
 }
 
-/// Current UTC in nanoseconds since the Unix epoch, or `None` when no sync
-/// has been established.
+/// Nanoseconds since the Unix epoch, or `None` while unsynced.
 pub fn utc_now_ns() -> Option<i64> {
     let now = obs::time::gettime_ns();
     NTP.state.lock().estimate.utc_now_ns(now)
@@ -239,10 +228,8 @@ fn is_synced() -> bool {
     NTP.state.lock().estimate.synced
 }
 
-/// Exchange one packet with `addr`. The two local timestamps come from
-/// `os_gettime_ns` rather than the system clock, which is the whole point:
-/// the result is an offset onto the same monotonic timebase every other part
-/// of the plugin schedules against.
+/// The local timestamps come from `os_gettime_ns`, not the system clock, so
+/// the result is an offset onto the timebase the plugin schedules against.
 fn query_once(addr: SocketAddr) -> QueryResult {
     let bind: SocketAddr = if addr.is_ipv4() {
         ([0, 0, 0, 0], 0).into()
@@ -274,9 +261,9 @@ fn query_once(addr: SocketAddr) -> QueryResult {
     irl_core::ntp::parse_reply(&reply[..got], t1, t4)
 }
 
-/// `samples` packets to `host`, keeping the one with the lowest round trip.
-/// Cellular and Wi-Fi round trips vary by hundreds of milliseconds; the
-/// minimum of a burst is far closer to the truth than any single sample.
+/// Keeps the lowest round trip of `samples` packets: cellular and Wi-Fi round
+/// trips vary by hundreds of milliseconds, and the minimum of a burst is far
+/// closer to the truth than any single sample.
 fn poll(host: &str, samples: usize) -> QueryResult {
     let Some(addr) = (host, consts::NTP_PORT)
         .to_socket_addrs()
@@ -290,9 +277,7 @@ fn poll(host: &str, samples: usize) -> QueryResult {
     let mut worst = QueryResult::Fail;
 
     for _ in 0..samples {
-        // Checked between samples so shutdown waits out at most one receive
-        // timeout rather than the whole burst. Without it, quitting OBS
-        // mid-poll would block the join for seconds.
+        // Shutdown waits out at most one receive timeout, not the whole burst.
         if should_stop() {
             break;
         }
@@ -340,9 +325,8 @@ fn publish_sample(best: &Sample, burst_mode: bool, drift: &mut DriftWindow) {
     }
 }
 
-/// Announce which server is being polled and under which policy. The drift
-/// estimate belongs to the reference it was measured against, so it goes
-/// with it.
+/// The drift belongs to the reference it was measured against, so a change
+/// of server forgets it.
 fn set_active(host: &str, burst_mode: bool, fallback: bool) {
     let mut state = NTP.state.lock();
     state.active = host.to_owned();
@@ -360,7 +344,7 @@ struct PollState {
     fallback: bool,
     /// Next poll is the acquisition burst.
     acquire: bool,
-    /// Server told us to stop, so we did.
+    /// The server sent a kiss-o'-death denial.
     denied: bool,
     /// Failed over, and the primary is worth retrying.
     probe_primary: bool,
@@ -435,9 +419,8 @@ fn begin_fallback(st: &mut PollState, probe: bool, drift: &mut DriftWindow, rng:
         u64::MAX
     };
     drift.reset();
-    // The offset itself is kept: it is a few milliseconds stale at worst, and
-    // dropping the sync would stall every source over an outage the pool is
-    // about to paper over. The pool's own samples ease it across.
+    // The offset is kept (see `OffsetEstimate::forget_drift`); the pool's own
+    // samples ease it across.
     set_active(consts::NTP_FALLBACK_SERVER, false, true);
 }
 
@@ -470,8 +453,8 @@ fn poll_primary(st: &mut PollState, drift: &mut DriftWindow, rng: &mut XorShift3
             }
         }
         QueryResult::Rate => {
-            // Being asked to slow down is not a failure, so it does not count
-            // toward the failover — the server is answering.
+            // The server is answering, so this does not count toward
+            // failover.
             if st.pool_interval_ms < consts::NTP_POLL_MAX_INTERVAL_MS {
                 st.pool_interval_ms *= 2;
             }
@@ -483,10 +466,9 @@ fn poll_primary(st: &mut PollState, drift: &mut DriftWindow, rng: &mut XorShift3
             st.pool_interval_ms
         }
         QueryResult::Deny => {
-            // Ignoring this is how a client gets an address blocked, so this
-            // server is not asked again. If there is somewhere else to go, go
-            // there; otherwise the last offset stays and ages, which the dock
-            // reports.
+            // Ignoring this gets an address blocked, so the server is not
+            // asked again. Without a fallback the last offset ages, which the
+            // dock reports.
             if !st.primary.eq_ignore_ascii_case(consts::NTP_FALLBACK_SERVER) {
                 irl_warn!(
                     "NTP server '{}' refused service; using '{}' instead",
@@ -519,8 +501,7 @@ fn poll_primary(st: &mut PollState, drift: &mut DriftWindow, rng: &mut XorShift3
                 return 0; // poll the pool immediately
             }
 
-            // Once per outage rather than once per attempt: at the burst
-            // policy's retry gap this line would otherwise fill the log.
+            // Once per outage: at the burst retry gap this would fill the log.
             if st.consec_fail == 1 {
                 irl_warn!(
                     "NTP poll of '{}' failed; timecode sync stays unsynced until it succeeds",
@@ -568,8 +549,7 @@ fn poll_fallback(st: &mut PollState, drift: &mut DriftWindow, rng: &mut XorShift
                 }
                 st.pool_interval_ms
             }
-            // Both servers are refusing. Nothing left to poll, so stop asking;
-            // the probe still runs the primary.
+            // Both servers refuse; the probe still runs the primary.
             QueryResult::Deny => consts::NTP_POLL_MAX_INTERVAL_MS,
             QueryResult::Fail => {
                 if is_synced() {
@@ -598,7 +578,7 @@ fn poll_fallback(st: &mut PollState, drift: &mut DriftWindow, rng: &mut XorShift
 fn poll_thread() {
     let mut st = PollState::new();
     let mut drift = DriftWindow::default();
-    // Seeded off the clock and this thread's own stack, so two OBS instances
+    // Seeded off the clock and this thread's stack, so two OBS instances
     // started by the same script do not draw the same intervals.
     let seed_anchor = 0u8;
     let seed = (obs::time::gettime_ns() >> 8) as u32 ^ (&raw const seed_anchor as usize as u32);
@@ -628,9 +608,7 @@ fn poll_thread() {
         }
 
         let wait_ms = if !enabled || st.primary.is_empty() || st.denied {
-            // Nothing to do: polling is off, no server is set, or the server
-            // has refused us. Sit on the condvar until a setter says
-            // otherwise. No packets leave the machine in this state.
+            // No packets leave the machine until a setter wakes the condvar.
             consts::NTP_IDLE_INTERVAL_MS
         } else if st.fallback {
             poll_fallback(&mut st, &mut drift, &mut rng)
@@ -638,9 +616,7 @@ fn poll_thread() {
             poll_primary(&mut st, &mut drift, &mut rng)
         };
 
-        // Woken early by a settings change or by shutdown. The predicate
-        // re-check handles both, and a spurious wakeup just re-reads the
-        // settings.
+        // A spurious wakeup just re-reads the settings.
         let mut state = NTP.state.lock();
         if state.running && !state.config_dirty && wait_ms > 0 {
             NTP.wake

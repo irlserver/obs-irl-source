@@ -1,7 +1,6 @@
 //! Compiles the Qt dock (`cxx/sync-dock.cpp`) when Qt6 Widgets can be found,
-//! and builds the crate as a stub otherwise — the same bargain the C plugin's
-//! CMake made (`IRL_ENABLE_DOCK`, silently off without Qt): sync itself runs
-//! headless and its status stays readable over the obs-websocket vendor.
+//! and builds the crate as a stub otherwise: sync itself runs headless and its
+//! status stays readable over the obs-websocket vendor.
 //!
 //! Where Qt comes from, in order:
 //!
