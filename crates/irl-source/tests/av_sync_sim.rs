@@ -1586,3 +1586,19 @@ fn timecode_sync_places_a_stream_without_audio() {
     report.assert_on_offset(5.0, 40.0, report.tick_ns as i64);
     assert_eq!(report.sync.expect("synced").status, SyncStatus::Locked);
 }
+
+/// Low Latency Audio has no speed controller to absorb a hold change and no
+/// jitter buffer to anchor in, so sync stays out of it.
+#[test]
+fn timecode_sync_leaves_low_latency_audio_alone() {
+    let report = Scenario::new(30)
+        .network_latency(300)
+        .low_latency()
+        .timecode_sync(3000)
+        .run();
+
+    report.assert_healthy();
+    let snap = report.sync.expect("synced");
+    assert_eq!(snap.added_ms, 0);
+    assert_eq!(snap.status, SyncStatus::Off);
+}
