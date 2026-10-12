@@ -431,6 +431,7 @@ dependencies = [
  "irl-provider",
  "obs",
  "parking_lot",
+ "sync-dock",
 ]
 
 [[package]]

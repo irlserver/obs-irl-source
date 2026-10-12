@@ -61,6 +61,7 @@ impl Config {
                     .clamp(consts::CATCHUP_PERCENT_MIN, consts::CATCHUP_PERCENT_MAX),
                 wait_for_keyframe: settings.get_bool(c"wait_for_keyframe"),
                 clear_on_disconnect: settings.get_bool(c"clear_on_disconnect"),
+                sync_enabled: settings.get_bool(c"sync_enabled"),
                 // A non-positive target falls back to the default.
                 watermarks: Watermarks::derive(settings.get_i64(c"buffer_target_ms") as i32),
             },

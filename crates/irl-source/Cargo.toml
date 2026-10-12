@@ -29,5 +29,6 @@ deadlocks = ["parking_lot/deadlock_detection"]
 obs = { workspace = true }
 irl-ffmpeg = { workspace = true }
 irl-core = { workspace = true }
+sync-dock = { workspace = true }
 parking_lot = { workspace = true }
 irl-provider = { workspace = true }

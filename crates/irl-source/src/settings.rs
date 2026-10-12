@@ -23,6 +23,9 @@ pub fn defaults(settings: &Data<'_>) {
     settings.set_default_bool(c"low_latency_audio", consts::DEFAULT_LOW_LATENCY_AUDIO);
     settings.set_default_bool(c"close_when_inactive", consts::DEFAULT_CLOSE_WHEN_INACTIVE);
     settings.set_default_bool(c"clear_on_disconnect", consts::DEFAULT_CLEAR_ON_DISCONNECT);
+    // The one thing about timecode sync that belongs on a source rather than
+    // in the dock: whether this feed takes part.
+    settings.set_default_bool(c"sync_enabled", consts::DEFAULT_SYNC_ENABLED);
 }
 
 pub fn properties(instance: Option<&IrlSource>) -> Properties {
@@ -78,6 +81,15 @@ pub fn properties(instance: Option<&IrlSource>) -> Properties {
         module_text(c"AudioBufferHelp"),
         TextType::Info,
     );
+
+    // ── Timecode sync ──
+    //
+    // Everything else about sync — the master switch, the offset, the NTP
+    // server — is shared by every source and every OBS instance, so it lives
+    // in the IRL Sync dock and the module's own config store (`crate::sync`),
+    // not in the scene collection.
+    props.add_bool(c"sync_enabled", module_text(c"Sync"));
+    props.add_text(c"sync_help", module_text(c"SyncHelp"), TextType::Info);
 
     // ── Advanced ──
     props.add_text(
