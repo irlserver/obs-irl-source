@@ -73,9 +73,9 @@ means every feed waits for the slowest one.
 | **Locked** | Aligned, within a frame or two |
 | **Acquiring** | Converging. Normal at startup and after an offset change |
 | **Too slow** | The feed arrives later than the offset. Raise the offset, or improve that uplink |
-| **No timecode** | Nothing to align against. The dock says which of three causes it is: *no NTP reference here*, *stream is not H.265*, or *sender is not stamping*. Not a sync failure, and the offset will not help |
+| **No timecode** | Nothing to align against. The dock says which of three causes it is: *no NTP reference here*, *stream is not H.265*, or *sender is not stamping*. A sender whose timecodes read minutes off this machine's clock (its clock is not on NTP) also lands here, and the OBS log says so. Not a sync failure, and the offset will not help |
 | **No data** | The feed stopped delivering |
-| **Off** | Nothing to align: the master switch is off, this source is not ticked, or no stream is arriving |
+| **Off** | Nothing to align: the master switch is off, this source is not ticked, Low Latency Audio is on for it, or no stream is arriving |
 
 "No timecode" is by far the most common reason sync appears not to work, and it
 is always a sender-side configuration problem.
@@ -260,13 +260,20 @@ Two mechanisms, and it matters which does what.
 is anchored. That is the only moment the stream can be positioned exactly and
 for free, because nothing is playing yet and starting later costs only pre-roll.
 `irl_core::sync::playout_anchor` says where the audio in hand belongs, and the
-output starts there. Every restart of the clock line (prime, the concealment
+output starts there. The anchor can only wait, never start early, so the hold
+seeded at engage errs early by `SYNC_SEED_BIAS_NS` and the anchor absorbs the
+difference. Every restart of the clock line (prime, the concealment
 re-anchor, the stalled clock restart) goes through the same door, so an outage
 costs the audio it costs but not the alignment.
 
 **The loop only holds it there.** After placement the residual is real drift:
 the sender's clock against ours, and the network moving. Tens of milliseconds
 over minutes, which the existing adaptive speed controller absorbs inaudibly.
+The loop measures where presentation will settle, not where it is: the jitter
+buffer's distance from its target beyond the speed controller's deadband is
+taken out of the error, because the speed controller removes it on its own. A
+loop that also steered it out would fight the speed controller, and the two
+would swing each other by a couple of hundred milliseconds.
 
 The delay line is *storage*, not steering. Moving the hold does not move the
 presentation time. It moves content between the delay line and the jitter
@@ -284,9 +291,25 @@ reason, and no amount of tuning here can beat them.
   agreement between recent seconds, not by taking the maximum: a corrupt SEI
   once made a 30 fps sender look like 41 fps and put a sawtooth into every
   latency reading.
-- **Latency arithmetic is modulo one hour.** Senders write local calendar
-  components and the timecode carries no date, so whole-hour zone differences
-  and midnight both fold out. A sender on a half-hour zone lands on the fold.
+- **Latency arithmetic is modulo a quarter hour.** A sender may write local
+  calendar components, every time zone is a whole number of quarter hours from
+  UTC, and the timecode carries no date, so zones and midnight all fold out. A
+  reading outside -2 s to 60 s is a broken stamp or a sender clock off NTP,
+  and is ignored rather than seeded into a hold of minutes.
+- **Nothing is seeded from video that is catching up.** A relay replays from
+  its last keyframe at connect, and the probe reads a backlog, both of which
+  read seconds of latency no live packet has. The controller waits for video
+  to arrive at its live pace (`irl_core::arrival`) before it seeds the hold or
+  records the latency peak.
+- **Without audio there is nothing to steer.** The video-only fallback anchors
+  at the first frame and the hold cannot move it, so a stream without audio
+  is placed open loop by the seed, with no bias, and never corrected.
+- **Low Latency Audio is left alone.** It has no speed controller to absorb a
+  hold change and no jitter buffer to anchor in, so sync does not act on it.
+- **A mid-stream re-engage is a step.** If a source's timecodes go away for
+  longer than `SYNC_TC_STALE_NS` and come back, the hold is seeded again on a
+  running pipeline, which starves it for the size of the step. The priming
+  gate only covers the first engage.
 - **`now` cancels out of the target.** `target = now + offset - (now - capture)`
   is `capture + offset`, so arrival jitter is not in the error signal. Filtering
   the latency would put it back in.
@@ -318,6 +341,14 @@ steps in both directions, the release rate, staleness, the pre-roll takeover
 and the 5 Hz publish cadence. `sei` builds real Annex B access units with
 emulation prevention and checks the parser against them; `ntp` checks the wire
 format, the kiss-o'-death codes and the drift fit against a synthetic crystal.
+
+`crates/irl-source/tests/av_sync_sim.rs` runs the real sync stage, audio pump
+and video thread on one virtual clock against a sender that stamps timecodes,
+and measures when each frame reaches the screen against its capture time plus
+the offset: a clean link, two links a second apart showing the same instant,
+video behind its audio with the audio hold in force, a relay catching up, a
+stall, a stream without audio, and Low Latency Audio. Run it whenever you
+touch the controller, the anchor or the playout mapping.
 
 What none of that covers is a real sender. As with the rest of the plugin,
 that validation is manual: a Moblin feed with Timecodes on, the dock, and the
