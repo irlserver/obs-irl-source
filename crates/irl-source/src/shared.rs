@@ -248,10 +248,6 @@ pub struct ConnStats {
     /// Mirror of the video thread's fallback anchor, for `media_get_state`
     /// and for the receiver to request a re-anchor by clearing it.
     pub video_ts_init: AtomicBool,
-    /// The fallback anchor's stream PTS to OBS clock offset, valid while
-    /// `video_ts_init` is set. Timecode sync predicts presentation from it on
-    /// a stream without audio.
-    pub video_fallback_offset_ns: AtomicI64,
     pub last_video_width: AtomicI32,
     pub last_video_height: AtomicI32,
 }

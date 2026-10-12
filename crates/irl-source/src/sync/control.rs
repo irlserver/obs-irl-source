@@ -183,6 +183,11 @@ impl<P> SyncStage<P> {
         self.delay.next_release_ns()
     }
 
+    /// What the source would publish right now.
+    pub fn snapshot(&self) -> irl_core::SyncSnapshot {
+        self.ctl.snapshot()
+    }
+
     /// Release the head packet if its moment has come. The caller dispatches
     /// it exactly as it would a packet straight off the demuxer.
     pub fn pop_due(&mut self, now_ns: u64) -> Option<P> {
@@ -225,14 +230,13 @@ impl<P> SyncStage<P> {
                 defer
             });
 
+        let has_audio = shared.flags.audio_present.load(Relaxed);
+        let target_ms = shared.hot.watermarks().target_ms;
         let mut presentation = || PresentationMap {
             audio: shared.audio_state().playout_mapping(),
-            has_audio: shared.flags.audio_present.load(Relaxed),
-            video_fallback_offset_ns: shared
-                .conn
-                .video_ts_init
-                .load(Relaxed)
-                .then(|| shared.conn.video_fallback_offset_ns.load(Relaxed)),
+            audio_excess_ns: shared.audio_buf().as_ref().map_or(0, |buf| {
+                settling_excess_ms(buf.fill_ms() - target_ms) * 1_000_000
+            }),
         };
 
         let out = ctl.observe(Observation {
@@ -241,7 +245,13 @@ impl<P> SyncStage<P> {
             wanted: ctx.enabled && shared.hot.sync_enabled.load(Relaxed),
             offset_ms: ctx.offset_ms,
             offset_generation: ctx.offset_generation,
-            buffer_target_ms: shared.hot.watermarks().target_ms,
+            // Without audio, the fallback shows video about as it is released.
+            nominal_pipeline_ns: if has_audio {
+                i64::from(target_ms + consts::AUDIO_OUT_LEAD_MS) * 1_000_000
+            } else {
+                0
+            },
+            has_audio,
             decoder_interval_ns: shared.conn.video_frame_interval_ns.load(Relaxed),
             video_codec: ctx.video_codec,
             timecode: info.timecode,
@@ -351,6 +361,14 @@ fn log_event(event: &SyncEvent) {
             irl_info!("Sync: delay line took over the {defer_ms}ms pre-roll; holding {hold_ms}ms")
         }
     }
+}
+
+/// How much of the jitter buffer's distance from its target the speed
+/// controller will take out on its own: the part beyond its deadband. Inside
+/// the deadband it does not act, so presentation stays where it is.
+fn settling_excess_ms(excess_ms: i32) -> i64 {
+    let beyond = (excess_ms.abs() - consts::AUDIO_SPEED_DEADBAND_MS).max(0);
+    i64::from(beyond * excess_ms.signum())
 }
 
 // ── Audio-thread side ─────────────────────────────────────────

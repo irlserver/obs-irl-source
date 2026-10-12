@@ -24,6 +24,7 @@
 
 use std::collections::VecDeque;
 
+use crate::arrival::ArrivalFloor;
 use crate::consts;
 use crate::playout::PlayoutMapping;
 use crate::sei::Timecode;
@@ -617,41 +618,31 @@ pub enum VideoCodec {
     Other(&'static str),
 }
 
-/// The playout mapping as it stands, for predicting when a packet with a
-/// given PTS reaches the screen.
+/// The audio playout mapping as it stands, for predicting when a packet with
+/// a given PTS reaches the screen.
 ///
 /// The audio playout offset is authoritative: the video path puts every frame
 /// through it, and it already accounts for what the delay line holds, because
-/// delaying the input shifts the mapping with it.
-///
-/// The video anchor is a fallback for streams with no audio at all, never for
-/// the moments before audio primes. It describes video that has not been
-/// through the delay line yet, so on a stream with audio it reports a
-/// presentation time seconds out, which the loop would apply as a
-/// multi-second correction. A source with an audio track measures nothing
-/// until that audio is playing.
+/// delaying the input shifts the mapping with it. The prediction is where
+/// presentation will settle, not where it is: the speed controller takes the
+/// jitter buffer back toward its target on its own, and a loop that also
+/// steered out that excess would fight it and wind up.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PresentationMap {
-    /// The audio playout mapping.
+    /// The latest chunk the audio pump handed to OBS.
     pub audio: PlayoutMapping,
-    /// Whether the connection carries an audio stream at all.
-    pub has_audio: bool,
-    /// The stream PTS to OBS clock offset of the video-only fallback anchor,
-    /// once it is set.
-    pub video_fallback_offset_ns: Option<i64>,
+    /// How much of the jitter buffer's distance from its target the speed
+    /// controller will take out on its own (negative: build up).
+    pub audio_excess_ns: i64,
 }
 
 impl PresentationMap {
-    /// When content with `pts_ns` will reach the screen, in the OBS clock.
+    /// When content with `pts_ns` will reach the screen once the speed
+    /// controller has settled, in the OBS clock. `None` until audio plays.
     pub fn predict(&self, pts_ns: i64) -> Option<i64> {
-        if let Some(offset_ns) = self.audio.offset_ns() {
-            return Some(pts_ns + offset_ns);
-        }
-        if self.has_audio {
-            return None;
-        }
-        self.video_fallback_offset_ns
-            .map(|offset_ns| pts_ns + offset_ns)
+        self.audio
+            .offset_ns()
+            .map(|offset_ns| pts_ns + offset_ns - self.audio_excess_ns)
     }
 }
 
@@ -670,8 +661,13 @@ pub struct Observation<'a> {
     /// Bumped whenever the offset changes, so the hold steps instead of
     /// slewing.
     pub offset_generation: u32,
-    /// The jitter buffer target: the nominal pipeline delay the seed subtracts.
-    pub buffer_target_ms: i32,
+    /// How long content takes from leaving the delay line to playing, with
+    /// the jitter buffer at its target: the part of the offset the seed
+    /// leaves to the pipeline.
+    pub nominal_pipeline_ns: i64,
+    /// Whether the connection carries audio. Without it there is no playout
+    /// mapping to anchor or measure against.
+    pub has_audio: bool,
     /// The video thread's measured frame interval (0 when unknown), the
     /// fallback before the first complete timecode second.
     pub decoder_interval_ns: i64,
@@ -768,7 +764,7 @@ pub enum SyncEvent {
 /// loop only holds it there**: after placement the residual is real drift,
 /// tens of milliseconds over minutes, which the speed controller absorbs
 /// inaudibly.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SyncController {
     status: SyncStatus,
     tc_reason: TcReason,
@@ -803,6 +799,11 @@ pub struct SyncController {
     in_reach_since_ns: u64,
     fps: FpsLearner,
     peak: PeakTracker,
+    /// Whether video arrives at its live pace yet. A relay's keyframe replay
+    /// or the probe backlog reads seconds of latency that no live packet
+    /// has, and seeding the hold or the peak from it would be wrong for as
+    /// long as each lasts.
+    live: ArrivalFloor,
 }
 
 impl SyncController {
@@ -833,6 +834,7 @@ impl SyncController {
             in_reach_since_ns: 0,
             fps: FpsLearner::default(),
             peak: PeakTracker::default(),
+            live: ArrivalFloor::default(),
         }
     }
 
@@ -874,6 +876,10 @@ impl SyncController {
     pub fn observe(&mut self, mut obs: Observation<'_>) -> Outcome {
         let mut out = Outcome::default();
         let now = obs.now_ns;
+
+        if let Some(pts_ns) = obs.pkt_pts_ns {
+            self.live.note(now, pts_ns);
+        }
 
         // Take over the pre-roll the audio output sits out before it starts.
         // Left alone it lands in the jitter buffer, which then starts playback
@@ -1066,13 +1072,20 @@ impl SyncController {
         self.tc = Some(*tc);
         self.last_tc_ns = now;
         self.latency_ns = latency_ns;
-        self.peak.record(latency_ns, now);
+        let live = self.live.live(now);
+        if live {
+            self.peak.record(latency_ns, now);
+        }
 
         if !control {
             return;
         }
 
         self.set_tc_reason(TcReason::Ok, None, out);
+        if !self.engaged && !live {
+            self.status = SyncStatus::Acquiring;
+            return;
+        }
 
         let prev_hold_ns = self.hold_ns;
         let elapsed_ns = self.elapsed_since_adjust(now);
@@ -1083,12 +1096,16 @@ impl SyncController {
 
         // Seed the hold so the pipeline primes already delayed, instead of
         // priming undelayed and then taking a multi-second step that would
-        // starve the decoder. The nominal pipeline delay is the jitter
-        // cushion; the residual is the loop's, biased onto the cheap side of
-        // zero.
+        // starve the decoder. The seed errs early: the anchor at prime can
+        // delay the start for free, but nothing can start it earlier, so a
+        // late seed stays late until the loop drains it.
         if !self.engaged {
-            let nominal_pipeline_ns = i64::from(obs.buffer_target_ms) * NS_PER_MS;
-            self.hold_ns = (needed_ns - nominal_pipeline_ns + consts::SYNC_SEED_BIAS_NS).max(0);
+            let bias_ns = if obs.has_audio {
+                consts::SYNC_SEED_BIAS_NS
+            } else {
+                0
+            };
+            self.hold_ns = (needed_ns - obs.nominal_pipeline_ns - bias_ns).max(0);
             self.seed_reported = false;
 
             // Every reading before the first packets leave the line describes
@@ -1138,7 +1155,15 @@ impl SyncController {
             // on when it primes.
             out.bias_sample_ns = Some(target_ns - pts_ns);
 
-            if let Some(presentation_ns) = (obs.presentation)().predict(pts_ns) {
+            // Without audio, video goes out about as it is released, from a
+            // fallback anchor fixed at the first frame that the hold cannot
+            // move. The seed places it open loop, and nothing is steered.
+            let predicted_ns = if obs.has_audio {
+                (obs.presentation)().predict(pts_ns)
+            } else {
+                Some(now as i64 + self.hold_ns + obs.nominal_pipeline_ns)
+            };
+            if let Some(presentation_ns) = predicted_ns {
                 self.error_ns = self.error.push(presentation_ns - target_ns, now);
 
                 // Wait for the last correction to reach the measurement. The
@@ -1147,7 +1172,7 @@ impl SyncController {
                 // hold ago, so a hold change shows up roughly a hold later.
                 // Correcting per packet on a stale reading is positive
                 // feedback dressed as negative.
-                if now >= self.settle_until_ns {
+                if obs.has_audio && now >= self.settle_until_ns {
                     // Positive error means late, so hold less. Unlocked, the
                     // correction applies outright: nothing is aligned yet, and
                     // the gate makes a full step safe. Locked, it is rate
@@ -1328,12 +1353,8 @@ mod tests {
         codec: VideoCodec,
         stamp: bool,
         /// The playout mapping the pipeline would report: content plays
-        /// `pipeline_ns` after the delay line releases it. Negative by
-        /// default, on purpose: the nominal pipeline is the 120ms target, but
-        /// the startup backlog trim discards about half a second of audio
-        /// after the hold has been chosen, so a real pipeline reports less
-        /// than nominal and the seed lands *early*, which is what the seed
-        /// bias is shaped around.
+        /// `pipeline_ns` after the delay line releases it. The nominal one by
+        /// default, so the only error after engage is the seed bias.
         pipeline_ns: i64,
         mapping_valid: bool,
         /// Frames sent so far; the PTS is derived from it.
@@ -1358,7 +1379,7 @@ mod tests {
                 target_ms: 120,
                 codec: VideoCodec::Hevc,
                 stamp: true,
-                pipeline_ns: 120 * MS - 520 * MS,
+                pipeline_ns: 120 * MS,
                 mapping_valid: false,
                 frame: 0,
                 defer_ns: None,
@@ -1411,8 +1432,7 @@ mod tests {
                 }
                 PresentationMap {
                     audio,
-                    has_audio: true,
-                    video_fallback_offset_ns: None,
+                    audio_excess_ns: 0,
                 }
             };
             let outcome = self.ctl.observe(Observation {
@@ -1421,7 +1441,8 @@ mod tests {
                 wanted: self.wanted,
                 offset_ms: self.offset_ms,
                 offset_generation: self.generation,
-                buffer_target_ms: self.target_ms,
+                nominal_pipeline_ns: i64::from(self.target_ms) * NS_PER_MS,
+                has_audio: true,
                 decoder_interval_ns: 0,
                 video_codec: self.codec,
                 timecode: tc,
@@ -1636,27 +1657,21 @@ mod tests {
     }
 
     #[test]
-    fn presentation_map_prefers_audio_and_refuses_the_video_anchor_with_audio() {
-        let mut mapping = PlayoutMapping::default();
-        mapping.publish(50 * S as u64, 20 * S);
-        let audio = PresentationMap {
-            audio: mapping,
-            has_audio: true,
-            video_fallback_offset_ns: Some(1),
+    fn presentation_settles_net_of_the_buffer_excess() {
+        let mut audio = PlayoutMapping::default();
+        audio.publish(50 * S as u64, 20 * S);
+        let map = PresentationMap {
+            audio,
+            audio_excess_ns: 0,
         };
-        assert_eq!(audio.predict(21 * S), Some(51 * S));
-        let waiting = PresentationMap {
-            has_audio: true,
-            video_fallback_offset_ns: Some(40 * S),
-            ..Default::default()
+        assert_eq!(map.predict(21 * S), Some(51 * S));
+        // A buffer 30ms above target drains on its own, and presentation
+        // settles that much earlier.
+        let draining = PresentationMap {
+            audio_excess_ns: 30 * MS,
+            ..map
         };
-        assert_eq!(waiting.predict(S), None);
-        let video_only = PresentationMap {
-            has_audio: false,
-            video_fallback_offset_ns: Some(30 * S),
-            ..Default::default()
-        };
-        assert_eq!(video_only.predict(11 * S), Some(41 * S));
+        assert_eq!(draining.predict(21 * S), Some(51 * S - 30 * MS));
         assert_eq!(PresentationMap::default().predict(S), None);
     }
 
@@ -1765,8 +1780,8 @@ mod tests {
         assert!((engaged.0 - 30.0).abs() < 0.01);
         assert_eq!(engaged.3, 5000);
         assert_eq!(engaged.5, 250);
-        // hold = offset − latency − target + bias, within a frame.
-        let expected_hold = 5000 - engaged.2 - 120 + 250;
+        // hold = offset − latency − pipeline − bias, within a frame.
+        let expected_hold = 5000 - engaged.2 - 120 - 250;
         assert!(
             (engaged.4 - expected_hold).abs() <= 1,
             "{} vs {expected_hold}",
@@ -1863,10 +1878,10 @@ mod tests {
             })
             .collect();
         assert_eq!(missed.len(), 1, "{missed:?}");
-        // hold + pipeline − needed: (needed − 120 + 250) − 400 − needed, give
+        // hold + pipeline − needed: (needed − 120 − 250) + 120 − needed, give
         // or take the frame the timecode quantises to.
         assert!(
-            (-320..=-220).contains(&missed[0]),
+            (-280..=-220).contains(&missed[0]),
             "seed miss {}",
             missed[0]
         );
