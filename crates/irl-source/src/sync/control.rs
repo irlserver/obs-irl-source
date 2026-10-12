@@ -113,6 +113,11 @@ impl SyncControl {
         self.hold(pkt)
     }
 
+    /// When the next held packet comes due, if any is held.
+    pub fn next_release_ns(&self) -> Option<u64> {
+        self.delay.next_release_ns()
+    }
+
     /// Release the head packet if its moment has come. The caller dispatches
     /// it exactly as it would a packet straight off the demuxer.
     pub fn pop_due(&mut self, now_ns: u64) -> Option<ffmpeg::Packet> {

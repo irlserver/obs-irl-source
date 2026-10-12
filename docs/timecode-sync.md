@@ -240,7 +240,7 @@ grep -rn "Timecode sync\|timecode sync" crates/irl-source/src --include=*.rs
 | file | calls |
 |---|---|
 | `lib.rs` | `sync::module_load` / `module_post_load` / `module_unload` |
-| `receiver/mod.rs` | `sync_wait_for_room`, `sync.intercept`, `sync_drain`, `sync.reset` at the end of a run |
+| `receiver/mod.rs` | `sync_wait_for_room`, `sync.intercept`, `sync_drain`, the wait until `sync.next_release_ns`, `sync.reset` at the end of a run |
 | `receiver/stream.rs` | `sync.set_video_stream` at open, `sync.reset` on a new connection and on disconnect |
 | `audio/pump.rs` | `prime_held`, `fresh_anchor_ns` at prime, at the stall restart and at the concealment re-anchor |
 | `source.rs` | register / unregister, `set_source_sync_enabled` |
@@ -299,11 +299,15 @@ reason, and no amount of tuning here can beat them.
   shifts the queued packets too, so it lands immediately.
 - **Growing the hold starves; shrinking it floods.** Both are rate-limited, and
   the shift helper only ever moves release times later.
-- **The delay line drains on the receiver thread**, which is also the thread
-  that blocks in `av_read_frame`. A total delivery gap stalls releases even
-  though the line holds data that is due. Inherited from the C branch; no
-  worse than the plugin behaves without a delay line, but the buffering here
-  does not add stall resilience.
+- **A delivery gap still costs its length, once.** A packet is released a
+  hold after it arrives, so the gap reaches the jitter buffer one hold later
+  and is as long as it was on the wire. Sync adds latency, not stall
+  resilience. The read runs on a reader thread so that the line keeps
+  releasing while `av_read_frame` is blocked; with one thread, the gap froze
+  the releases too and was felt twice. Releasing on the media timeline
+  instead of arrival plus hold would absorb a gap shorter than the hold, but
+  would need its own handling of timestamp jumps and of video that arrives
+  behind its audio.
 
 ## Testing
 

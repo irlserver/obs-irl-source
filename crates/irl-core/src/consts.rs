@@ -389,6 +389,12 @@ pub const RTMP_BUFFER_MS: i64 = 1000;
 pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 /// Interval of the periodic receiver stats log line.
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
+/// Packets the reader thread may read ahead of the receiver. A handoff, not a
+/// buffer: past it the reader stops reading and the transport holds the rest.
+pub const RECEIVER_READ_AHEAD_PACKETS: usize = 16;
+/// Longest the receiver waits for a packet before it looks at the run state
+/// again. Held packets are released on time regardless.
+pub const RECEIVER_IDLE_WAIT_MS: u64 = 100;
 
 // ── Provider URL watch (see `url_recheck`) ──
 
@@ -687,6 +693,8 @@ mod tests {
         assert_eq!(RTMP_BUFFER_MS, 1000);
         assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // 7 * 4096
         assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000);
+        assert_eq!(RECEIVER_READ_AHEAD_PACKETS, 16);
+        assert_eq!(RECEIVER_IDLE_WAIT_MS, 100);
 
         // ── provider URL watch ──
         assert_eq!(PROVIDER_WATCH_POLL_MS, 5000);
