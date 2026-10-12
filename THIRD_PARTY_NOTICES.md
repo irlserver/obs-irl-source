@@ -199,6 +199,13 @@ Statically linked, as it is into every Rust binary.
 
 ## Build-time only
 
+### cc — MIT OR Apache-2.0
+
+<https://github.com/rust-lang/cc-rs>
+
+Drives the C++ compiler for the IRL Sync dock (`crates/sync-dock/cxx`) when
+Qt6 is found at build time. Nothing from it ends up in the binary.
+
 ### bindgen — BSD-3-Clause
 
 <https://github.com/rust-lang/rust-bindgen>
@@ -230,6 +237,17 @@ Nothing links against obs-websocket, and the vendor extension degrades to a log
 line when it is absent.
 
 ## Interfaces
+
+### Qt 6 — LGPL-3.0-only (as shipped by OBS)
+
+<https://www.qt.io/>
+
+The IRL Sync dock (`crates/sync-dock/cxx/sync-dock.cpp`) is a QWidget. It is
+compiled against Qt 6 headers and links Qt dynamically; the Qt that runs it is
+the copy the host OBS Studio already loaded, and no Qt code is bundled. Builds
+made without Qt carry no dock and no Qt dependency.
+
+License text: <https://www.gnu.org/licenses/lgpl-3.0.html>
 
 ### libobs — GPL-2.0-or-later
 

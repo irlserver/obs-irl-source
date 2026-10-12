@@ -4,21 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-IRL Source is a third-party OBS Studio plugin (Rust 2024, AGPL-3.0) that receives live IRL streams over SRT, RTMP, RIST or any FFmpeg-supported protocol. It handles what IRL feeds need: audio jitter buffering, PTS repair, adaptive playback speed, keyframe gating, hardware decoding, mid-stream resolution changes and lip sync for senders whose video trails their audio.
+IRL Source is a third-party OBS Studio plugin (Rust 2024, AGPL-3.0) that receives live IRL streams over SRT, RTMP, RIST or any FFmpeg-supported protocol. It handles what IRL feeds need: audio jitter buffering, PTS repair, adaptive playback speed, keyframe gating, hardware decoding, mid-stream resolution changes and lip sync for senders whose video trails their audio. Timecode sync holds several feeds to their capture time plus a shared offset (`docs/timecode-sync.md`); it was designed by Spillmaker for the C plugin and ported.
 
 Read `docs/architecture.md` before changing threads, timing or A/V sync. Read `docs/audio-timing-pitfalls.md` before touching `crates/irl-core/src/speed.rs`.
 
 ## Build
 
-cargo drives everything. Two prerequisites:
+cargo drives everything. Two prerequisites and one optional:
 
 1. **The bundled media stack.** The plugin statically links its own FFmpeg, libsrt, librist and mbedTLS (`deps/README.md`). Run `./deps/build-deps.sh` once per version bump. It writes `deps/.build/prefix/irl-deps.env`, which `crates/ffmpeg/build.rs` replays as link lines. On Windows it runs inside MSYS2 with the MSVC environment active; see the `windows-x64` job in `.github/workflows/build.yml`.
 2. **libclang**, for bindgen in `ffmpeg-sys-next`. Set `LIBCLANG_PATH` on Windows and macOS.
+3. **Qt6 Widgets, optional**, for the IRL Sync dock. `crates/sync-dock/build.rs` looks for it (`IRL_QT_PREFIX`, then `pkg-config Qt6Widgets`) and builds a stub with a `cargo::warning` without it; sync then runs headless. `IRL_DOCK=0` skips it. The dock runs on the host OBS's Qt; nothing Qt ships.
 
 ```bash
 # Linux
 sudo apt install build-essential cmake pkg-config nasm meson ninja-build \
-    clang libclang-dev libobs-dev libva-dev
+    clang libclang-dev libobs-dev libva-dev qt6-base-dev
 ./deps/build-deps.sh
 cargo build --release
 ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
@@ -38,20 +39,21 @@ cargo build --release -p irl-source --features deadlocks   # use whenever you to
 scripts/package.sh linux target/release dist       # the release archive, locally
 ```
 
-`scripts/verify-plugin.sh` asserts what a compile does not prove: no `libav*` dependency, nothing exported but `obs_module_*`, undefined symbols from libobs and libc only, and `#![forbid(unsafe_code)]` still on `irl-core` and `irl-source`. CI runs it on every build.
+`scripts/verify-plugin.sh` asserts what a compile does not prove: no `libav*` dependency, nothing exported but `obs_module_*`, undefined symbols from libobs and libc only (plus Qt's when the dock is in), and `#![forbid(unsafe_code)]` still on `irl-core` and `irl-source`. CI runs it on every build.
 
 ## Layout
 
 - `crates/obs-sys`: hand-written libobs FFI, checked by `layout-test`.
 - `crates/obs`: the safe libobs API this plugin uses.
 - `crates/ffmpeg` (package `irl-ffmpeg`): RAII over `ffmpeg-sys-next`.
-- `crates/irl-core`: everything pure. Jitter buffer, PTS repair, speed controller, output clock, pacing, video delay, audio hold, stats table, tuning constants.
+- `crates/irl-core`: everything pure. Jitter buffer, PTS repair, speed controller, output clock, pacing, video delay, audio hold, stats table, tuning constants, and the timecode sync arithmetic (`sei`, `sync`, `ntp`).
 - `crates/irl-provider`: the plugin side of `docs/provider-protocol.md`.
-- `crates/irl-source`: the plugin. `source.rs` (lifecycle), `settings.rs` (dialog), `providers.rs`, `config.rs`, `shared.rs` (per-run shared state), `receiver/`, `video/`, `audio/`, `websocket.rs`.
+- `crates/irl-source`: the plugin. `source.rs` (lifecycle), `settings.rs` (dialog), `providers.rs`, `config.rs`, `shared.rs` (per-run shared state), `receiver/`, `video/`, `audio/`, `sync/` (timecode sync settings, registry, NTP thread, delay line), `websocket.rs`.
+- `crates/sync-dock`: the IRL Sync dock, Spillmaker's Qt widget compiled through `cc`, behind a C ABI and a `DockBackend` trait. The only C++ in the plugin.
 
 ## Rules
 
-- **Unsafe** lives only in `obs-sys`, `obs` and `ffmpeg`, and every `unsafe` block carries a `// SAFETY:` comment. If plugin code needs a raw pointer, add a safe wrapper in one of those crates.
+- **Unsafe** lives only in `obs-sys`, `obs`, `ffmpeg` and `sync-dock`, and every `unsafe` block carries a `// SAFETY:` comment. If plugin code needs a raw pointer, add a safe wrapper in one of those crates.
 - **Lock order** is `audio_state` → `audio_buf` → `hot.watermarks`. `video.q` is never held together with any of them. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down; parking_lot mutexes are not recursive, so a nested acquire deadlocks.
 - **Clocks.** OBS timestamps come from `obs::time::gettime_ns`, never `std::time::Instant`. FFmpeg-side timers stay in the `av_gettime` microsecond domain. `irl-core` takes both as parameters so they cannot be mixed.
 - **Audio timestamps** submitted to OBS stay contiguous and the submitted sample rate never changes. Speed is applied inside the plugin. See `docs/architecture.md`.
