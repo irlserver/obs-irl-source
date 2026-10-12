@@ -30,6 +30,8 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use parking_lot::Mutex;
 
 use irl_core::consts;
+use irl_core::sync::{SyncStatus, VideoCodec};
+use irl_core::{SyncSnapshot, Timecode};
 use obs_irl_source::audio::{AudioPump, AudioSink};
 use obs_irl_source::config::Config;
 use obs_irl_source::receiver::ReceiverFlags;
@@ -37,6 +39,7 @@ use obs_irl_source::receiver::audio_in::AudioIntake;
 use obs_irl_source::receiver::decode::note_video_arrival;
 use obs_irl_source::shared::{Shared, TimedPacket};
 use obs_irl_source::source::av_skew_ms;
+use obs_irl_source::sync::control::{Context, PacketInfo, SyncStage};
 use obs_irl_source::video::VideoSink;
 use obs_irl_source::video::thread::VideoThread;
 
@@ -53,9 +56,13 @@ const START_NS: u64 = 10 * SEC;
 const FIRST_PTS_NS: i64 = 10_000_000_000;
 /// An AAC frame.
 const AUDIO_FRAMES: i64 = 1024;
-/// Network latency both streams share; it moves nothing relative to the
-/// other, but keeps arrival after capture.
+/// Network latency both streams share, unless a scenario sets its own; it
+/// moves nothing relative to the other, but keeps arrival after capture.
 const NET_NS: u64 = 20 * MS;
+/// The sender's frame count at `START_NS` on the UTC timeline its timecodes
+/// carry: a hundred days in, so the timecode wraps neither hour nor day near
+/// the run, and a whole number of seconds at every frame rate used here.
+const UTC_FRAMES_AT_START: i64 = 100 * 86_400 * 60;
 
 /// Lip sync people do not notice: ITU-R BT.1359 puts the detectability
 /// threshold at 45 ms of sound ahead of picture, which is the direction every
@@ -145,6 +152,12 @@ struct Scenario {
     /// the replay starts, and how many times faster than real time it runs.
     relay_backlog: Option<(u64, u64)>,
     events: Vec<(u64, Event)>,
+    net_ns: u64,
+    /// Timecode sync on, at this offset.
+    sync_offset_ms: Option<i32>,
+    /// Captured between these times after the open, frames carry no
+    /// timecode.
+    timecode_gap: Option<(u64, u64)>,
 }
 
 impl Scenario {
@@ -161,7 +174,29 @@ impl Scenario {
             stalls: Vec::new(),
             relay_backlog: None,
             events: Vec::new(),
+            net_ns: NET_NS,
+            sync_offset_ms: None,
+            timecode_gap: None,
         }
+    }
+
+    fn network_latency(mut self, ms: u64) -> Self {
+        self.net_ns = ms * MS;
+        self
+    }
+
+    /// The sender stamps SEI timecodes and the source is synced at
+    /// `offset_ms`, against an NTP reference that agrees with the sender's.
+    fn timecode_sync(mut self, offset_ms: i32) -> Self {
+        self.sync_offset_ms = Some(offset_ms);
+        self
+    }
+
+    /// The sender stops stamping timecodes for a while.
+    fn timecode_gap(mut self, at_s: f64, len_ms: u64) -> Self {
+        let at = (at_s * SEC as f64) as u64;
+        self.timecode_gap = Some((at, at + len_ms * MS));
+        self
     }
 
     fn fps(mut self, fps: u64) -> Self {
@@ -253,7 +288,7 @@ impl Scenario {
                 if capture >= end_ns {
                     break;
                 }
-                let Some(at) = self.through_stalls(START_NS + capture + NET_NS, false) else {
+                let Some(at) = self.through_stalls(START_NS + capture + self.net_ns, false) else {
                     continue;
                 };
                 last_at = at.max(last_at);
@@ -275,9 +310,9 @@ impl Scenario {
                 break;
             }
             let capture = (START_NS as i64 + offset) as u64;
-            let mut at = capture + NET_NS + (self.video_lag)(capture.saturating_sub(START_NS));
+            let mut at = capture + self.net_ns + (self.video_lag)(capture.saturating_sub(START_NS));
             if let Some((_, speedup)) = self.relay_backlog {
-                at = at.max(START_NS + NET_NS + k * frame / speedup);
+                at = at.max(START_NS + self.net_ns + k * frame / speedup);
             }
             let Some(at) = self.through_stalls(at, true) else {
                 continue;
@@ -512,14 +547,53 @@ struct Sim {
     video: VideoThread,
     audio_out: AudioProbe,
     video_out: Arc<Mutex<VideoOut>>,
+    sync: Option<SimSync>,
+}
+
+/// Timecode sync in front of the intake, as the receiver runs it: every
+/// packet the link delivers goes through the stage, and held packets reach
+/// the intake when the stage releases them.
+struct SimSync {
+    stage: SyncStage<Media>,
+    offset_ms: i32,
+    fps: u64,
+    gap: Option<(u64, u64)>,
+}
+
+impl SimSync {
+    /// UTC per the NTP reference at OBS time `now_ns`. The sender's clock and
+    /// this one agree exactly, so the frame captured at OBS time `c` carries
+    /// the timecode of UTC `c + utc_offset_ns`.
+    fn utc_now_ns(&self, now_ns: u64) -> i64 {
+        now_ns as i64 + UTC_FRAMES_AT_START * SEC as i64 / self.fps as i64 - START_NS as i64
+    }
+
+    /// Whether the sender stamps the frame with `pts_ns` at all.
+    fn stamps(&self, pts_ns: i64) -> bool {
+        let capture = (pts_ns - FIRST_PTS_NS) as u64;
+        self.gap
+            .is_none_or(|(from, to)| !(from..to).contains(&capture))
+    }
+
+    /// The timecode the sender stamps on the frame with `pts_ns`.
+    fn timecode(&self, pts_ns: i64) -> Timecode {
+        let frame = (pts_ns - FIRST_PTS_NS) / (SEC / self.fps) as i64;
+        let total = UTC_FRAMES_AT_START + frame;
+        let secs = total / self.fps as i64;
+        Timecode {
+            hours: (secs / 3600 % 24) as u8,
+            minutes: (secs / 60 % 60) as u8,
+            seconds: (secs % 60) as u8,
+            n_frames: (total % self.fps as i64) as u16,
+        }
+    }
 }
 
 impl Sim {
     fn new(scenario: &Scenario) -> Self {
-        let shared = common::shared(
-            common::stream_config(scenario.low_latency),
-            common::hot_values(scenario.target_ms),
-        );
+        let mut hot = common::hot_values(scenario.target_ms);
+        hot.sync_enabled = scenario.sync_offset_ms.is_some();
+        let shared = common::shared(common::stream_config(scenario.low_latency), hot);
         shared.flags.audio_present.store(scenario.audio, Relaxed);
         shared.flags.video_present.store(true, Relaxed);
 
@@ -550,6 +624,13 @@ impl Sim {
         let mut intake = AudioIntake::default();
         intake.init_pts_repair(ffmpeg::NS_TIME_BASE);
 
+        let sync = scenario.sync_offset_ms.map(|offset_ms| SimSync {
+            stage: SyncStage::new(Arc::clone(&shared), 0),
+            offset_ms,
+            fps: scenario.fps,
+            gap: scenario.timecode_gap,
+        });
+
         Self {
             clock,
             shared,
@@ -563,6 +644,7 @@ impl Sim {
             video,
             audio_out,
             video_out,
+            sync,
         }
     }
 
@@ -572,6 +654,51 @@ impl Sim {
 
     /// The receiver thread reading one packet off the link.
     fn receive(&mut self, media: Media) {
+        let now = self.now();
+        let Some(sync) = self.sync.as_mut() else {
+            self.dispatch(media);
+            return;
+        };
+        let info = match media {
+            Media::Audio(n) => PacketInfo {
+                stream: 1,
+                dts_ns: Some(sample_pts_ns(n)),
+                timecode: None,
+                pts_ns: None,
+                bytes: 400,
+            },
+            Media::Video(pts) => PacketInfo {
+                stream: 0,
+                dts_ns: Some(pts),
+                timecode: sync.stamps(pts).then(|| sync.timecode(pts)),
+                pts_ns: Some(pts),
+                bytes: 4096,
+            },
+        };
+        let ctx = Context {
+            now_ns: now,
+            utc_now_ns: Some(sync.utc_now_ns(now)),
+            enabled: true,
+            offset_ms: sync.offset_ms,
+            offset_generation: 0,
+            video_codec: VideoCodec::Hevc,
+        };
+        if !sync.stage.intercept(&ctx, &info, || Some(media)) {
+            self.dispatch(media);
+        }
+    }
+
+    /// Hand the intake every held packet that has come due.
+    fn release_due(&mut self) {
+        let now = self.now();
+        while let Some(media) = self.sync.as_mut().and_then(|s| s.stage.pop_due(now)) {
+            self.dispatch(media);
+        }
+    }
+
+    /// A packet reaching the decoders: audio is decoded into the intake,
+    /// video queued for the video thread.
+    fn dispatch(&mut self, media: Media) {
         let now = self.now();
         match media {
             Media::Audio(n) => {
@@ -664,6 +791,7 @@ impl Sim {
                 self.receive(arrival.media);
                 next_arrival += 1;
             }
+            self.release_due();
 
             if now >= pump_wake {
                 while self.pump.pump_once() {}
@@ -699,6 +827,9 @@ impl Sim {
             if let Some((at, _)) = scenario.events.get(next_event) {
                 next = next.min(START_NS + at);
             }
+            if let Some(release) = self.sync.as_ref().and_then(|s| s.stage.next_release_ns()) {
+                next = next.min(release);
+            }
             self.clock.store(next.max(now + 1), Relaxed);
         }
 
@@ -724,6 +855,11 @@ impl Sim {
             video_sent,
             tick_ns: scenario.canvas_tick_ns(),
             frame_ns: scenario.frame_ns(),
+            sync_offset_ns: scenario
+                .sync_offset_ms
+                .map(|ms| u64::from(ms.unsigned_abs()) * MS),
+            sync: self.sync.as_ref().map(|s| s.stage.snapshot()),
+            underruns: self.shared.conn.audio_underruns.load(Relaxed),
             restarts: self.shared.conn.audio_output_restarts.load(Relaxed),
             reanchors: self.shared.lifetime.audio_offset_reanchors.load(Relaxed),
             audible_skipped: self.shared.conn.audible_skipped_chunks.load(Relaxed),
@@ -742,6 +878,11 @@ struct Report {
     video_sent: usize,
     tick_ns: u64,
     frame_ns: u64,
+    /// The sync offset the scenario ran at.
+    sync_offset_ns: Option<u64>,
+    /// What the sync stage reported at the end.
+    sync: Option<SyncSnapshot>,
+    underruns: u64,
     restarts: u64,
     reanchors: u64,
     audible_skipped: u64,
@@ -814,6 +955,45 @@ impl Report {
             late: late.len(),
             max_late_ms: late.iter().copied().max().unwrap_or(0) as f64 / 1e6,
         }
+    }
+
+    /// When each frame shown in the window reached the screen, against when
+    /// timecode sync says it should: its capture time plus the offset. In ms,
+    /// `(min, max)`; positive is late.
+    fn sync_error_ms(&self, from_s: f64, to_s: f64) -> (f64, f64) {
+        let offset = self.sync_offset_ns.expect("a synced scenario");
+        let from = START_NS + (from_s * SEC as f64) as u64;
+        let to = START_NS + (to_s * SEC as f64) as u64;
+        self.shown
+            .iter()
+            .filter(|f| (from..to).contains(&f.handed_ns))
+            .map(|f| {
+                let capture = START_NS as i64 + (f.pts_ns - FIRST_PTS_NS);
+                (f.displayed_ns() as i64 - (capture + offset as i64)) as f64 / 1e6
+            })
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), e| {
+                (lo.min(e), hi.max(e))
+            })
+    }
+
+    /// Every frame shown in the window reached the screen within
+    /// `tolerance_ns` of its capture time plus the sync offset.
+    fn assert_on_offset(&self, from_s: f64, to_s: f64, tolerance_ns: i64) {
+        let (lo, hi) = self.sync_error_ms(from_s, to_s);
+        let tol = tolerance_ns as f64 / 1e6;
+        assert!(lo.is_finite(), "no frames shown in {from_s}-{to_s}s");
+        assert!(
+            lo >= -tol && hi <= tol,
+            "{lo:.1}..{hi:.1}ms off capture + offset in {from_s}-{to_s}s, against {tol:.1}ms"
+        );
+    }
+
+    /// When the frame with `pts_ns` reached the screen, if it was shown.
+    fn displayed_at(&self, pts_ns: i64) -> Option<u64> {
+        self.shown
+            .iter()
+            .find(|f| f.pts_ns == pts_ns)
+            .map(Shown::displayed_ns)
     }
 
     fn last_stats(&self) -> StatSample {
@@ -1281,4 +1461,209 @@ fn a_relay_catching_up_at_connect_sets_no_delay_and_ends_in_sync() {
     report.assert_nothing_dropped_after(0.0);
     report.assert_latency_settled();
     report.assert_healthy();
+}
+
+// ── Timecode sync ─────────────────────────────────────────────
+
+// Every synced frame is shown at its capture time plus the offset, on the
+// NTP clock. The sender's clock and the reference agree exactly here, so what
+// is measured is the plugin's own error. The timecode carries capture time to
+// a frame, and libobs shows a frame on a canvas tick, so a frame is about the
+// floor.
+
+/// From the first frame shown, within the lip sync tolerance of where sync
+/// says it belongs, and within a frame once the loop has had time to settle;
+/// lip sync and the audio clock exactly as without sync.
+#[test]
+fn timecode_sync_shows_each_frame_at_its_capture_time_plus_the_offset() {
+    for (latency_ms, offset_ms) in [(300, 2000), (1200, 2000), (300, 5000)] {
+        let report = Scenario::new(60)
+            .network_latency(latency_ms)
+            .timecode_sync(offset_ms)
+            .run();
+        let all = report.window(0.0, 60.0);
+        report.print(
+            &format!("sync {latency_ms}ms link, {offset_ms}ms offset"),
+            &all,
+        );
+
+        report.assert_in_sync(&all, report.tick_ns as i64);
+        report.assert_paced(&all);
+        // The longer the offset, the later the first frame: the line holds
+        // all of it before anything plays.
+        let first_s = secs(report.shown[0].handed_ns - START_NS);
+        report.assert_on_offset(0.0, first_s + 10.0, SYNC_TOLERANCE_NS);
+        report.assert_on_offset(first_s + 10.0, 60.0, report.frame_ns as i64);
+        report.assert_healthy();
+        assert_eq!(report.underruns, 0, "sync never starves the audio");
+        assert_eq!(report.sync.expect("synced").status, SyncStatus::Locked);
+    }
+}
+
+/// The point of the feature: two feeds on links a second apart show the same
+/// captured instant at the same time.
+#[test]
+fn two_feeds_on_different_links_show_the_same_instant() {
+    let near = Scenario::new(40)
+        .network_latency(300)
+        .timecode_sync(2000)
+        .run();
+    let far = Scenario::new(40)
+        .network_latency(1300)
+        .timecode_sync(2000)
+        .run();
+
+    let mut compared = 0;
+    for frame in near
+        .shown
+        .iter()
+        .filter(|f| f.handed_ns > START_NS + 10 * SEC)
+    {
+        if let Some(at) = far.displayed_at(frame.pts_ns) {
+            let apart_ms = (frame.displayed_ns() as i64 - at as i64) as f64 / 1e6;
+            assert!(
+                apart_ms.abs() <= (near.tick_ns * 2) as f64 / 1e6,
+                "frame {} shown {apart_ms:.1}ms apart",
+                frame.pts_ns
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > 500, "only {compared} frames shown by both");
+}
+
+/// Video 700 ms behind its audio: the audio hold and sync stack, the hold
+/// keeping lip sync and sync shrinking its delay line by what the hold adds.
+#[test]
+fn timecode_sync_with_video_behind_its_audio_keeps_both_promises() {
+    let report = Scenario::new(60)
+        .network_latency(300)
+        .video_lag(|_| 700 * MS)
+        .timecode_sync(3000)
+        .run();
+    let settled = report.assert_settled(0.0, 60.0);
+    report.print("sync with trailing video", &settled);
+
+    report.assert_on_offset(0.0, 60.0, SYNC_TOLERANCE_NS);
+    report.assert_healthy();
+    assert_eq!(report.underruns, 0);
+    assert!(
+        report.last_stats().audio_hold_ms > 500,
+        "the hold is in force"
+    );
+}
+
+/// A relay replaying from its last keyframe delivers seconds of old video at
+/// connect. Read as latency it would seed the hold and the peak wrong; the
+/// controller waits for video to arrive live before it takes either.
+#[test]
+fn timecode_sync_ignores_a_relay_catching_up_at_connect() {
+    let report = Scenario::new(60)
+        .network_latency(300)
+        .relay_backlog(2000, 4)
+        .timecode_sync(3000)
+        .run();
+    let settled = report.assert_settled(5.0, 60.0);
+    report.print("sync behind a relay", &settled);
+
+    report.assert_on_offset(20.0, 60.0, SYNC_TOLERANCE_NS);
+    report.assert_healthy();
+    assert_eq!(report.underruns, 0);
+    let peak = report.sync.expect("synced").latency_peak_ms;
+    assert!(
+        (300..=400).contains(&peak),
+        "the latency peak {peak}ms counts the replay"
+    );
+}
+
+/// The delay line releases each packet at its place on its stream's
+/// timeline, so a stall shorter than the hold is covered by what the line
+/// already has: nothing underruns, nothing is late, and presentation does not
+/// move. Without sync the same stall underruns or freezes the picture.
+#[test]
+fn a_stall_shorter_than_the_hold_costs_nothing() {
+    for streams in [Streams::Both, Streams::Video] {
+        let stall = |s: Scenario| s.network_latency(300).stall(20.0, 1500, streams);
+        let synced = stall(Scenario::new(40).timecode_sync(3000)).run();
+        let settled = synced.assert_settled(15.0, 40.0);
+        synced.print(&format!("sync through a {streams:?} stall"), &settled);
+
+        synced.assert_on_offset(15.0, 40.0, synced.frame_ns as i64);
+        synced.assert_healthy();
+        assert_eq!(synced.underruns, 0, "{streams:?}");
+
+        let plain = stall(Scenario::new(40)).run();
+        let w = plain.window(20.0, 25.0);
+        assert!(
+            plain.underruns > 0 || w.late > 0,
+            "the same {streams:?} stall costs something without sync"
+        );
+    }
+}
+
+/// A stall longer than the hold runs the line dry, and what is left of it
+/// reaches the jitter buffer. It must still cost less than without sync.
+#[test]
+fn a_stall_longer_than_the_hold_costs_less_than_without_sync() {
+    let stall = |s: Scenario| s.network_latency(300).stall(20.0, 3500, Streams::Both);
+    let synced = stall(Scenario::new(40).timecode_sync(3000)).run();
+    let plain = stall(Scenario::new(40)).run();
+
+    synced.assert_healthy();
+    assert!(
+        synced.underruns < plain.underruns,
+        "{} concealed chunks with sync, {} without",
+        synced.underruns,
+        plain.underruns
+    );
+}
+
+/// Without audio there is no mapping to measure against, and the fallback
+/// anchor is fixed at the first frame. The seed places the stream open loop,
+/// with no bias, since there is no anchor to absorb one.
+#[test]
+fn timecode_sync_places_a_stream_without_audio() {
+    let report = Scenario::new(40)
+        .network_latency(300)
+        .video_only()
+        .timecode_sync(3000)
+        .run();
+
+    // Frames shown before the controller engaged are not synced yet.
+    report.assert_on_offset(5.0, 40.0, report.tick_ns as i64);
+    assert_eq!(report.sync.expect("synced").status, SyncStatus::Locked);
+}
+
+/// Low Latency Audio has no speed controller to absorb a hold change and no
+/// jitter buffer to anchor in, so sync stays out of it.
+#[test]
+fn timecode_sync_leaves_low_latency_audio_alone() {
+    let report = Scenario::new(30)
+        .network_latency(300)
+        .low_latency()
+        .timecode_sync(3000)
+        .run();
+
+    report.assert_healthy();
+    let snap = report.sync.expect("synced");
+    assert_eq!(snap.added_ms, 0);
+    assert_eq!(snap.status, SyncStatus::Off);
+}
+
+/// A sender that stops stamping for a few seconds: the feed keeps its place
+/// while there is nothing to measure, and the loop resumes when timecodes
+/// return, without engaging again.
+#[test]
+fn timecodes_that_drop_out_and_return_do_not_move_the_feed() {
+    let report = Scenario::new(60)
+        .network_latency(300)
+        .timecode_sync(3000)
+        .timecode_gap(20.0, 6000)
+        .run();
+    let settled = report.assert_settled(15.0, 60.0);
+    report.print("sync through a timecode dropout", &settled);
+
+    report.assert_on_offset(15.0, 60.0, report.frame_ns as i64);
+    report.assert_healthy();
+    assert_eq!(report.underruns, 0);
 }

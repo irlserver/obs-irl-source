@@ -4,19 +4,22 @@ This page explains why the plugin is shaped the way it is: the threads, what eac
 
 ## Crates
 
-All unsafe code lives in `obs-sys`, `obs` and `ffmpeg`. `irl-core`, `irl-provider` and `irl-source` carry `#![forbid(unsafe_code)]`, so a raw pointer in plugin logic needs a new safe wrapper in one of the first three.
+All unsafe code lives in `obs-sys`, `obs`, `ffmpeg` and `sync-dock`. `irl-core`, `irl-provider` and `irl-source` carry `#![forbid(unsafe_code)]`, so a raw pointer in plugin logic needs a new safe wrapper in one of the first three.
 
 - `obs-sys`: hand-written libobs FFI. `#[repr(C)]` structs, `extern` declarations and constants. The `layout-test` feature runs bindgen over the real headers and asserts every field offset. libobs is never linked: the symbols resolve against the host OBS process at load time (`raw-dylib` from `obs.dll` on Windows, undefined symbols elsewhere).
 - `obs`: the safe libobs API this plugin uses. The `Source` trait and registration, `declare_module!`, data, properties, calldata, frames, scene transforms, the obs-websocket vendor helper and `panic::guard`.
 - `ffmpeg` (package `irl-ffmpeg`): RAII over `ffmpeg-sys-next`. `build.rs` replays the link lines that `deps/build-deps.sh` wrote to `irl-deps.env`.
-- `irl-core`: everything that needs neither libobs nor FFmpeg. The jitter buffer, PTS repair, the speed controller, output clock arithmetic, video pacing and delay, the audio hold, demuxer options, config derivation, the stats table and every tuning constant. It is the crate with the real unit test suite.
+- `irl-core`: everything that needs neither libobs nor FFmpeg. The jitter buffer, PTS repair, the speed controller, output clock arithmetic, video pacing and delay, the audio hold, demuxer options, config derivation, the stats table, every tuning constant, and the timecode sync arithmetic (SEI reader, sync controller, NTP math). It is the crate with the real unit test suite.
 - `irl-provider`: the plugin side of `docs/provider-protocol.md` (discovery, OAuth with PKCE over a loopback redirect, the ingest list, the resolve call). It has no libobs dependency; the plugin hands it a state directory, a logger and a callback through `init`.
-- `irl-source`: the plugin. Module entry points, the source lifecycle and the three worker threads.
+- `irl-source`: the plugin. Module entry points, the source lifecycle, the worker threads and timecode sync's settings, registry and NTP client.
+- `sync-dock`: the IRL Sync dock, a Qt widget in C++ behind a C ABI, compiled in when Qt6 is found at build time.
 
 ## Data flow
 
 ```
-[receiver thread]: FFmpeg URL, demux
+[reader thread]: av_read_frame, one connection at a time
+
+[receiver thread]: FFmpeg URL, stream open, timecode sync delay line
   audio: decode, PTS repair, resample, write to jitter buffer
   video: push the compressed packet onto the video queue
 
@@ -28,21 +31,25 @@ All unsafe code lives in `obs-sys`, `obs` and `ffmpeg`. `irl-core`, `irl-provide
                 OBS audio output
 ```
 
-Video decodes on the video thread, not the receiver, for two reasons. Decoding eagerly would hold the stream's whole latency as decoded frames (8 s of 4K60 is about 6 GB, against about 20 MB of packets). And the receiver spends a network stall blocked in `av_read_frame`, which is exactly when video must keep draining the buffer it already has. The thread that decodes cannot be the thread that reads.
+Video decodes on the video thread, not the receiver, for two reasons. Decoding eagerly would hold the stream's whole latency as decoded frames (8 s of 4K60 is about 6 GB, against about 20 MB of packets). And a network stall blocks `av_read_frame`, which is exactly when video must keep draining the buffer it already has. The thread that decodes cannot be the thread that reads.
+
+The same goes for the receiver itself. Timecode sync holds packets in a delay line on the receiver and releases them on a clock, so the blocking read runs on a reader thread of its own (`receiver::read_ahead`) and hands packets over a channel only a few packets deep. The receiver waits on that channel until the next release is due, so a blocked read does not hold back packets the delay line already has.
 
 ## Threads and ownership
 
 - **OBS thread** (`IrlSource`): create, destroy, update, tick, properties, and the show/hide/activate/deactivate callbacks. Its state sits in one `Mutex<ObsState>` only because the stats proc can arrive on another thread.
 - **`Shared`** is built fresh at every `start_receiver`, so per-run state starts zeroed. What survives a restart lives in `LifetimeStats`, an `Arc` carried across runs.
-- **Receiver thread** owns demux and the audio decoder as a plain struct on its own stack. It writes the jitter buffer and pushes video packets onto the video channel. It never touches the GPU.
+- **Receiver thread** owns the stream open, the audio decoder and timecode sync's delay line as a plain struct on its own stack. It writes the jitter buffer and pushes video packets onto the video channel. It never touches the GPU.
+- **Reader thread**, one per connection, borrows the demuxer from the receiver for as long as the connection is read and does nothing but `av_read_frame`. When the receiver stops taking packets the reader blocks on the channel, and the transport holds the excess.
 - **Video thread** owns the video decoder, handed over by the receiver at stream open (`VideoMsg::Decoder`, queued ahead of its packets). Its pacing queue is a local `PacingQueue` with no lock.
 - **Audio thread** drains the jitter buffer and submits audio, paced against the output clock.
+- **NTP thread** (`irl-ntp`), one for the module, keeps the reference clock timecode sync measures against. It shares nothing with a source but its own mutex.
 
-The lock order is `audio_state` → `audio_buf` → `hot.watermarks`, and `video.q` is never held together with any of them. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down. parking_lot mutexes are not recursive, so a nested acquire would hang the audio thread and then the video thread behind it.
+The lock order is `audio_state` → `audio_buf` → `hot.watermarks`, and `video.q` is never held together with any of them. Timecode sync adds no edge: its controller takes `audio_state` on its own, and the sync registry and the NTP client each have a mutex nothing else is held under. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down. parking_lot mutexes are not recursive, so a nested acquire would hang the audio thread and then the video thread behind it.
 
 Hot config (`reconnect_delay_s`, `adaptive_speed`, `catchup_percent`, `wait_for_keyframe`, `clear_on_disconnect`) is atomics, read with `Relaxed`. `catchup_percent` is read once per controller cycle and passed down, because the ramp, the anti-windup, the actuator clamp and the stuck-drain watch must agree on one ceiling within a cycle. The three watermarks publish together under a mutex so no reader sees them torn mid-resize.
 
-A panic never crosses an FFI boundary. `obs::panic::guard` wraps every `extern "C"` shim and `shared::spawn_worker` wraps every worker thread. A panic is logged, `thread_active` is cleared (which also trips the FFmpeg interrupt watch, so a receiver blocked in `av_read_frame` returns), the video sleeper is woken, and the normal stop path takes over.
+A panic never crosses an FFI boundary. `obs::panic::guard` wraps every `extern "C"` shim, `shared::spawn_worker` wraps every worker thread, and `receiver::read_ahead` catches its reader's (a panicking reader stops the stream like any other worker). A panic is logged, `thread_active` is cleared (which also trips the FFmpeg interrupt watch, so a reader blocked in `av_read_frame` returns), the video sleeper is woken, and the normal stop path takes over.
 
 ## Source lifecycle
 

@@ -17,6 +17,11 @@ env:
   # declare_module! (crates/irl-source/src/lib.rs). Raise both only to drop
   # support for older OBS releases, never to chase a newer one.
   OBS_VERSION: "32.1.2"
+  # The obs-deps release whose Qt6 archives the IRL Sync dock is compiled
+  # against on Windows and macOS (crates/sync-dock, IRL_QT_PREFIX). Qt is
+  # for the dock only; nothing else in the plugin touches it, and the Qt that
+  # runs it is the host OBS's own. Linux takes the distro's qt6-base-dev.
+  OBS_DEPS_QT6_VERSION: "2025-08-23"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -45,9 +50,12 @@ jobs:
           # and FFmpeg 6, and jammy has 3.22 and 4.4.
           sudo add-apt-repository -y ppa:obsproject/obs-studio
           sudo apt-get update
+          # qt6-base-dev is for the IRL Sync dock (crates/sync-dock), which
+          # cargo builds in when pkg-config finds Qt6Widgets.
           sudo apt-get install -y \
             build-essential cmake pkg-config nasm meson ninja-build \
-            clang libclang-dev libva-dev curl obs-studio libsimde-dev
+            clang libclang-dev libva-dev curl obs-studio libsimde-dev \
+            qt6-base-dev
 
           # layout-test pins the hand-written structs to the OBS floor the
           # plugin declares, not to whichever libobs this runner happens to
@@ -219,6 +227,32 @@ jobs:
         shell: msys2 {0}
         run: ./deps/build-deps.sh
 
+      # Qt6 for the IRL Sync dock, from the same obs-deps release OBS itself
+      # is built with, so the import libraries match the Qt the plugin meets
+      # at runtime. Only headers and import libraries are used; no Qt ships
+      # in the artifact.
+      - name: Cache Qt6 deps
+        id: cache-qt6
+        uses: actions/cache@v6
+        with:
+          path: obs-deps-qt6
+          key: obs-deps-qt6-windows-x64-${{ env.OBS_DEPS_QT6_VERSION }}
+
+      - name: Download Qt6 deps
+        if: steps.cache-qt6.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/obsproject/obs-deps/releases/download/${{ env.OBS_DEPS_QT6_VERSION }}/windows-deps-qt6-${{ env.OBS_DEPS_QT6_VERSION }}-x64.zip" `
+            -OutFile obs-deps-qt6.zip
+          Expand-Archive obs-deps-qt6.zip -DestinationPath obs-deps-qt6
+
+      - name: Point the dock build at Qt6
+        shell: pwsh
+        run: |
+          "IRL_QT_PREFIX=$PWD\obs-deps-qt6" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build
         shell: cmd
         run: cargo build --release --workspace
@@ -267,6 +301,13 @@ jobs:
             Write-Host "  ok    obs_module_load exported"
           } else {
             Write-Host "  FAIL  obs_module_load missing"; $fail = $true
+          }
+          # The dock is optional in general, but this job supplies Qt, so a
+          # build that silently dropped it is a build.rs regression.
+          if ($deps -match '(?i)\bQt6Widgets\.dll\b') {
+            Write-Host "  ok    IRL Sync dock linked (imports Qt6Widgets.dll)"
+          } else {
+            Write-Host "  FAIL  IRL Sync dock not linked (Qt6Widgets.dll not imported)"; $fail = $true
           }
           if ($fail) { Write-Host $deps; Write-Host $exports; exit 1 }
 
@@ -355,6 +396,27 @@ jobs:
 
       - name: Build bundled deps
         run: ./deps/build-deps.sh
+
+      # Qt6 headers for the IRL Sync dock. Headers only: the plugin already
+      # links with -undefined dynamic_lookup, so Qt's symbols resolve against
+      # the Qt the OBS process loaded, exactly as libobs's do.
+      - name: Cache Qt6 deps
+        id: cache-qt6
+        uses: actions/cache@v6
+        with:
+          path: obs-deps-qt6
+          key: obs-deps-qt6-macos-arm64-${{ env.OBS_DEPS_QT6_VERSION }}
+
+      - name: Download Qt6 deps
+        if: steps.cache-qt6.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o macos-deps-qt6.tar.xz \
+            "https://github.com/obsproject/obs-deps/releases/download/${OBS_DEPS_QT6_VERSION}/macos-deps-qt6-${OBS_DEPS_QT6_VERSION}-arm64.tar.xz"
+          mkdir -p obs-deps-qt6
+          tar -xf macos-deps-qt6.tar.xz -C obs-deps-qt6
+
+      - name: Point the dock build at Qt6
+        run: echo "IRL_QT_PREFIX=$PWD/obs-deps-qt6" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --workspace

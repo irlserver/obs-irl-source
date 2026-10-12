@@ -293,6 +293,7 @@ impl Receiver {
             video_tb,
             using_hw_decode,
             flags,
+            sync,
             ..
         } = self;
         let Some(fmt) = fmt.as_ref() else { return };
@@ -308,6 +309,9 @@ impl Receiver {
                             flags.has_video_stream = true;
                             shared.flags.video_present.store(true, Relaxed);
                             *video_tb = stream.time_base();
+                            // Timecode sync scans this stream's packets for
+                            // the SEI and diagnoses a missing one by codec.
+                            sync.set_video_stream(index as i32, stream.time_base(), codec_id);
                             // This reports the requested decode path; the
                             // first-keyframe log reports the ground truth from
                             // the actual decoded frame.
@@ -348,6 +352,7 @@ impl Receiver {
                             flags.has_audio_stream = true;
                             shared.flags.audio_present.store(true, Relaxed);
                             *audio_tb = stream.time_base();
+                            sync.set_audio_stream(index as i32, stream.time_base());
                             let (sample_rate, channels) = stream.audio_params();
                             irl_info!(
                                 "Audio stream {index}: {} {sample_rate}Hz {channels}ch",
@@ -414,6 +419,7 @@ impl Receiver {
         self.video_stream_idx = -1;
         self.shared.flags.video_present.store(false, Relaxed);
         self.using_hw_decode = false;
+        self.sync.clear_streams();
 
         self.audio_in.reset();
         self.flags.reset();
@@ -421,6 +427,9 @@ impl Receiver {
 
     pub(super) fn prepare_new_connection(&mut self) {
         self.shared.flags.reconnecting.store(false, Relaxed);
+        // Timecode sync starts over with the feed. Before the audio state
+        // below, and outside its lock: the reset takes that lock itself.
+        self.sync.reset();
         self.shared.video_flags.first_keyframe.store(false, Relaxed);
         self.shared.video_flags.corrupted.store(false, Relaxed);
         self.shared.conn.video_ts_init.store(false, Relaxed);
@@ -467,6 +476,9 @@ impl Receiver {
         }
 
         self.close_ffmpeg();
+        // Timecode sync: drop the delay line and every measurement, so a
+        // stale hold cannot cascade into the next connection.
+        self.sync.reset();
 
         // Blank the source instead of leaving the last decoded frame frozen
         // on screen, matching what OBS's own media source does on media end

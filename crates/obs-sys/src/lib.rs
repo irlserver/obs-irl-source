@@ -1,6 +1,6 @@
 //! Raw libobs declarations, hand-written (no bindgen at build time).
 //!
-//! Only the surface obs-irl-source uses is declared here: 58 functions, the
+//! Only the surface obs-irl-source uses is declared here: 62 functions, the
 //! structs libobs passes by value or fills in, and the enums/flags those take.
 //! Layout is verified by `cargo test -p obs-sys --features layout-test`
 //! against real libobs headers; the declarations follow OBS 32.1.2, and
@@ -631,6 +631,8 @@ unsafe extern "C" {
     pub fn obs_data_get_string(data: *mut obs_data_t, name: *const c_char) -> *const c_char;
     pub fn obs_data_get_int(data: *mut obs_data_t, name: *const c_char) -> i64;
     pub fn obs_data_get_bool(data: *mut obs_data_t, name: *const c_char) -> bool;
+    /// Whether `name` was set explicitly (a default alone does not count).
+    pub fn obs_data_has_user_value(data: *mut obs_data_t, name: *const c_char) -> bool;
     pub fn obs_data_set_string(data: *mut obs_data_t, name: *const c_char, val: *const c_char);
     pub fn obs_data_set_int(data: *mut obs_data_t, name: *const c_char, val: i64);
     pub fn obs_data_set_bool(data: *mut obs_data_t, name: *const c_char, val: bool);
@@ -647,6 +649,24 @@ unsafe extern "C" {
         name: *const c_char,
         array: *mut obs_data_array_t,
     );
+    /// Nests `obj` under `name`; libobs takes its own reference to `obj`.
+    pub fn obs_data_set_obj(data: *mut obs_data_t, name: *const c_char, obj: *mut obs_data_t);
+    /// Parses a JSON file into a fresh `obs_data_t`, falling back to the
+    /// backup `obs_data_save_json_safe` kept (`backup_ext` appended with a
+    /// dot) when the file is missing or does not parse. NULL when neither
+    /// reads.
+    pub fn obs_data_create_from_json_file_safe(
+        json_file: *const c_char,
+        backup_ext: *const c_char,
+    ) -> *mut obs_data_t;
+    /// Writes `data` as JSON through a temp file and keeps a backup; the two
+    /// extensions are appended to `file` with a dot.
+    pub fn obs_data_save_json_safe(
+        data: *mut obs_data_t,
+        file: *const c_char,
+        temp_ext: *const c_char,
+        backup_ext: *const c_char,
+    ) -> bool;
     pub fn obs_data_array_create() -> *mut obs_data_array_t;
     pub fn obs_data_array_push_back(array: *mut obs_data_array_t, obj: *mut obs_data_t) -> usize;
     pub fn obs_data_array_release(array: *mut obs_data_array_t);

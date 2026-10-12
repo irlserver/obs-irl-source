@@ -926,6 +926,45 @@ fn video_stops_waiting_for_audio_that_never_primes() {
     assert_eq!(recorder.only().timestamp, due);
 }
 
+/// Timecode sync may hold audio back from priming for up to its own deadline;
+/// that time does not count against the video wait, or video would anchor on
+/// the fallback just before the mapping it was waiting for appears.
+#[test]
+fn a_sync_prime_hold_does_not_run_down_the_video_wait() {
+    let shared = shared_with_audio();
+    shared.sync_flags.prime_hold.store(true, Relaxed);
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
+
+    let now = clock.now();
+    feed(&mut thread, 10_000_000_000, now);
+    run_at(&mut thread, &clock, now);
+    run_at(&mut thread, &clock, now + 4_000_000_000);
+    assert!(recorder.emitted().is_empty());
+    assert_eq!(
+        thread.pacing().len(),
+        1,
+        "held for as long as sync holds priming"
+    );
+
+    // The hold lifts with audio still unprimed: the wait starts from here.
+    let lifted = now + 4_000_000_000;
+    shared.sync_flags.prime_hold.store(false, Relaxed);
+    run_at(&mut thread, &clock, lifted);
+    run_at(&mut thread, &clock, lifted + 3_349_000_000);
+    assert!(recorder.emitted().is_empty());
+    assert_eq!(
+        thread.pacing().len(),
+        1,
+        "a full wait from when the hold lifted"
+    );
+    run_at(&mut thread, &clock, lifted + 3_351_000_000);
+    assert_eq!(
+        thread.pacing().len(),
+        0,
+        "gave up: the stale frame is dropped"
+    );
+}
+
 /// Without an audio stream there is nothing to wait for and nothing to be in
 /// sync with: the video-only fallback anchors as soon as the first frame can
 /// be on time. The fallback schedules that frame at its arrival, which leaves

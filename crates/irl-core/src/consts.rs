@@ -6,7 +6,11 @@ pub const SOURCE_ID: &str = "irl_source";
 /// obs-websocket vendor name.
 pub const VENDOR_NAME: &str = "obs-irl-source";
 /// Version of the vendor request API this plugin serves.
-pub const VENDOR_API_VERSION: i64 = 1;
+///
+/// Bumped when a request is added or a response field changes meaning, so a
+/// client can feature-detect instead of probing. 2: the timecode sync
+/// requests (`GetSyncStatus`, `SetSyncConfig`) and the `sync_*` stat fields.
+pub const VENDOR_API_VERSION: i64 = 2;
 
 // ── Settings defaults ──
 
@@ -376,10 +380,172 @@ pub const RTMP_BUFFER_MS: i64 = 1000;
 pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 /// Interval of the periodic receiver stats log line.
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
+/// Packets the reader thread may read ahead of the receiver. A handoff, not a
+/// buffer: past it the reader stops reading and the transport holds the rest.
+pub const RECEIVER_READ_AHEAD_PACKETS: usize = 16;
+/// Longest the receiver waits for a packet before it looks at the run state
+/// again. Held packets are released on time regardless.
+pub const RECEIVER_IDLE_WAIT_MS: u64 = 100;
 
 /// Ring capacity when the format is degenerate and `4 × max_ms` works out to
 /// nothing.
 pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
+
+// ── Timecode sync ──
+
+/// Per-source opt-in default.
+pub const DEFAULT_SYNC_ENABLED: bool = false;
+/// Shared presentation offset default.
+pub const SYNC_DEFAULT_OFFSET_MS: i32 = 5000;
+/// Offset floor.
+pub const SYNC_MIN_OFFSET_MS: i32 = 0;
+/// Offset ceiling. It bounds a typo, not memory: the hold is compressed
+/// packets, and 30s of a 6Mbit/s feed is about 22MB.
+pub const SYNC_MAX_OFFSET_MS: i32 = 30000;
+/// The offset is set and reported in whole seconds: co-streamers read it to
+/// each other, and "six" is easier to agree on over a call than 6123ms.
+pub const SYNC_OFFSET_STEP_MS: i32 = 1000;
+/// A server run for this plugin, so a fresh install gets the burst polling
+/// policy and its drift correction. Any other host is polled at the
+/// public-pool cadence.
+pub const SYNC_DEFAULT_NTP_SERVER: &str = "ntp.kringkast.com";
+/// Rolling window over which arrival latency is peak-held, in buckets of
+/// [`SYNC_PEAK_BUCKET_NS`].
+pub const SYNC_PEAK_BUCKETS: usize = 12;
+/// Bucket width of the latency peak: 12 × 5s is the 60s window.
+pub const SYNC_PEAK_BUCKET_NS: u64 = 5_000_000_000;
+/// How long the presentation error is averaged over. A duration, not a sample
+/// count, because sources run at anything from 25 to 240fps.
+pub const SYNC_ERROR_WINDOW_NS: u64 = 1_000_000_000;
+/// Capacity of the error window: what a second costs at the fastest rate the
+/// interval bounds accept (250fps).
+pub const SYNC_ERROR_SAMPLES: usize = 256;
+/// Completed timecode seconds the frame rate is decided from. Enough for two
+/// of them to agree while a damaged one is outvoted, and small enough that a
+/// genuine rate change lands within this many seconds.
+pub const SYNC_FPS_SECONDS: usize = 4;
+/// Packet ceiling of the delay line: 30s of 60fps video interleaved with audio
+/// several times over.
+pub const SYNC_DELAY_MAX_PACKETS: usize = 16384;
+/// Byte ceiling of the delay line (256 MiB). Hitting either ceiling means
+/// something pathological; the read loop applies backpressure before that.
+pub const SYNC_DELAY_MAX_BYTES: usize = 256 * 1024 * 1024;
+/// Sources the registry (and the dock) can hold.
+pub const SYNC_MAX_SOURCES: usize = 64;
+/// Presentation error we call aligned: just above two frames at 60fps.
+pub const SYNC_LOCK_TOLERANCE_NS: i64 = 40_000_000;
+/// The wider band to leave before admitting we are not; stops a row
+/// flickering between Locked and Acquiring on ordinary jitter.
+pub const SYNC_UNLOCK_TOLERANCE_NS: i64 = 120_000_000;
+/// Fraction of real time the hold may move by while locked, deliberately
+/// below the speed controller's -2%/+5% authority so drift correction stays
+/// inaudible.
+pub const SYNC_SLEW_RATE: f64 = 0.015;
+/// Rate at which an unwanted hold is given back. Zeroing it would make every
+/// queued packet due at once; this sits inside the +5% catch-up authority, so
+/// the cost is mild chipmunk and unwinding a five-second hold takes ~2 min.
+pub const SYNC_RELEASE_RATE: f64 = 0.04;
+/// Slack added to the hold when working out when a correction will show up:
+/// decode, the jitter cushion and the audio output lead.
+pub const SYNC_SETTLE_MARGIN_NS: i64 = 750_000_000;
+/// Latencies a timecode may plausibly read: a little negative for the
+/// sender's own clock error and the timecode's frame grid, and up to twice
+/// the largest offset. Anything outside is a broken stamp or a sender clock
+/// that is not on NTP.
+pub const SYNC_LATENCY_MIN_NS: i64 = -2_000_000_000;
+/// See [`SYNC_LATENCY_MIN_NS`].
+pub const SYNC_LATENCY_MAX_NS: i64 = 2 * SYNC_MAX_OFFSET_MS as i64 * 1_000_000;
+/// How far a stream's DTS may go back before the release clock reads it as
+/// the sender restarting its timestamps. Small steps back are reorder noise.
+pub const SYNC_JUMP_TOLERANCE_NS: i64 = 1_000_000_000;
+/// No timecode for this long and the source has stopped being alignable.
+pub const SYNC_TC_STALE_NS: u64 = 3_000_000_000;
+/// Deliberate over-hold at engage: bounds the anchor's pre-roll wait rather
+/// than making the seed accurate. Early is the harmless direction.
+pub const SYNC_SEED_BIAS_NS: i64 = 250_000_000;
+/// Longest pre-roll the playout anchor will ask the audio output to wait.
+pub const SYNC_ANCHOR_MAX_WAIT_NS: i64 = 1_500_000_000;
+/// Longest the audio output is kept from priming while sync works out its
+/// hold. A backstop for a sender that never engages.
+pub const SYNC_PRIME_WAIT_NS: u64 = 3_000_000_000;
+/// Hysteresis on the "cannot reach the offset" alarm: enter after this long.
+pub const SYNC_ALARM_ENTER_NS: u64 = 4_000_000_000;
+/// Hysteresis on the "cannot reach the offset" alarm: leave after this long.
+pub const SYNC_ALARM_LEAVE_NS: u64 = 8_000_000_000;
+/// ~5Hz snapshot publication to the registry.
+pub const SYNC_PUBLISH_INTERVAL_NS: u64 = 200_000_000;
+/// Published status older than this is reported as stale rather than as
+/// whatever it last said. Comfortably longer than the publish interval.
+pub const SYNC_PUBLISH_STALE_NS: u64 = 3_000_000_000;
+/// Anchor smoothing divisor; see `sync::fold_present_bias`.
+pub const SYNC_BIAS_SMOOTHING_DIV: i64 = 8;
+
+// ── NTP client ──
+
+/// Seconds between 1900-01-01 (NTP epoch) and 1970-01-01 (Unix epoch).
+pub const NTP_UNIX_EPOCH_DELTA: u64 = 2_208_988_800;
+/// UDP port.
+pub const NTP_PORT: u16 = 123;
+/// SNTP packet size.
+pub const NTP_PACKET_BYTES: usize = 48;
+/// Receive timeout per query.
+pub const NTP_RECV_TIMEOUT_MS: u64 = 1200;
+/// Samples in an acquisition burst; the lowest-RTT one wins.
+pub const NTP_BURST: usize = 4;
+/// Bounds of the randomised burst-policy poll interval.
+pub const NTP_BURST_MIN_INTERVAL_MS: u32 = 1000;
+/// Bounds of the randomised burst-policy poll interval.
+pub const NTP_BURST_MAX_INTERVAL_MS: u32 = 30000;
+/// Retry gap after a failed burst-policy poll.
+pub const NTP_BURST_RETRY_MS: u32 = 2000;
+/// Standard policy: RFC 4330's recommended minimum.
+pub const NTP_POLL_INTERVAL_MS: u32 = 64000;
+/// Ceiling the kiss-o'-death backoff doubles toward.
+pub const NTP_POLL_MAX_INTERVAL_MS: u32 = 1_024_000;
+/// Retry faster until a first sync exists.
+pub const NTP_RETRY_INTERVAL_MS: u32 = 8000;
+/// Backstop for the idle thread while polling is switched off.
+pub const NTP_IDLE_INTERVAL_MS: u32 = 3_600_000;
+/// Failover pool.
+pub const NTP_FALLBACK_SERVER: &str = "pool.ntp.org";
+/// Consecutive failures before a burst server hands over to the pool.
+pub const NTP_FALLBACK_AFTER_FAILURES: u32 = 3;
+/// Bounds of the randomised probe interval for the failed primary.
+pub const NTP_FALLBACK_PROBE_MIN_MS: u32 = 30000;
+/// Bounds of the randomised probe interval for the failed primary.
+pub const NTP_FALLBACK_PROBE_MAX_MS: u32 = 60000;
+/// A round trip worse than this says nothing useful about the offset.
+pub const NTP_MAX_USABLE_RTT_NS: i64 = 1_000_000_000;
+/// Weight applied to each accepted sample once a sync exists, where the drift
+/// fit is not driving the offset.
+pub const NTP_OFFSET_SMOOTHING: f64 = 0.25;
+/// Past this the estimate is stale enough to re-seat rather than ease.
+pub const NTP_RESEAT_THRESHOLD_NS: i64 = 2_000_000_000;
+/// Drift window size: ~16 minutes at the burst policy's mean interval.
+pub const NTP_DRIFT_CAPACITY: usize = 64;
+/// Samples older than this are left out of the fit.
+pub const NTP_DRIFT_MAX_AGE_NS: i64 = 15 * 60 * 1_000_000_000;
+/// Slack on the round-trip filter, so a sub-millisecond server does not
+/// reject almost everything on jitter alone.
+pub const NTP_DRIFT_RTT_SLACK_NS: i64 = 200_000;
+/// Minimum samples for a fit.
+pub const NTP_DRIFT_MIN_SAMPLES: usize = 8;
+/// Minimum baseline for a fit: at 20 ppm, three minutes is 3.6ms of signal.
+pub const NTP_DRIFT_MIN_SPAN_NS: i64 = 180 * 1_000_000_000;
+/// Pairs closer than this are noise divided by a small number.
+pub const NTP_DRIFT_MIN_PAIR_NS: i64 = 30 * 1_000_000_000;
+/// Minimum pair count for a slope.
+pub const NTP_DRIFT_MIN_PAIRS: usize = 4;
+/// A fit past this is a broken measurement, not a broken clock.
+pub const NTP_DRIFT_MAX_PPM: f64 = 500.0;
+/// Ceiling on the extrapolation itself.
+pub const NTP_DRIFT_MAX_CORRECTION_NS: i64 = 50_000_000;
+/// Servers run for this plugin, where the burst policy is both wanted and
+/// welcome. Matched case-insensitively, exactly or as a parent domain.
+pub const NTP_BURST_HOSTS: &[&str] = &["ntp.kringkast.com"];
+/// Several missed polls; past this the offset is old enough that everything
+/// derived from it is suspect (the dock's "fault" threshold).
+pub const NTP_STALE_AGE_NS: u64 = 300 * 1_000_000_000;
 
 #[cfg(test)]
 mod tests {
@@ -393,7 +559,7 @@ mod tests {
         // ── identity ──
         assert_eq!(SOURCE_ID, "irl_source");
         assert_eq!(VENDOR_NAME, "obs-irl-source");
-        assert_eq!(VENDOR_API_VERSION, 1);
+        assert_eq!(VENDOR_API_VERSION, 2);
 
         // ── settings defaults ──
         assert_eq!(DEFAULT_RECONNECT_DELAY_S, 2);
@@ -507,5 +673,72 @@ mod tests {
         assert_eq!(RTMP_BUFFER_MS, 1000);
         assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // 7 * 4096
         assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000);
+        assert_eq!(RECEIVER_READ_AHEAD_PACKETS, 16);
+        assert_eq!(RECEIVER_IDLE_WAIT_MS, 100);
+
+        // ── timecode sync ──
+        const { assert!(!DEFAULT_SYNC_ENABLED) };
+        assert_eq!(SYNC_DEFAULT_OFFSET_MS, 5000);
+        assert_eq!(SYNC_MIN_OFFSET_MS, 0);
+        assert_eq!(SYNC_MAX_OFFSET_MS, 30000);
+        assert_eq!(SYNC_OFFSET_STEP_MS, 1000);
+        assert_eq!(SYNC_DEFAULT_NTP_SERVER, "ntp.kringkast.com");
+        assert_eq!(SYNC_PEAK_BUCKETS, 12);
+        assert_eq!(SYNC_PEAK_BUCKET_NS, 5_000_000_000);
+        assert_eq!(SYNC_ERROR_WINDOW_NS, 1_000_000_000);
+        assert_eq!(SYNC_ERROR_SAMPLES, 256);
+        assert_eq!(SYNC_FPS_SECONDS, 4);
+        assert_eq!(SYNC_DELAY_MAX_PACKETS, 16384);
+        assert_eq!(SYNC_DELAY_MAX_BYTES, 268_435_456);
+        assert_eq!(SYNC_MAX_SOURCES, 64);
+        assert_eq!(SYNC_LOCK_TOLERANCE_NS, 40_000_000);
+        assert_eq!(SYNC_UNLOCK_TOLERANCE_NS, 120_000_000);
+        assert_eq!(SYNC_SLEW_RATE, 0.015);
+        assert_eq!(SYNC_RELEASE_RATE, 0.04);
+        assert_eq!(SYNC_SETTLE_MARGIN_NS, 750_000_000);
+        assert_eq!(SYNC_LATENCY_MIN_NS, -2_000_000_000);
+        assert_eq!(SYNC_LATENCY_MAX_NS, 60_000_000_000);
+        assert_eq!(SYNC_JUMP_TOLERANCE_NS, 1_000_000_000);
+        assert_eq!(SYNC_TC_STALE_NS, 3_000_000_000);
+        assert_eq!(SYNC_SEED_BIAS_NS, 250_000_000);
+        assert_eq!(SYNC_ANCHOR_MAX_WAIT_NS, 1_500_000_000);
+        assert_eq!(SYNC_PRIME_WAIT_NS, 3_000_000_000);
+        assert_eq!(SYNC_ALARM_ENTER_NS, 4_000_000_000);
+        assert_eq!(SYNC_ALARM_LEAVE_NS, 8_000_000_000);
+        assert_eq!(SYNC_PUBLISH_INTERVAL_NS, 200_000_000);
+        assert_eq!(SYNC_PUBLISH_STALE_NS, 3_000_000_000);
+        assert_eq!(SYNC_BIAS_SMOOTHING_DIV, 8);
+
+        // ── NTP client ──
+        assert_eq!(NTP_UNIX_EPOCH_DELTA, 2_208_988_800);
+        assert_eq!(NTP_PORT, 123);
+        assert_eq!(NTP_PACKET_BYTES, 48);
+        assert_eq!(NTP_RECV_TIMEOUT_MS, 1200);
+        assert_eq!(NTP_BURST, 4);
+        assert_eq!(NTP_BURST_MIN_INTERVAL_MS, 1000);
+        assert_eq!(NTP_BURST_MAX_INTERVAL_MS, 30000);
+        assert_eq!(NTP_BURST_RETRY_MS, 2000);
+        assert_eq!(NTP_POLL_INTERVAL_MS, 64000);
+        assert_eq!(NTP_POLL_MAX_INTERVAL_MS, 1_024_000);
+        assert_eq!(NTP_RETRY_INTERVAL_MS, 8000);
+        assert_eq!(NTP_IDLE_INTERVAL_MS, 3_600_000);
+        assert_eq!(NTP_FALLBACK_SERVER, "pool.ntp.org");
+        assert_eq!(NTP_FALLBACK_AFTER_FAILURES, 3);
+        assert_eq!(NTP_FALLBACK_PROBE_MIN_MS, 30000);
+        assert_eq!(NTP_FALLBACK_PROBE_MAX_MS, 60000);
+        assert_eq!(NTP_MAX_USABLE_RTT_NS, 1_000_000_000);
+        assert_eq!(NTP_OFFSET_SMOOTHING, 0.25);
+        assert_eq!(NTP_RESEAT_THRESHOLD_NS, 2_000_000_000);
+        assert_eq!(NTP_DRIFT_CAPACITY, 64);
+        assert_eq!(NTP_DRIFT_MAX_AGE_NS, 900_000_000_000);
+        assert_eq!(NTP_DRIFT_RTT_SLACK_NS, 200_000);
+        assert_eq!(NTP_DRIFT_MIN_SAMPLES, 8);
+        assert_eq!(NTP_DRIFT_MIN_SPAN_NS, 180_000_000_000);
+        assert_eq!(NTP_DRIFT_MIN_PAIR_NS, 30_000_000_000);
+        assert_eq!(NTP_DRIFT_MIN_PAIRS, 4);
+        assert_eq!(NTP_DRIFT_MAX_PPM, 500.0);
+        assert_eq!(NTP_DRIFT_MAX_CORRECTION_NS, 50_000_000);
+        assert_eq!(NTP_BURST_HOSTS, &["ntp.kringkast.com"]);
+        assert_eq!(NTP_STALE_AGE_NS, 300_000_000_000);
     }
 }

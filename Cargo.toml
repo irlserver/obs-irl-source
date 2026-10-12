@@ -7,6 +7,7 @@ members = [
     "crates/irl-core",
     "crates/irl-provider",
     "crates/irl-source",
+    "crates/sync-dock",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ obs = { path = "crates/obs" }
 irl-ffmpeg = { path = "crates/ffmpeg" }
 irl-core = { path = "crates/irl-core" }
 irl-provider = { path = "crates/irl-provider" }
+sync-dock = { path = "crates/sync-dock" }
 # The bundled FFmpeg is located through FFMPEG_DIR (see .cargo/config.toml);
 # `static` makes the sys crate emit static link lines for the five libav*
 # archives. The transitive libraries (srt, rist, mbedtls, ...) are linked by
@@ -41,6 +43,7 @@ parking_lot = "0.12"
 # so the resolver can pair syn 3 with prettyplease 0.2 and bindgen fails to
 # compile. 0.73.0 requires syn 3 and prettyplease 0.3 together.
 bindgen = "=0.73.0"
+cc = "1"
 
 [profile.release]
 opt-level = 3

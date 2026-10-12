@@ -16,6 +16,8 @@ An OBS source built for IRL streams. Point it at your SRT or RTMP pull URL and i
 
 **Lower delay.** An IRL SRT stream through a Media Source usually sits 2 to 3 seconds behind real life. This plugin stays well under that, and it does not creep: audio goes to OBS on a steady clock, so OBS never starts adding buffering of its own.
 
+**Multiple feeds cut in time.** Timecode sync holds each feed until the moment it was captured plus a shared offset, so a main camera and a chase camera arriving over different uplinks show the same instant at the same instant, and two OBS instances on the same offset composite the same moment. Needs a sender that stamps SEI timecodes (Moblin, H.265 over SRT, SRTLA or RIST) and an NTP reference; see [Timecode sync](docs/timecode-sync.md).
+
 **Less clicking around.** A source you just added sizes itself to your canvas on the first frame, so there is no manual Fit to screen step.
 
 Works with SRT, RTMP, RIST, UDP, TCP, HTTP, or anything else FFmpeg can open, and with H.264, HEVC (including 10-bit), AV1, VP9, AAC and Opus.
@@ -98,8 +100,9 @@ A source you just added sizes itself to the canvas when its first frame arrives,
 | Low Latency Audio | Off | Play audio the moment it arrives, with no cushion. Lowest delay, least tolerant of a wobbly connection |
 | Show Nothing When the Stream Ends | On | Blank the source as soon as the stream drops, instead of leaving the last frame frozen on screen until it reconnects. Same idea as the media source's "Show nothing when playback ends" |
 | Close Stream When Inactive | Off | Stop pulling the stream when the source is neither showing nor active (the last frame goes black if Show Nothing When the Stream Ends is on), and reconnect when it becomes visible again |
+| Sync | Off | Include this source in timecode sync. The master switch, the shared offset and the NTP server are set once for every source, in the IRL Sync dock (View → Docks) or over obs-websocket; see [Timecode sync](docs/timecode-sync.md) |
 
-Target Buffer, Reconnect Delay, Adaptive Latency Control, Catch-Up Speed, Wait for Keyframe, Show Nothing When the Stream Ends and Close Stream When Inactive can be changed while the stream is running. The connection stays up and the stats counters keep counting. The one exception is turning Close Stream When Inactive on while the source is already hidden, which is a request to stop receiving: that drops the connection and resets the stats counters, as it would on any later hide. Changing Target Buffer mid-stream keeps every buffered sample and walks the latency to the new value at up to the Catch-Up Speed or -2%, so you should not hear a seam. Any audio hold stays in force on top of the new value, and shrinks by however much more of the skew the new value covers. Changing URL, FFmpeg Options, Hardware Decode or Low Latency Audio reconnects, because those are set when the stream is opened.
+Target Buffer, Reconnect Delay, Adaptive Latency Control, Catch-Up Speed, Wait for Keyframe, Show Nothing When the Stream Ends, Sync and Close Stream When Inactive can be changed while the stream is running. The connection stays up and the stats counters keep counting. The one exception is turning Close Stream When Inactive on while the source is already hidden, which is a request to stop receiving: that drops the connection and resets the stats counters, as it would on any later hide. Changing Target Buffer mid-stream keeps every buffered sample and walks the latency to the new value at up to the Catch-Up Speed or -2%, so you should not hear a seam. Any audio hold stays in force on top of the new value, and shrinks by however much more of the skew the new value covers. Changing URL, FFmpeg Options, Hardware Decode or Low Latency Audio reconnects, because those are set when the stream is opened.
 
 #### Receiving directly from the encoder (listener mode)
 
@@ -143,6 +146,10 @@ Vendor name: `obs-irl-source`.
 | `GetStats` | `source_name`, optional when the scene collection has exactly one IRL source | `source_name` plus every field in [Stats reference](#stats-reference) |
 | `GetSourceList` | none | `sources`: array of `{source_name, active, showing}` |
 | `GetVersion` | none | `plugin_version`, `vendor_api_version`, `obs_websocket_api_version` |
+| `GetSyncStatus` | none | The whole timecode sync picture: `sync_enabled`, `offset_ms`, `clock`, `sources`, `out_of_sync_count`, `recommended_offset_ms`. See [Timecode sync](docs/timecode-sync.md#reading-status-over-obs-websocket) |
+| `SetSyncConfig` | any of `sync_enabled` (bool), `offset_ms` (int, clamped to 0 to 30000), `ntp_server` (string) | The three settings as they stand afterwards |
+
+`vendor_api_version` is 2 as of the timecode sync requests, so a client that needs them can feature detect on it instead of probing.
 
 Every response carries `success`. When it is `false`, `error` says why: no source by that name, that source is not an IRL Source, no IRL Source at all, or more than one with no `source_name` given. Stream URLs are deliberately not exposed, because they can carry an SRT passphrase or a stream key and every connected client would see them.
 
@@ -193,6 +200,10 @@ Any tagged release should at least be fully tested, single commits might not (th
 
 If you wish to contribute PRs to this project, please understand what you are changing. Also, you should be able to write any replies to reviews/PRs yourself.
 Please don't just copy and paste replies directly from the AI.
+
+## Credits
+
+Timecode sync (the SEI timecode reader, the NTP client, the delay line controller and the IRL Sync dock) was designed and written by [Spillmaker](https://github.com/Spillmaker) for the C plugin (`nal-timecodes`), and ported to the Rust plugin from there. The dock is his Qt widget, carried over as C++.
 
 ## License
 
@@ -344,11 +355,13 @@ The plugin is a Rust workspace under `crates/`, built with cargo. It statically 
 
 libobs is neither built nor linked: the plugin binds to it through hand-written FFI (`crates/obs-sys`) and resolves the symbols from the OBS process at load time. libclang is a build dependency, because bindgen generates the FFmpeg bindings during the build.
 
+The IRL Sync dock is the one part that needs Qt6. It is built in when Qt6 Widgets is found (`qt6-base-dev` on Linux, or `IRL_QT_PREFIX` pointing at a Qt install such as the `*-deps-qt6-*` archives from [obs-deps](https://github.com/obsproject/obs-deps/releases) on Windows and macOS) and skipped with a build warning otherwise. Without it timecode sync still runs and is fully operable over obs-websocket; you just get no dock. `IRL_DOCK=0` skips it deliberately.
+
 ### Linux
 
 ```bash
 sudo apt install build-essential cmake pkg-config nasm meson ninja-build \
-    clang libclang-dev libobs-dev libva-dev
+    clang libclang-dev libobs-dev libva-dev qt6-base-dev
 ./deps/build-deps.sh
 cargo build --release
 ./scripts/verify-plugin.sh target/release/libobs_irl_source.so
