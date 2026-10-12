@@ -20,6 +20,7 @@ pub mod frame;
 pub mod hw;
 pub mod log;
 pub mod packet;
+pub mod srt;
 pub mod swr;
 pub mod sws;
 

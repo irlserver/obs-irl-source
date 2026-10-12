@@ -41,6 +41,9 @@ pub const PLUGIN_VERSION: &str = env!("IRL_PLUGIN_VERSION");
 fn module_load() -> bool {
     install_panic_hook();
     log::route_ffmpeg_log();
+    if !ffmpeg::srt::hold() {
+        irl_warn!("libsrt failed to start; SRT URLs will not open");
+    }
     #[cfg(feature = "deadlocks")]
     spawn_deadlock_poller();
     obs::register_source::<source::IrlSource>();
@@ -53,7 +56,9 @@ fn module_post_load() {
     websocket::register();
 }
 
-fn module_unload() {}
+fn module_unload() {
+    ffmpeg::srt::release();
+}
 
 #[cfg(feature = "deadlocks")]
 fn spawn_deadlock_poller() {
