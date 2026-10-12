@@ -13,8 +13,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use irl_core::Timecode;
 use irl_core::consts;
 use irl_core::sync::{
-    DelayLine, Observation, PresentationMap, SyncController, SyncEvent, TcReason, VideoCodec,
-    fold_present_bias,
+    DelayLine, Observation, PresentationMap, ReleaseClock, SyncController, SyncEvent, TcReason,
+    VideoCodec, fold_present_bias,
 };
 
 use crate::shared::{AudioState, Shared};
@@ -28,6 +28,9 @@ pub struct SyncControl {
     video_stream_idx: i32,
     video_tb: ffmpeg::Rational,
     video_codec: VideoCodec,
+    /// The connection's audio stream, for its DTS. `-1` while none is open.
+    audio_stream_idx: i32,
+    audio_tb: ffmpeg::Rational,
 }
 
 impl SyncControl {
@@ -37,7 +40,15 @@ impl SyncControl {
             video_stream_idx: -1,
             video_tb: ffmpeg::Rational::new(0, 1),
             video_codec: VideoCodec::None,
+            audio_stream_idx: -1,
+            audio_tb: ffmpeg::Rational::new(0, 1),
         }
+    }
+
+    /// The connection opened an audio stream.
+    pub fn set_audio_stream(&mut self, index: i32, time_base: ffmpeg::Rational) {
+        self.audio_stream_idx = index;
+        self.audio_tb = time_base;
     }
 
     /// The connection opened a video stream.
@@ -57,9 +68,10 @@ impl SyncControl {
     }
 
     /// The connection closed.
-    pub fn clear_video_stream(&mut self) {
+    pub fn clear_streams(&mut self) {
         self.video_stream_idx = -1;
         self.video_codec = VideoCodec::None;
+        self.audio_stream_idx = -1;
     }
 
     /// Drop the delay line and every measurement. On disconnect, on a new
@@ -83,8 +95,21 @@ impl SyncControl {
     /// Fold a freshly read packet in and decide whether the delay line keeps
     /// it. `true` means the line took it and the caller must not dispatch it.
     pub fn intercept(&mut self, pkt: &ffmpeg::Packet) -> bool {
-        let is_video = self.video_stream_idx >= 0 && pkt.stream_index() == self.video_stream_idx;
+        let index = pkt.stream_index();
+        let is_video = self.video_stream_idx >= 0 && index == self.video_stream_idx;
+        let time_base = if is_video {
+            Some(self.video_tb)
+        } else if self.audio_stream_idx >= 0 && index == self.audio_stream_idx {
+            Some(self.audio_tb)
+        } else {
+            None
+        };
         let info = PacketInfo {
+            stream: index.max(0) as u32,
+            dts_ns: time_base.and_then(|tb| {
+                pkt.dts_or_pts()
+                    .map(|dts| ffmpeg::rescale_q(dts, tb, ffmpeg::NS_TIME_BASE))
+            }),
             timecode: is_video
                 .then(|| irl_core::sei::find_timecode(pkt.data()))
                 .flatten(),
@@ -123,6 +148,10 @@ pub struct Context {
 /// What the stage reads off one packet.
 #[derive(Debug, Clone, Copy)]
 pub struct PacketInfo {
+    /// The packet's stream. Each is held in order; streams are not.
+    pub stream: u32,
+    /// The DTS in nanoseconds, which places the packet on the media timeline.
+    pub dts_ns: Option<i64>,
     /// The SEI timecode, on a video packet that carries one.
     pub timecode: Option<Timecode>,
     /// The PTS in nanoseconds, on a video packet that has one.
@@ -138,6 +167,7 @@ pub struct SyncStage<P> {
     shared: Arc<Shared>,
     ctl: SyncController,
     delay: DelayLine<P>,
+    release: ReleaseClock,
     low_latency_said: bool,
 }
 
@@ -149,6 +179,7 @@ impl<P> SyncStage<P> {
             shared,
             ctl: SyncController::new(offset_generation),
             delay: DelayLine::new(consts::SYNC_DELAY_MAX_PACKETS, consts::SYNC_DELAY_MAX_BYTES),
+            release: ReleaseClock::default(),
             low_latency_said: false,
         };
         this.reset(offset_generation);
@@ -159,6 +190,7 @@ impl<P> SyncStage<P> {
     /// registry.
     pub fn reset(&mut self, offset_generation: u32) {
         self.delay.clear();
+        self.release.reset();
         {
             let mut state = self.shared.audio_state();
             state.sync.present_bias_ns = None;
@@ -214,7 +246,12 @@ impl<P> SyncStage<P> {
         take: impl FnOnce() -> Option<P>,
     ) -> bool {
         self.observe(ctx, info);
-        self.hold(ctx.now_ns, info.bytes, take)
+        // Every packet teaches the release clock its timeline, held or not,
+        // so it is ready the moment a hold starts.
+        let release_ns =
+            self.release
+                .release_ns(info.stream, ctx.now_ns, info.dts_ns, self.ctl.hold_ns());
+        self.hold(info.stream, release_ns, info.bytes, take)
     }
 
     fn observe(&mut self, ctx: &Context, info: &PacketInfo) {
@@ -223,6 +260,7 @@ impl<P> SyncStage<P> {
             ctl,
             delay,
             low_latency_said,
+            ..
         } = self;
 
         // Low Latency Audio has no speed controller to absorb a hold change
@@ -301,18 +339,22 @@ impl<P> SyncStage<P> {
         }
     }
 
-    fn hold(&mut self, now_ns: u64, bytes: usize, take: impl FnOnce() -> Option<P>) -> bool {
+    fn hold(
+        &mut self,
+        stream: u32,
+        release_ns: u64,
+        bytes: usize,
+        take: impl FnOnce() -> Option<P>,
+    ) -> bool {
+        // Once anything is queued, everything must queue behind it or the
+        // decoder would see packets out of order.
         if !self.ctl.should_hold(self.delay.len()) {
             return false;
         }
 
-        // Once anything is queued, everything must queue behind it or the
-        // decoder would see packets out of order.
-        let release_ns = now_ns + self.ctl.hold_ns() as u64;
-
         if !self.delay.is_full()
             && let Some(pkt) = take()
-            && self.delay.push(pkt, bytes, release_ns)
+            && self.delay.push(stream, pkt, bytes, release_ns)
         {
             return true;
         }
