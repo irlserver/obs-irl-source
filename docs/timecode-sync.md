@@ -241,7 +241,7 @@ grep -rn "Timecode sync\|timecode sync" crates/irl-source/src --include=*.rs
 |---|---|
 | `lib.rs` | `sync::module_load` / `module_post_load` / `module_unload` |
 | `receiver/mod.rs` | `sync_wait_for_room`, `sync.intercept`, `sync_drain`, the wait until `sync.next_release_ns`, `sync.reset` at the end of a run |
-| `receiver/stream.rs` | `sync.set_video_stream` at open, `sync.reset` on a new connection and on disconnect |
+| `receiver/stream.rs` | `sync.set_video_stream` and `sync.set_audio_stream` at open, `sync.reset` on a new connection and on disconnect |
 | `audio/pump.rs` | `prime_held`, `fresh_anchor_ns` at prime, at the stall restart and at the concealment re-anchor |
 | `source.rs` | register / unregister, `set_source_sync_enabled` |
 | `settings.rs` | the `Sync` checkbox and its help text |
@@ -322,15 +322,17 @@ reason, and no amount of tuning here can beat them.
   shifts the queued packets too, so it lands immediately.
 - **Growing the hold starves; shrinking it floods.** Both are rate-limited, and
   the shift helper only ever moves release times later.
-- **A delivery gap still costs its length, once.** A packet is released a
-  hold after it arrives, so the gap reaches the jitter buffer one hold later
-  and is as long as it was on the wire. Sync adds latency, not stall
-  resilience. The read runs on a reader thread so that the line keeps
-  releasing while `av_read_frame` is blocked; with one thread, the gap froze
-  the releases too and was felt twice. Releasing on the media timeline
-  instead of arrival plus hold would absorb a gap shorter than the hold, but
-  would need its own handling of timestamp jumps and of video that arrives
-  behind its audio.
+- **Release follows the timeline, not arrival.** Each packet is released at
+  its DTS plus its stream's floor (the lowest `arrival - DTS` seen) plus the
+  hold (`irl_core::sync::ReleaseClock`). A packet that a gap on the link
+  delayed still gets the slot it would have had, so a gap shorter than the
+  hold never reaches the decoders. Released on arrival plus the hold, the gap
+  would pass straight through, a hold later. Each stream has its own floor
+  and its own queue: the skew between audio and video on the wire is kept,
+  so the audio hold reads what it would without sync, while each stream's
+  jitter is taken out. A stream whose DTS goes back by more than a second
+  restarted its timestamps, and the floors start over. The read runs on a
+  reader thread so that releases go on while `av_read_frame` is blocked.
 
 ## Testing
 
@@ -346,8 +348,9 @@ format, the kiss-o'-death codes and the drift fit against a synthetic crystal.
 and video thread on one virtual clock against a sender that stamps timecodes,
 and measures when each frame reaches the screen against its capture time plus
 the offset: a clean link, two links a second apart showing the same instant,
-video behind its audio with the audio hold in force, a relay catching up, a
-stall, a stream without audio, and Low Latency Audio. Run it whenever you
+video behind its audio with the audio hold in force, a relay catching up,
+stalls shorter and longer than the hold, a stream without audio, and Low
+Latency Audio. Run it whenever you
 touch the controller, the anchor or the playout mapping.
 
 What none of that covers is a real sender. As with the rest of the plugin,

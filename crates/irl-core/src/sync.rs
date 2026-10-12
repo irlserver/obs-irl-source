@@ -235,12 +235,17 @@ pub fn playout_anchor(
 /// the jitter buffer, and the total delay is unchanged. Only the speed
 /// controller draining or building that buffer presents anything earlier or
 /// later.
+///
+/// One queue per stream. A decoder must see its own stream in order, but
+/// audio and video go to different decoders, and released on the media
+/// timeline ([`ReleaseClock`]) video that a stall delayed is due before audio
+/// that arrived with it.
 pub struct DelayLine<T> {
-    entries: VecDeque<Entry<T>>,
+    streams: Vec<Stream<T>>,
+    len: usize,
     bytes: usize,
-    /// Release times are clamped non-decreasing: the hold moves while packets
-    /// are queued, and the decoder must never see them reordered.
-    last_release_ns: u64,
+    /// Breaks ties between streams in arrival order.
+    seq: u64,
     /// Packets the line could not take. The read loop applies backpressure
     /// before the ceilings, so a non-zero count is reported, not absorbed.
     overflows: u64,
@@ -248,19 +253,30 @@ pub struct DelayLine<T> {
     max_bytes: usize,
 }
 
+struct Stream<T> {
+    key: u32,
+    entries: VecDeque<Entry<T>>,
+    /// Release times are clamped non-decreasing within a stream: the hold
+    /// moves while packets are queued, and a decoder must never see them
+    /// reordered.
+    last_release_ns: u64,
+}
+
 struct Entry<T> {
     item: T,
     bytes: usize,
     release_ns: u64,
+    seq: u64,
 }
 
 impl<T> DelayLine<T> {
     /// A line bounded by `max_packets` entries and `max_bytes` of payload.
     pub fn new(max_packets: usize, max_bytes: usize) -> Self {
         Self {
-            entries: VecDeque::new(),
+            streams: Vec::new(),
+            len: 0,
             bytes: 0,
-            last_release_ns: 0,
+            seq: 0,
             overflows: 0,
             max_packets,
             max_bytes,
@@ -269,17 +285,17 @@ impl<T> DelayLine<T> {
 
     /// Either ceiling reached.
     pub fn is_full(&self) -> bool {
-        self.entries.len() >= self.max_packets || self.bytes >= self.max_bytes
+        self.len >= self.max_packets || self.bytes >= self.max_bytes
     }
 
     /// Nothing queued.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len == 0
     }
 
     /// Entries queued.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     /// Payload bytes queued.
@@ -300,37 +316,65 @@ impl<T> DelayLine<T> {
         before
     }
 
-    /// Queue `item` for release at `release_ns` (clamped so releases never
-    /// overtake each other). Returns `false`, dropping `item`, when the line is
-    /// at a ceiling.
-    pub fn push(&mut self, item: T, bytes: usize, release_ns: u64) -> bool {
+    /// Queue `item` of stream `stream` for release at `release_ns`, clamped so
+    /// releases within the stream never overtake each other. Returns `false`,
+    /// dropping `item`, when the line is at a ceiling.
+    pub fn push(&mut self, stream: u32, item: T, bytes: usize, release_ns: u64) -> bool {
         if self.is_full() {
             return false;
         }
-        let release_ns = release_ns.max(self.last_release_ns);
-        self.last_release_ns = release_ns;
-        self.entries.push_back(Entry {
+        let index = match self.streams.iter().position(|s| s.key == stream) {
+            Some(index) => index,
+            None => {
+                self.streams.push(Stream {
+                    key: stream,
+                    entries: VecDeque::new(),
+                    last_release_ns: 0,
+                });
+                self.streams.len() - 1
+            }
+        };
+        let lane = &mut self.streams[index];
+        let release_ns = release_ns.max(lane.last_release_ns);
+        lane.last_release_ns = release_ns;
+        lane.entries.push_back(Entry {
             item,
             bytes,
             release_ns,
+            seq: self.seq,
         });
+        self.seq += 1;
+        self.len += 1;
         self.bytes += bytes;
         true
     }
 
-    /// The head entry if its moment has come.
+    /// The stream whose head comes due first, ties in arrival order.
+    fn next_stream(&mut self) -> Option<&mut Stream<T>> {
+        self.streams
+            .iter_mut()
+            .filter(|s| !s.entries.is_empty())
+            .min_by_key(|s| s.entries.front().map(|e| (e.release_ns, e.seq)))
+    }
+
+    /// The earliest due head entry, if its moment has come.
     pub fn pop_due(&mut self, now_ns: u64) -> Option<T> {
-        if self.entries.front()?.release_ns > now_ns {
+        let lane = self.next_stream()?;
+        if lane.entries.front()?.release_ns > now_ns {
             return None;
         }
-        let entry = self.entries.pop_front()?;
+        let entry = lane.entries.pop_front()?;
+        self.len -= 1;
         self.bytes -= entry.bytes;
         Some(entry.item)
     }
 
-    /// When the head packet comes due, if anything is queued.
+    /// When the next packet comes due, if anything is queued.
     pub fn next_release_ns(&self) -> Option<u64> {
-        self.entries.front().map(|entry| entry.release_ns)
+        self.streams
+            .iter()
+            .filter_map(|s| s.entries.front().map(|e| e.release_ns))
+            .min()
     }
 
     /// Move every queued release time later by `shift_ns`.
@@ -341,18 +385,104 @@ impl<T> DelayLine<T> {
     /// takeover at prime).
     pub fn shift_later(&mut self, shift_ns: i64) {
         let shift = shift_ns.max(0) as u64;
-        for entry in &mut self.entries {
-            entry.release_ns += shift;
+        for lane in &mut self.streams {
+            for entry in &mut lane.entries {
+                entry.release_ns += shift;
+            }
+            lane.last_release_ns += shift;
         }
-        self.last_release_ns += shift;
     }
 
     /// Drop everything and re-arm the one-shot overflow warning.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.streams.clear();
+        self.len = 0;
         self.bytes = 0;
-        self.last_release_ns = 0;
         self.overflows = 0;
+    }
+}
+
+// ── Release clock ────────────────────────────────────────────
+
+/// When a held packet is released: at its place on its stream's timeline, a
+/// hold after the earliest any packet of that stream has arrived relative to
+/// its DTS.
+///
+/// Releasing a hold after each packet's own arrival passes every gap on the
+/// link straight through, a hold later. Releasing on the timeline gives a
+/// packet that a gap delayed the slot it would have had, so a gap shorter
+/// than the hold never reaches the decoders. A packet that arrives after its
+/// slot goes at once.
+///
+/// The floor is `arrival − DTS` at its lowest, per stream, and each stream is
+/// anchored on its own. A sender whose video trails its audio keeps that skew
+/// through the line, so the audio hold downstream reads the same skew it
+/// would without sync; what the line takes out is each stream's jitter. A
+/// higher reading is a packet the network delayed. A stream whose DTS goes back by more than
+/// [`consts::SYNC_JUMP_TOLERANCE_NS`] restarted its timestamps (a sender
+/// restart without a reconnect), since a gap delays packets but never
+/// reorders them, and the floors start over. A jump forward reads as a new
+/// floor on its own.
+#[derive(Debug, Default)]
+pub struct ReleaseClock {
+    floors: Vec<Floor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Floor {
+    stream: u32,
+    floor_ns: i64,
+    last_dts_ns: i64,
+}
+
+impl ReleaseClock {
+    /// When a packet of `stream` with `dts_ns` arriving at `arrival_ns` is
+    /// released, under `hold_ns`. A packet without a DTS is released a hold
+    /// after it arrives.
+    pub fn release_ns(
+        &mut self,
+        stream: u32,
+        arrival_ns: u64,
+        dts_ns: Option<i64>,
+        hold_ns: i64,
+    ) -> u64 {
+        let hold_ns = hold_ns.max(0);
+        let Some(dts_ns) = dts_ns else {
+            return arrival_ns + hold_ns as u64;
+        };
+        let lateness_ns = arrival_ns as i64 - dts_ns;
+
+        let fresh = Floor {
+            stream,
+            floor_ns: lateness_ns,
+            last_dts_ns: dts_ns,
+        };
+        match self.floors.iter().position(|f| f.stream == stream) {
+            None => self.floors.push(fresh),
+            Some(index) => {
+                if dts_ns < self.floors[index].last_dts_ns - consts::SYNC_JUMP_TOLERANCE_NS {
+                    self.floors.clear();
+                    self.floors.push(fresh);
+                } else {
+                    let floor = &mut self.floors[index];
+                    floor.floor_ns = floor.floor_ns.min(lateness_ns);
+                    floor.last_dts_ns = dts_ns;
+                }
+            }
+        }
+
+        let floor_ns = self
+            .floors
+            .iter()
+            .find(|f| f.stream == stream)
+            .map_or(lateness_ns, |f| f.floor_ns);
+        let slot_ns = dts_ns + floor_ns + hold_ns;
+        slot_ns.max(arrival_ns as i64) as u64
+    }
+
+    /// Forget the timeline, for a new connection.
+    pub fn reset(&mut self) {
+        self.floors.clear();
     }
 }
 
@@ -1226,17 +1356,16 @@ impl SyncController {
             }
         }
 
-        // Ceiling from first principles: hold = (offset − latency) −
-        // pipeline, and the pipeline delay is never negative. Plus headroom
-        // for the two deliberate overshoots (the seed bias and the largest
-        // pre-roll the anchor may hand back), because the startup backlog
-        // trim discards audio after sync chose its hold, so the pipeline it
-        // subtracts can come out negative.
-        let max_hold_ns = if needed_ns > 0 {
-            needed_ns + consts::SYNC_SEED_BIAS_NS + consts::SYNC_ANCHOR_MAX_WAIT_NS
-        } else {
-            0
-        };
+        // Ceiling from first principles: the hold is measured from the lowest
+        // latency the release clock has seen, so it never needs more than
+        // the offset minus the lowest plausible latency. Plus headroom for
+        // the two deliberate overshoots (the seed bias and the largest
+        // pre-roll the anchor may hand back). Not the current latency: a
+        // packet the network delayed reads high, and clipping the hold on it
+        // would move presentation for the very jitter the hold absorbs.
+        let max_hold_ns = offset_ns - consts::SYNC_LATENCY_MIN_NS
+            + consts::SYNC_SEED_BIAS_NS
+            + consts::SYNC_ANCHOR_MAX_WAIT_NS;
         if self.hold_ns > max_hold_ns {
             self.hold_ns = max_hold_ns;
         }
@@ -1587,13 +1716,13 @@ mod tests {
     #[test]
     fn delay_line_keeps_releases_ordered_and_bounded() {
         let mut line: DelayLine<u32> = DelayLine::new(3, 1000);
-        assert!(line.push(1, 100, 50));
+        assert!(line.push(0, 1, 100, 50));
         // A shrinking hold would make this due earlier than its predecessor;
         // it is clamped onto it.
-        assert!(line.push(2, 100, 40));
-        assert!(line.push(3, 100, 60));
+        assert!(line.push(0, 2, 100, 40));
+        assert!(line.push(0, 3, 100, 60));
         assert!(line.is_full());
-        assert!(!line.push(4, 100, 70));
+        assert!(!line.push(0, 4, 100, 70));
         assert_eq!((line.len(), line.bytes()), (3, 300));
 
         assert_eq!(line.pop_due(49), None);
@@ -1605,15 +1734,99 @@ mod tests {
         assert_eq!(line.pop_due(70), Some(3));
         assert!(line.is_empty());
         // The byte ceiling binds on its own.
-        assert!(line.push(5, 1000, 80));
+        assert!(line.push(0, 5, 1000, 80));
         assert!(line.is_full());
         assert_eq!(line.note_overflow(), 0);
         assert_eq!(line.note_overflow(), 1);
         line.clear();
         assert_eq!((line.overflows(), line.bytes(), line.len()), (0, 0, 0));
         // After a clear the ordering clamp starts over.
-        assert!(line.push(6, 1, 5));
+        assert!(line.push(0, 6, 1, 5));
         assert_eq!(line.pop_due(5), Some(6));
+    }
+
+    #[test]
+    fn delay_line_orders_each_stream_but_not_across_them() {
+        let mut line: DelayLine<&str> = DelayLine::new(10, 1000);
+        // Audio arrives first and is due at 100; video that a stall delayed
+        // is due earlier, and goes first.
+        assert!(line.push(1, "audio", 1, 100));
+        assert!(line.push(0, "video", 1, 80));
+        // Within a stream the clamp still holds.
+        assert!(line.push(0, "video 2", 1, 70));
+        assert_eq!(line.next_release_ns(), Some(80));
+        assert_eq!(line.pop_due(100), Some("video"));
+        assert_eq!(line.pop_due(100), Some("video 2"));
+        assert_eq!(line.pop_due(100), Some("audio"));
+        assert!(line.is_empty());
+        line.clear();
+        // Ties go in arrival order.
+        assert!(line.push(1, "first", 1, 5));
+        assert!(line.push(0, "second", 1, 5));
+        assert_eq!(line.pop_due(5), Some("first"));
+    }
+
+    #[test]
+    fn the_release_clock_keeps_each_packet_on_its_timeline_slot() {
+        let mut clock = ReleaseClock::default();
+        let hold = S;
+        // A packet every 20ms, 300ms after its DTS: released a hold later.
+        assert_eq!(
+            clock.release_ns(1, 10 * S as u64, Some(10 * S - 300 * MS), hold),
+            11 * S as u64
+        );
+        let on_time = |n: i64| (10 * S + n * 20 * MS) as u64;
+        assert_eq!(
+            clock.release_ns(1, on_time(1), Some(10 * S - 300 * MS + 20 * MS), hold),
+            on_time(1) + S as u64
+        );
+        // A 600ms gap: the packet after it keeps the slot it would have had.
+        let dts = 10 * S - 300 * MS + 40 * MS;
+        assert_eq!(
+            clock.release_ns(1, on_time(2) + 600 * MS as u64, Some(dts), hold),
+            on_time(2) + S as u64
+        );
+        // Later than the hold: released on arrival.
+        let dts = dts + 20 * MS;
+        let late = on_time(3) + 1500 * MS as u64;
+        assert_eq!(clock.release_ns(1, late, Some(dts), hold), late);
+        // Video that trails its audio by 400ms keeps the skew: its own floor
+        // anchors it.
+        let video_at = on_time(4) + 400 * MS as u64;
+        assert_eq!(
+            clock.release_ns(0, video_at, Some(dts + 20 * MS), hold),
+            video_at + S as u64
+        );
+        // Without a DTS, a hold after arrival.
+        assert_eq!(
+            clock.release_ns(1, 50 * S as u64, None, hold),
+            51 * S as u64
+        );
+    }
+
+    #[test]
+    fn the_release_clock_starts_over_when_timestamps_jump_back() {
+        let mut clock = ReleaseClock::default();
+        let hold = S;
+        let at = |n: u64| 10 * S as u64 + n * 20 * MS as u64;
+        clock.release_ns(1, at(0), Some(100 * S), hold);
+        clock.release_ns(1, at(1), Some(100 * S + 20 * MS), hold);
+        // The sender restarts its clock: DTS falls by 60s. A gap never makes
+        // DTS go back, so the timeline is taken afresh and the packet keeps
+        // its hold.
+        assert_eq!(
+            clock.release_ns(1, at(2), Some(40 * S), hold),
+            at(2) + S as u64
+        );
+        assert_eq!(
+            clock.release_ns(1, at(3), Some(40 * S + 20 * MS), hold),
+            at(3) + S as u64
+        );
+        // A jump forward is a new floor on its own.
+        assert_eq!(
+            clock.release_ns(1, at(4), Some(500 * S), hold),
+            at(4) + S as u64
+        );
     }
 
     #[test]

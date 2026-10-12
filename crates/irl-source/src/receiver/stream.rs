@@ -352,6 +352,7 @@ impl Receiver {
                             flags.has_audio_stream = true;
                             shared.flags.audio_present.store(true, Relaxed);
                             *audio_tb = stream.time_base();
+                            sync.set_audio_stream(index as i32, stream.time_base());
                             let (sample_rate, channels) = stream.audio_params();
                             irl_info!(
                                 "Audio stream {index}: {} {sample_rate}Hz {channels}ch",
@@ -418,7 +419,7 @@ impl Receiver {
         self.video_stream_idx = -1;
         self.shared.flags.video_present.store(false, Relaxed);
         self.using_hw_decode = false;
-        self.sync.clear_video_stream();
+        self.sync.clear_streams();
 
         self.audio_in.reset();
         self.flags.reset();

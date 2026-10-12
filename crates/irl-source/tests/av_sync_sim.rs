@@ -640,12 +640,16 @@ impl Sim {
             return;
         };
         let info = match media {
-            Media::Audio(_) => PacketInfo {
+            Media::Audio(n) => PacketInfo {
+                stream: 1,
+                dts_ns: Some(sample_pts_ns(n)),
                 timecode: None,
                 pts_ns: None,
                 bytes: 400,
             },
             Media::Video(pts) => PacketInfo {
+                stream: 0,
+                dts_ns: Some(pts),
                 timecode: Some(sync.timecode(pts)),
                 pts_ns: Some(pts),
                 bytes: 4096,
@@ -1552,19 +1556,42 @@ fn timecode_sync_ignores_a_relay_catching_up_at_connect() {
     );
 }
 
-/// The delay line releases a hold after arrival, so a gap on the link
-/// reaches the jitter buffer a hold later and as long as it was. Sync adds
-/// latency, not stall resilience; what it must not do is make a gap cost
-/// more than it does without sync.
+/// The delay line releases each packet at its place on its stream's
+/// timeline, so a stall shorter than the hold is covered by what the line
+/// already has: nothing underruns, nothing is late, and presentation does not
+/// move. Without sync the same stall underruns or freezes the picture.
 #[test]
-fn a_stall_costs_a_synced_source_no_more_than_an_unsynced_one() {
-    let stall = |s: Scenario| s.network_latency(300).stall(20.0, 1500, Streams::Both);
+fn a_stall_shorter_than_the_hold_costs_nothing() {
+    for streams in [Streams::Both, Streams::Video] {
+        let stall = |s: Scenario| s.network_latency(300).stall(20.0, 1500, streams);
+        let synced = stall(Scenario::new(40).timecode_sync(3000)).run();
+        let settled = synced.assert_settled(15.0, 40.0);
+        synced.print(&format!("sync through a {streams:?} stall"), &settled);
+
+        synced.assert_on_offset(15.0, 40.0, synced.frame_ns as i64);
+        synced.assert_healthy();
+        assert_eq!(synced.underruns, 0, "{streams:?}");
+
+        let plain = stall(Scenario::new(40)).run();
+        let w = plain.window(20.0, 25.0);
+        assert!(
+            plain.underruns > 0 || w.late > 0,
+            "the same {streams:?} stall costs something without sync"
+        );
+    }
+}
+
+/// A stall longer than the hold runs the line dry, and what is left of it
+/// reaches the jitter buffer. It must still cost less than without sync.
+#[test]
+fn a_stall_longer_than_the_hold_costs_less_than_without_sync() {
+    let stall = |s: Scenario| s.network_latency(300).stall(20.0, 3500, Streams::Both);
     let synced = stall(Scenario::new(40).timecode_sync(3000)).run();
     let plain = stall(Scenario::new(40)).run();
 
     synced.assert_healthy();
     assert!(
-        synced.underruns <= plain.underruns,
+        synced.underruns < plain.underruns,
         "{} concealed chunks with sync, {} without",
         synced.underruns,
         plain.underruns

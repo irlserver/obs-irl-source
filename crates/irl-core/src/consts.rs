@@ -455,6 +455,9 @@ pub const SYNC_SETTLE_MARGIN_NS: i64 = 750_000_000;
 pub const SYNC_LATENCY_MIN_NS: i64 = -2_000_000_000;
 /// See [`SYNC_LATENCY_MIN_NS`].
 pub const SYNC_LATENCY_MAX_NS: i64 = 2 * SYNC_MAX_OFFSET_MS as i64 * 1_000_000;
+/// How far a stream's DTS may go back before the release clock reads it as
+/// the sender restarting its timestamps. Small steps back are reorder noise.
+pub const SYNC_JUMP_TOLERANCE_NS: i64 = 1_000_000_000;
 /// No timecode for this long and the source has stopped being alignable.
 pub const SYNC_TC_STALE_NS: u64 = 3_000_000_000;
 /// Deliberate over-hold at engage: bounds the anchor's pre-roll wait rather
@@ -695,6 +698,7 @@ mod tests {
         assert_eq!(SYNC_SETTLE_MARGIN_NS, 750_000_000);
         assert_eq!(SYNC_LATENCY_MIN_NS, -2_000_000_000);
         assert_eq!(SYNC_LATENCY_MAX_NS, 60_000_000_000);
+        assert_eq!(SYNC_JUMP_TOLERANCE_NS, 1_000_000_000);
         assert_eq!(SYNC_TC_STALE_NS, 3_000_000_000);
         assert_eq!(SYNC_SEED_BIAS_NS, 250_000_000);
         assert_eq!(SYNC_ANCHOR_MAX_WAIT_NS, 1_500_000_000);
