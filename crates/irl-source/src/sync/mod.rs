@@ -24,6 +24,8 @@ use parking_lot::Mutex;
 
 /// The module config file the three global settings persist in.
 const CONFIG_FILE: &CStr = c"sync.json";
+/// The previous save, kept by `save_json_safe` and read when the file is not.
+const BACKUP_EXT: &CStr = c"bak";
 
 /// The global settings, as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +192,7 @@ fn load() {
     let Some(path) = config_path() else {
         return;
     };
-    let Some(data) = OwnedData::from_json_file(&path) else {
+    let Some(data) = OwnedData::from_json_file_safe(&path, BACKUP_EXT) else {
         return;
     };
     let data = data.data();
@@ -213,6 +215,11 @@ fn load() {
 }
 
 fn save() {
+    // The dock (Qt thread) and the websocket vendor both save, and libobs
+    // writes through one fixed temp file name: two saves at once would
+    // interleave in it.
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _saving = SAVING.lock();
     let Some(path) = config_path() else {
         return;
     };
@@ -223,7 +230,7 @@ fn save() {
     if let Ok(server) = CString::new(server) {
         data.data().set_str(c"ntp_server", &server);
     }
-    if !data.data().save_json_safe(&path, c"tmp", c"bak") {
+    if !data.data().save_json_safe(&path, c"tmp", BACKUP_EXT) {
         irl_warn!("Could not save sync settings to {}", path.to_string_lossy());
     }
 }

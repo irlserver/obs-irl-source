@@ -651,9 +651,14 @@ unsafe extern "C" {
     );
     /// Nests `obj` under `name`; libobs takes its own reference to `obj`.
     pub fn obs_data_set_obj(data: *mut obs_data_t, name: *const c_char, obj: *mut obs_data_t);
-    /// Parses a JSON file into a fresh `obs_data_t`, or returns NULL when the
-    /// file is missing or unreadable.
-    pub fn obs_data_create_from_json_file(json_file: *const c_char) -> *mut obs_data_t;
+    /// Parses a JSON file into a fresh `obs_data_t`, falling back to the
+    /// backup `obs_data_save_json_safe` kept (`backup_ext` appended with a
+    /// dot) when the file is missing or does not parse. NULL when neither
+    /// reads.
+    pub fn obs_data_create_from_json_file_safe(
+        json_file: *const c_char,
+        backup_ext: *const c_char,
+    ) -> *mut obs_data_t;
     /// Writes `data` as JSON through a temp file and keeps a backup; the two
     /// extensions are appended to `file` with a dot.
     pub fn obs_data_save_json_safe(

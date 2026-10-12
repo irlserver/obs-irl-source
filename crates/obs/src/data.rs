@@ -132,12 +132,15 @@ impl OwnedData {
         Self(NonNull::new(ptr).expect("obs_data_create returned NULL"))
     }
 
-    /// `obs_data_create_from_json_file`: `None` when the file is missing or
-    /// does not parse, which libobs reports as a NULL object.
-    pub fn from_json_file(path: &CStr) -> Option<Self> {
-        // SAFETY: NUL-terminated path; libobs returns a fresh reference or
-        // NULL, and reads the path only during the call.
-        let ptr = unsafe { obs_sys::obs_data_create_from_json_file(path.as_ptr()) };
+    /// `obs_data_create_from_json_file_safe`: the file at `path`, or the
+    /// backup [`Data::save_json_safe`] kept beside it when the file is
+    /// missing or does not parse. `None` when neither reads.
+    pub fn from_json_file_safe(path: &CStr, backup_ext: &CStr) -> Option<Self> {
+        // SAFETY: NUL-terminated strings, read only during the call; libobs
+        // returns a fresh reference or NULL.
+        let ptr = unsafe {
+            obs_sys::obs_data_create_from_json_file_safe(path.as_ptr(), backup_ext.as_ptr())
+        };
         NonNull::new(ptr).map(Self)
     }
 
