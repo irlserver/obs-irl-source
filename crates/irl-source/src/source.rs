@@ -124,6 +124,10 @@ impl Source for IrlSource {
             }
         };
 
+        // Timecode sync: the registry the dock and the websocket vendor
+        // enumerate. Before the receiver starts, so its first publish lands.
+        crate::sync::register_source(source, obs_state.lock().config.hot.sync_enabled);
+
         {
             let mut state = obs_state.lock();
             match state.config.url() {
@@ -145,6 +149,7 @@ impl Source for IrlSource {
 
     fn update(&self, settings: &Data<'_>) {
         let mut next = Config::load(settings);
+        crate::sync::set_source_sync_enabled(self.source, next.hot.sync_enabled);
         let mut state = self.obs_state.lock();
 
         // Editing the source is a request to have it running again.
@@ -326,6 +331,9 @@ impl Drop for IrlSource {
                 let _ = reaper.join();
             }
         }
+        // After the receiver is gone (it publishes to the registry), before
+        // libobs tears the source down (the registry reads its name).
+        crate::sync::unregister_source(self.source);
         // Explicit for order's sake: the closure the callback owns holds an
         // `Arc<Mutex<ObsState>>`, and dropping it here (before libobs tears
         // down the source's proc handler) is what makes the borrow safe.

@@ -33,8 +33,8 @@ check() {
 echo "verifying ${module}"
 
 # Source-level, checked on every platform: the plugin crates must stay free of
-# unsafe code. Every raw pointer belongs in crates/obs-sys, crates/obs and
-# crates/ffmpeg; the compiler enforces #![forbid(unsafe_code)] where present,
+# unsafe code. Every raw pointer belongs in crates/obs-sys, crates/obs,
+# crates/ffmpeg and crates/sync-dock; the compiler enforces #![forbid(unsafe_code)] where present,
 # this only catches the attribute being deleted.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for f in crates/irl-core/src/lib.rs crates/irl-provider/src/lib.rs crates/irl-source/src/lib.rs; do
@@ -68,9 +68,19 @@ Linux*)
 	echo "${undef}" | grep -vqE '^(obs_[a-z_0-9]+|os_gettime_ns|os_sleep_ms|blog|bfree|calldata_[a-z_]+|proc_handler_[a-z_]+|text_lookup_[a-z_]+|video_format_get_parameters_for_format|__[a-z_A-Z0-9]+|_[A-Z][a-zA-Z_0-9]*|[a-z_][a-zA-Z_0-9]*)$' && r=1 || r=0
 	# libva's own entry points are camelCase (vaInitialize, vaGetImage,
 	# ...) so they need their own alternative; the last one accepts
-	# libc/libm/libstdc++ symbols by shape. The real guard is DT_NEEDED
-	# above plus the loader.
+	# libc/libm/libstdc++ symbols by shape, and the `_Z...` alternative
+	# accepts the Qt symbols the sync dock resolves against the OBS
+	# frontend's Qt. The real guard is DT_NEEDED above plus the loader.
 	check ${r} "undefined symbols are libobs or system libraries"
+
+	# Informational: whether this build carries the IRL Sync dock (Qt6
+	# found at build time). Either answer is a valid build; the dock is
+	# optional by design and sync itself does not need it.
+	if echo "${needed}" | grep -q '^libQt6Widgets\.so'; then
+		printf '  info  IRL Sync dock linked (libQt6Widgets in DT_NEEDED)\n'
+	else
+		printf '  info  built without the IRL Sync dock (no Qt6 at build time)\n'
+	fi
 
 	# glibc compatibility: the plugin is loaded inside the Flatpak sandbox
 	# (Freedesktop SDK), whose glibc lags the host's. A binary linked against
@@ -122,6 +132,15 @@ Darwin*)
 
 	echo "${exports}" | grep -q '^_obs_module_load$' && r=0 || r=1
 	check ${r} "_obs_module_load exported"
+
+	# The dock resolves Qt through -undefined dynamic_lookup, like libobs,
+	# so its presence shows as undefined Qt symbols rather than a load
+	# command.
+	if nm -u "${module}" | grep -q '__ZN7QWidget'; then
+		printf '  info  IRL Sync dock linked (Qt resolved at load time)\n'
+	else
+		printf '  info  built without the IRL Sync dock (no Qt6 at build time)\n'
+	fi
 	;;
 
 *)

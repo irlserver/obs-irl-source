@@ -431,6 +431,7 @@ dependencies = [
  "irl-provider",
  "obs",
  "parking_lot",
+ "sync-dock",
 ]
 
 [[package]]
@@ -855,6 +856,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sync-dock"
+version = "2.1.5"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

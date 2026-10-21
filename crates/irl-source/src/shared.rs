@@ -51,6 +51,10 @@ pub struct HotConfig {
     pub catchup_percent: AtomicI32,
     pub wait_for_keyframe: AtomicBool,
     pub clear_on_disconnect: AtomicBool,
+    /// This source takes part in timecode sync (the per-source "Sync"
+    /// checkbox). The master switch, the offset and the NTP server are
+    /// global; see `crate::sync`.
+    pub sync_enabled: AtomicBool,
     /// The three watermarks publish together, after `AudioBuffer::resize`
     /// succeeded; three separate atomics could be read torn mid-resize.
     pub watermarks: Mutex<Watermarks>,
@@ -66,6 +70,7 @@ impl HotConfig {
         self.wait_for_keyframe.store(hot.wait_for_keyframe, Relaxed);
         self.clear_on_disconnect
             .store(hot.clear_on_disconnect, Relaxed);
+        self.sync_enabled.store(hot.sync_enabled, Relaxed);
     }
 
     pub fn watermarks(&self) -> Watermarks {
@@ -92,6 +97,23 @@ pub struct VideoFlags {
     /// frame-interval estimate and decoder-error bookkeeping no longer describe
     /// this stream. Set by the receiver, consumed by the video thread.
     pub timeline_reset: AtomicBool,
+}
+
+/// Timecode sync state the audio thread reads without taking any lock of its
+/// own (the receiver thread writes them; both are `Relaxed`, as the C's
+/// `os_atomic_*_bool` pairs were).
+#[derive(Default)]
+pub struct SyncFlags {
+    /// Audio priming gate: while set, the audio output must not prime yet —
+    /// sync is about to seed a hold, and a hold applied to an already-running
+    /// pipeline starves it. Written by the receiver thread, read by the audio
+    /// thread.
+    pub prime_hold: AtomicBool,
+    /// The audio thread handed back a pre-roll for the delay line to absorb
+    /// (`AudioState::sync.anchor_defer_ns`). Atomic so the receiver thread can
+    /// skip the lock on the packets where there is nothing to collect, which
+    /// is nearly all of them.
+    pub anchor_defer_pending: AtomicBool,
 }
 
 /// Run-level flags.
@@ -165,6 +187,26 @@ pub struct AudioState {
     /// The pump may prime as far as the hold is concerned: a reading was
     /// taken, or the wait for one ran out.
     pub hold_wait_done: bool,
+
+    /// The timecode-sync values the audio and receiver threads exchange
+    /// under this lock.
+    pub sync: SyncAudioLink,
+}
+
+/// The cross-thread half of the timecode sync controller: guarded by
+/// `audio_state`, like the rest of the cross-thread timing state.
+#[derive(Debug, Default)]
+pub struct SyncAudioLink {
+    /// Where content has to play for the stream to land on its offset,
+    /// expressed as the audio playout offset it implies (`obs_ts - pts`),
+    /// smoothed. The receiver thread keeps it current; the audio thread reads
+    /// it once, when it primes, to anchor its output clock. `None` until sync
+    /// has something to say.
+    pub present_bias_ns: Option<i64>,
+    /// Pre-roll the audio output is waiting out before it starts, handed back
+    /// so the delay line absorbs it instead of the jitter buffer. Paired with
+    /// `SyncFlags::anchor_defer_pending`.
+    pub anchor_defer_ns: i64,
 }
 
 impl AudioState {
@@ -464,6 +506,8 @@ pub struct Shared {
     pub video: VideoChannel,
     /// Video-decode state the audio path also reads or clears.
     pub video_flags: VideoFlags,
+    /// Timecode sync flags the audio thread reads.
+    pub sync_flags: SyncFlags,
     pub conn: ConnStats,
     pub lifetime: Arc<LifetimeStats>,
     pub interrupt: Arc<ffmpeg::InterruptWatch>,
@@ -492,6 +536,7 @@ impl Shared {
             audio_buf: Mutex::new(None),
             video: VideoChannel::default(),
             video_flags: VideoFlags::default(),
+            sync_flags: SyncFlags::default(),
             conn: ConnStats::default(),
             lifetime,
             interrupt,
@@ -501,6 +546,7 @@ impl Shared {
                 catchup_percent: AtomicI32::new(hot.catchup_percent),
                 wait_for_keyframe: AtomicBool::new(hot.wait_for_keyframe),
                 clear_on_disconnect: AtomicBool::new(hot.clear_on_disconnect),
+                sync_enabled: AtomicBool::new(hot.sync_enabled),
                 watermarks: Mutex::new(hot.watermarks),
             },
             flags: RunFlags {
@@ -537,6 +583,7 @@ pub struct HotValues {
     pub catchup_percent: i32,
     pub wait_for_keyframe: bool,
     pub clear_on_disconnect: bool,
+    pub sync_enabled: bool,
     pub watermarks: Watermarks,
 }
 

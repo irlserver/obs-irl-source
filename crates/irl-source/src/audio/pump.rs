@@ -33,6 +33,7 @@ use irl_core::{SpeedCarry, SpeedController, SpeedInputs, consts, dsp, timing};
 
 use crate::audio::AudioSink;
 use crate::shared::{AudioState, Shared};
+use crate::sync::control::{fresh_anchor_ns, prime_held};
 
 /// Audio-thread-owned state: the speed resampler, scratch buffers and the
 /// speed controller.
@@ -224,12 +225,24 @@ impl AudioPump {
                     "Audio output stalled {}ms; restarting output clock",
                     (now - next_ts) / 1_000_000
                 );
-                state.clock.restart(now + chunk_ns);
+                // Timecode sync re-places the clock line here too: a restart
+                // that anchored at "now" would throw away the placement.
+                let at_ns = fresh_anchor_ns(shared, state, now, chunk_ns);
+                state.clock.restart(at_ns);
                 state.conceal_fade_pending = true;
             }
         }
 
         if !state.clock.is_primed() {
+            // Timecode sync seeds a multi-second hold the moment it engages.
+            // Priming before that means the hold lands on a running pipeline
+            // and starves it; priming after costs nothing, because nothing is
+            // playing yet. Bounded by a deadline on the other side, so a feed
+            // that can never sync still gets audio.
+            if prime_held(shared) {
+                return false;
+            }
+
             let mut prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
             // Elsewhere the hold is part of the target already; low-latency
             // mode has none, and keeps the hold queued instead.
@@ -246,7 +259,12 @@ impl AudioPump {
                 return false;
             }
 
-            state.clock.restart(now + chunk_ns);
+            // The one instant a stream can be placed exactly and for free:
+            // nothing is playing yet, so starting later costs only pre-roll.
+            // Correcting afterwards means moving a running pipeline, which
+            // only the speed controller can do.
+            let at_ns = fresh_anchor_ns(shared, state, now, chunk_ns);
+            state.clock.restart(at_ns);
             // Reads and writes are both whole decoded chunks, so the residual
             // can only ever be a multiple of one: a 120ms target is not a
             // level the buffer can hold, and the loop straddles it at 106 or
@@ -659,7 +677,9 @@ fn maybe_reanchor_offset(
         return;
     }
 
-    state.clock.restart(now + chunk_ns);
+    // Through the sync placement, like every other restart of the clock line.
+    let at_ns = fresh_anchor_ns(shared, state, now, chunk_ns);
+    state.clock.restart(at_ns);
     state.mapping.clear();
     state.conceal_fade_pending = true;
 

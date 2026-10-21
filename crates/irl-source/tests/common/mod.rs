@@ -43,6 +43,7 @@ pub fn hot_values(target_ms: i32) -> HotValues {
         catchup_percent: consts::DEFAULT_CATCHUP_PERCENT as i32,
         wait_for_keyframe: consts::DEFAULT_WAIT_FOR_KEYFRAME,
         clear_on_disconnect: consts::DEFAULT_CLEAR_ON_DISCONNECT,
+        sync_enabled: consts::DEFAULT_SYNC_ENABLED,
         watermarks: Watermarks::derive(target_ms),
     }
 }

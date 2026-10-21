@@ -46,9 +46,13 @@ pub fn register() {
         return;
     };
 
-    let requests: [(&'static CStr, RequestFn); 3] = [
+    let requests: [(&'static CStr, RequestFn); 5] = [
         (c"GetStats", get_stats),
         (c"GetSourceList", get_source_list),
+        // Timecode sync: the whole picture for a bot, and the three global
+        // settings for one without a dock.
+        (c"GetSyncStatus", crate::sync::vendor_status),
+        (c"SetSyncConfig", crate::sync::vendor_set_config),
         (c"GetVersion", get_version),
     ];
     for (request_type, callback) in requests {

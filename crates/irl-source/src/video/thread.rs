@@ -495,6 +495,13 @@ impl VideoThread {
             self.anchor_wait = AnchorWait::Idle;
             return false;
         }
+        // Timecode sync holding audio back from priming is deliberate, and it
+        // has its own deadline (`SYNC_PRIME_WAIT_NS`); the wait here starts
+        // counting once that hold lifts.
+        if crate::sync::control::prime_held(&self.shared) {
+            self.anchor_wait = AnchorWait::Idle;
+            return true;
+        }
         let since_ns = match self.anchor_wait {
             AnchorWait::GaveUp => return false,
             AnchorWait::Waiting(since_ns) => since_ns,
