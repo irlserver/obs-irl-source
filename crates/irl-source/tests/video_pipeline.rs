@@ -119,9 +119,11 @@ fn thread_with(shared: Arc<Shared>) -> (VideoThread, Arc<Recorder>, Clock) {
     let clock = Clock(Arc::new(AtomicU64::new(100_000_000_000)));
     let reads = clock.clone();
     // No libobs is running, so the real canvas tick would fault; 60fps is
-    // what a default OBS install reports.
+    // what a default OBS install reports. No render tick either, so the
+    // anchor frame carries its due time and these tests can assert on it.
     let thread = VideoThread::with_sink(shared, Box::new(RecorderSink(recorder.clone())))
         .with_canvas_tick(Box::new(|| Some(16_666_667)))
+        .with_render_tick(Box::new(|| None))
         .with_clock(Box::new(move || reads.now()));
     (thread, recorder, clock)
 }

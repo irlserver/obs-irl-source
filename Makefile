@@ -29,7 +29,7 @@ test:
 
 # The libobs-dependent integration tests on a Mac, where there is no libobs to
 # link and `cargo test` dies on the first call into it. The script links the
-# four-function stand-in in scripts/libobs-shim/ into the test binaries it
+# stand-in in scripts/libobs-shim/ into the test binaries it
 # covers and runs them; ARGS is passed to the test harness as a name filter.
 # Linux gets the real libobs through libobs-dev, so CI never needs this, and it
 # is not part of `check`.

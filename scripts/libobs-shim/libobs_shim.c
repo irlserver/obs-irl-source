@@ -29,6 +29,13 @@ uint64_t obs_get_frame_interval_ns(void)
 	return 16666667ull;
 }
 
+/* The tick of that canvas the clock is in. */
+uint64_t obs_get_video_frame_time(void)
+{
+	uint64_t now = os_gettime_ns();
+	return now - now % 16666667ull;
+}
+
 void blog(int log_level, const char *format, ...)
 {
 	va_list args;

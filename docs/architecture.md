@@ -72,6 +72,8 @@ Frames go to libobs a couple of canvas ticks before their due time. libobs is a 
 
 The exception is the frame that anchors libobs's play head after a start or a clear. `get_closest_frame` shows that frame on arrival whatever its timestamp and anchors from it, so a lead there would run the whole connection early. That frame goes at its due time, and the anchor only clears once a frame libobs received went out at its real due time.
 
+libobs sets the play head to the anchor frame's timestamp on the render tick that takes it up, and from there advances it by tick times. So the anchor frame does not carry its due time. It carries the time of that tick, which is the frame time libobs last ticked at (`obs_get_video_frame_time`) plus one canvas interval. With its due time, the play head would trail the OBS clock by how late the frame went out plus the wait for the next tick, up to two ticks together, and every later frame would show that much behind its sound for the whole connection (#39). The frame itself shows a little after its due time, once.
+
 While an audio stream is present, the anchor frame's due time must come from the audio mapping, not the video-only fallback. The two disagree by about 100 ms (the fallback schedules the first frame one Target Buffer out; the mapping puts it at the first audio chunk), and libobs freezes whichever error the anchor frame carried into the connection's lip sync. So video holds until audio primes (the pump wakes the video thread when it publishes the mapping), drops frames the mapping lands more than a canvas tick in the past, and anchors on the first frame that is on time. A stream whose audio never primes goes ahead on the fallback after `VIDEO_ANCHOR_WAIT_MARGIN_MS` past the expected prime.
 
 ## Video delay

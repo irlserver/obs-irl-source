@@ -134,6 +134,9 @@ pub struct VideoThread {
     /// running libobs — `obs_get_frame_interval_ns` reads libobs's global
     /// video state and faults when `obs_startup` never ran.
     canvas_tick_ns: Box<dyn Fn() -> Option<u64> + Send>,
+    /// The canvas render tick libobs is on or last ran. Injectable for the
+    /// same reason as the canvas tick.
+    render_tick_ns: Box<dyn Fn() -> Option<u64> + Send>,
     pub(crate) sink: Box<dyn VideoSink>,
 }
 
@@ -177,6 +180,7 @@ impl VideoThread {
             delay_shown: false,
             now_ns: Box::new(obs::time::gettime_ns),
             canvas_tick_ns: Box::new(obs::time::canvas_frame_interval_ns),
+            render_tick_ns: Box::new(obs::time::video_frame_time_ns),
             sink,
         }
     }
@@ -462,7 +466,12 @@ impl VideoThread {
                     self.announce_delay_relax(relax);
                 }
             }
-            let submitted = self.output_frame(paced.frame(), due_ns);
+            let timestamp = if self.anchor_pending {
+                self.anchor_timestamp(due_ns)
+            } else {
+                due_ns
+            };
+            let submitted = self.output_frame(paced.frame(), timestamp);
             // The play head is only anchored by a frame libobs actually
             // received, at its real due time. A conversion that failed
             // submitted nothing, and an early frame would anchor early, so
@@ -761,6 +770,24 @@ impl VideoThread {
         self.delivery_lead_ns(self.canvas_tick_ns()) as i64 + consts::VIDEO_PACING_SLACK_NS
     }
 
+    /// The timestamp of the frame that anchors libobs's play head: the time
+    /// of the render tick that will take it up, or its due time when libobs
+    /// has not ticked yet.
+    ///
+    /// libobs sets the play head to this frame's timestamp on the tick that
+    /// takes it up and advances it by tick times from there. Stamped with its
+    /// due time, the frame would leave the play head behind the OBS clock by
+    /// how late it went out plus the wait for the next tick, up to two ticks
+    /// together, and every later frame would show that much behind its sound
+    /// for the whole connection (#39). Stamped with the tick's own time, the
+    /// play head runs on the OBS clock wherever the tick fell. That tick is
+    /// the next one: libobs advances its frame time only as a tick starts and
+    /// ticks its sources straight after, so a frame handed over between two
+    /// ticks waits for the second.
+    fn anchor_timestamp(&self, due_ns: u64) -> u64 {
+        (self.render_tick_ns)().map_or(due_ns, |last_ns| last_ns + self.canvas_tick_ns())
+    }
+
     /// Mirror the pacing counters for the stats line.
     fn publish_counters(&self) {
         let lifetime = &self.shared.lifetime;
@@ -806,6 +833,13 @@ impl VideoThread {
     #[must_use]
     pub fn with_canvas_tick(mut self, tick: Box<dyn Fn() -> Option<u64> + Send>) -> Self {
         self.canvas_tick_ns = tick;
+        self
+    }
+
+    /// Replace the render-tick source (tests only).
+    #[must_use]
+    pub fn with_render_tick(mut self, tick: Box<dyn Fn() -> Option<u64> + Send>) -> Self {
+        self.render_tick_ns = tick;
         self
     }
 

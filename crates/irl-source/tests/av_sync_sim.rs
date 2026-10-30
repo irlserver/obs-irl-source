@@ -426,10 +426,11 @@ struct Shown {
     pts_ns: i64,
     timestamp: u64,
     handed_ns: u64,
-    /// How late the frame that anchored libobs's play head was handed over
-    /// against its own timestamp (negative: early). libobs shows that frame
-    /// on arrival and advances its play head by wall clock from there, so
-    /// every frame after it is shown that much off its timestamp.
+    /// How far libobs's play head runs behind the OBS clock (negative:
+    /// ahead). libobs takes the anchoring frame up on the first render tick
+    /// after it arrives, sets the play head to its timestamp there and
+    /// advances it by tick times, so every frame after it is shown that much
+    /// off its timestamp.
     anchor_error_ns: i64,
     /// Whether this is the frame that anchored the play head.
     anchor: bool,
@@ -459,6 +460,8 @@ struct VideoOut {
 struct VideoProbe {
     out: Arc<Mutex<VideoOut>>,
     clock: Arc<AtomicU64>,
+    /// The canvas render tick; libobs's ticks fall on its multiples.
+    tick_ns: u64,
 }
 
 impl VideoSink for VideoProbe {
@@ -470,9 +473,10 @@ impl VideoSink for VideoProbe {
         let handed_ns = self.clock.load(Relaxed);
         let mut out = self.out.lock();
         let anchor = out.anchor_error_ns.is_none();
+        let taken_up_ns = (handed_ns / self.tick_ns + 1) * self.tick_ns;
         let anchor_error_ns = *out
             .anchor_error_ns
-            .get_or_insert(handed_ns as i64 - raw.timestamp as i64);
+            .get_or_insert(taken_up_ns as i64 - raw.timestamp as i64);
         out.shown.push(Shown {
             pts_ns: pts,
             timestamp: raw.timestamp,
@@ -551,13 +555,19 @@ impl Sim {
         let sink = VideoProbe {
             out: Arc::clone(&video_out),
             clock: Arc::clone(&clock),
+            tick_ns: scenario.canvas_tick_ns(),
         };
         let tick = scenario.canvas_tick_ns();
         let video = {
             let ns = Arc::clone(&clock);
+            let render = Arc::clone(&clock);
             VideoThread::with_sink(Arc::clone(&shared), Box::new(sink))
                 .with_clock(Box::new(move || ns.load(Relaxed)))
                 .with_canvas_tick(Box::new(move || Some(tick)))
+                .with_render_tick(Box::new(move || {
+                    let now = render.load(Relaxed);
+                    Some(now - now % tick)
+                }))
                 .with_decode_stub(Box::new(stub_decode))
         };
 
@@ -907,6 +917,19 @@ impl Report {
     fn assert_healthy(&self) {
         self.assert_clock_only_jumps_where_declared();
         assert_eq!(self.audible_skipped, 0, "audible audio was skipped");
+        self.assert_play_head_on_the_clock();
+    }
+
+    /// Every frame that anchored libobs's play head, at the start and after
+    /// each clear, left it on the OBS clock.
+    fn assert_play_head_on_the_clock(&self) {
+        for frame in self.shown.iter().filter(|f| f.anchor) {
+            assert!(
+                frame.anchor_error_ns.abs() <= consts::VIDEO_PACING_SLACK_NS,
+                "the play head runs {:.1}ms behind the OBS clock",
+                frame.anchor_error_ns as f64 / 1e6
+            );
+        }
     }
 
     /// Every frame sent from `from_s` on was shown: nothing dropped once the
@@ -1013,11 +1036,6 @@ impl Report {
 // (pocketSRT queues audio early, a stabiliser holds video back). Each
 // scenario states what the plugin promises for it, and how soon.
 
-/// Nothing wrong with the link or the sender: picture and sound agree within
-/// a canvas tick from the first frame shown, every frame is handed over ahead
-/// of its timestamp, and no delay or hold is ever needed. The tick is what
-/// the anchoring frame may be late by (see `VideoThread::
-/// settle_anchor_candidate`), and libobs keeps that error for the connection.
 /// FFmpeg's MPEG-TS muxer packs near-silent AAC 17 frames to a PES packet,
 /// so audio arrives as a 363 ms burst every 363 ms (#39). At the default
 /// Target Buffer the buffer runs dry before every burst until the audio hold
@@ -1056,6 +1074,12 @@ fn audio_in_bursts_is_held_until_the_buffer_covers_them() {
     }
 }
 
+/// Nothing wrong with the link or the sender: picture and sound agree from
+/// the first frame shown, every frame is handed over ahead of its timestamp,
+/// and no delay or hold is ever needed. The anchoring frame may go out up to
+/// a tick late (see `VideoThread::settle_anchor_candidate`) and is taken up
+/// on the tick after that, which libobs would keep for the connection if the
+/// frame carried its due time (#39).
 #[test]
 fn a_clean_link_is_in_sync_from_the_first_frame() {
     for fps in [30, 60] {
@@ -1063,7 +1087,7 @@ fn a_clean_link_is_in_sync_from_the_first_frame() {
         let all = report.window(0.0, 30.0);
         report.print(&format!("clean {fps}fps"), &all);
 
-        report.assert_in_sync(&all, report.tick_ns as i64);
+        report.assert_in_sync(&all, 5 * MS as i64);
         report.assert_paced(&all);
         report.assert_nothing_dropped_after(0.0);
         report.assert_healthy();
@@ -1315,7 +1339,9 @@ fn video_without_audio_is_paced_a_tick_behind_its_arrival() {
     assert_eq!(report.video_delay_ms(0.5), tick_ms..=tick_ms);
     report.assert_paced(&all);
     report.assert_nothing_dropped_after(0.0);
-    for pair in report.shown.windows(2) {
+    // The anchoring frame carries the time of the tick that takes it up,
+    // not its due time, so the spacing is measured from the frame after it.
+    for pair in report.shown[1..].windows(2) {
         let step = pair[1].timestamp - pair[0].timestamp;
         assert!(step.abs_diff(report.frame_ns) <= 1, "frames {step}ns apart");
     }

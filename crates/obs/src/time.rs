@@ -14,6 +14,16 @@ pub fn canvas_frame_interval_ns() -> Option<u64> {
     (ns != 0).then_some(ns)
 }
 
+/// `obs_get_video_frame_time`: the OBS time of the canvas render tick libobs
+/// is on or last ran, or `None` before the first one. The next tick, and the
+/// next source tick with it, is one [`canvas_frame_interval_ns`] later.
+pub fn video_frame_time_ns() -> Option<u64> {
+    // SAFETY: no arguments; called from a source's worker thread, which only
+    // exists inside a running libobs.
+    let ns = unsafe { obs_sys::obs_get_video_frame_time() };
+    (ns != 0).then_some(ns)
+}
+
 /// `os_gettime_ns()`.
 #[must_use]
 pub fn gettime_ns() -> u64 {
