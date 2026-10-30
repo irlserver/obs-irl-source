@@ -29,8 +29,8 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use irl_core::arrival::ArrivalFloor;
 use irl_core::{
-    AudioBuffer, AudioHold, DrainWatch, HwDecode, LastSample, OutputClock, PlayoutMapping,
-    SpeedCarry, SpeedTrim, Watermarks,
+    AudioBuffer, AudioBursts, AudioHold, DrainWatch, HwDecode, LastSample, OutputClock,
+    PlayoutMapping, SpeedCarry, SpeedTrim, Watermarks,
 };
 
 /// Settings latched when the stream opens; changing any of them forces a
@@ -156,8 +156,16 @@ pub struct AudioState {
     /// Whether video read now is live rather than a relay's replay catching
     /// up, which would read as skew.
     pub hold_live: ArrivalFloor,
-    /// The hold in force, in ms. Outside low-latency mode it is folded into
-    /// the published watermarks: their target is Target Buffer plus this.
+    /// The burst readings, taken by the receiver as it decodes each audio
+    /// frame.
+    pub bursts: AudioBursts,
+    /// The hold the skew readings ask for, in ms.
+    pub hold_skew_ms: i32,
+    /// The hold the burst readings ask for, in ms.
+    pub hold_bursts_ms: i32,
+    /// The hold in force, in ms: the larger of the two, as far as Target
+    /// Buffer leaves room. Outside low-latency mode it is folded into the
+    /// published watermarks: their target is Target Buffer plus this.
     pub hold_ms: i32,
     /// When the pump first waited on a skew reading to prime; zero while it
     /// has not.

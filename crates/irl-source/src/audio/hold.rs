@@ -1,8 +1,10 @@
 //! The audio hold (`irl_core::audio_hold`) wired into the plugin.
 //!
-//! The receiver reads the skew as it pushes each video packet and moves the
-//! hold ([`observe_video_packet`]). The pump waits a bounded time for the
-//! first reading before it primes ([`prime_may_wait`]). A hold raised after
+//! Two readings size it. The receiver reads the skew as it pushes each video
+//! packet ([`observe_video_packet`]) and how bunched up audio arrives as it
+//! decodes each audio frame ([`observe_audio_frame`]). Each asks for a hold of
+//! its own, and the larger is in force. The pump waits a bounded time for the
+//! first skew reading before it primes ([`prime_may_wait`]). A hold raised after
 //! that is built by the speed controller, and the audio playout offset grows
 //! with it; the video delay is derived from that offset, so it shrinks as the
 //! hold builds without being told. A new connection forgets the hold
@@ -15,7 +17,8 @@
 //! Target Buffer edit with it. Low-latency mode has neither a target to fold
 //! it into nor a speed controller to build it with: the pump primes once it
 //! holds the hold's worth of audio and keeps that much queued, and the hold is
-//! sized before priming only.
+//! sized before priming only. It also takes no burst readings: a cushion
+//! between bursts is exactly what that mode gives up for latency.
 
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -41,15 +44,55 @@ pub fn observe_video_packet(shared: &Shared, received_ns: u64, dts_ns: i64) {
 
     let covered_ms = covered_ms(shared, &state);
     let change = if !state.clock.is_primed() {
-        state.hold.before_prime(state.hold_ms, covered_ms)
+        state.hold.before_prime(state.hold_skew_ms, covered_ms)
     } else if regulates(shared) {
-        state.hold.regulate(received_ns, state.hold_ms, covered_ms)
+        state
+            .hold
+            .regulate(received_ns, state.hold_skew_ms, covered_ms)
     } else {
         None
     };
     if let Some(change) = change {
-        apply(shared, &mut state, change);
+        apply(shared, &mut state, Need::Skew, change);
     }
+}
+
+/// An audio frame stamped `pts_ns` was decoded from a packet that reached the
+/// receiver at `received_ns`. Moves the hold if the way audio arrives calls
+/// for it.
+///
+/// Caller holds `audio_state` and neither the jitter buffer nor the
+/// watermark mutex, which a publish takes.
+pub fn observe_audio_frame(shared: &Shared, state: &mut AudioState, received_ns: u64, pts_ns: i64) {
+    if shared.cfg.low_latency_audio {
+        return;
+    }
+    state.bursts.observe(received_ns, pts_ns);
+
+    // A gap between bursts draws on the buffer alone: the output lead is in
+    // OBS already and does not refill it.
+    let covered_ms = user_target_ms(shared, state);
+    let change = if !state.clock.is_primed() {
+        state.bursts.before_prime(state.hold_bursts_ms, covered_ms)
+    } else if regulates(shared) {
+        state
+            .bursts
+            .regulate(received_ns, state.hold_bursts_ms, covered_ms)
+    } else {
+        None
+    };
+    if let Some(change) = change {
+        apply(shared, state, Need::Bursts, change);
+    }
+}
+
+/// What a hold change was sized from.
+#[derive(Debug, Clone, Copy)]
+enum Need {
+    /// Video arriving behind its audio.
+    Skew,
+    /// Audio arriving in bursts.
+    Bursts,
 }
 
 /// Whether audio that is ready to prime should keep waiting for a skew
@@ -58,6 +101,11 @@ pub fn observe_video_packet(shared: &Shared, received_ns: u64, dts_ns: i64) {
 /// is not wrong, only slower to settle: a hold found afterwards is built at
 /// -2 % while the video delay covers the gap, instead of being in force from
 /// the first sample.
+///
+/// There is no such wait for a burst reading. The first one comes a burst
+/// window after the first arrival, and every connection would start that
+/// much later for the sake of the few senders that burst; those underrun
+/// for the first seconds instead, until the hold is built.
 ///
 /// Caller holds `audio_state`.
 pub fn prime_may_wait(shared: &Shared, state: &mut AudioState, now_ns: u64) -> bool {
@@ -93,6 +141,7 @@ pub fn prime_may_wait(shared: &Shared, state: &mut AudioState, now_ns: u64) -> b
 pub fn forget_readings(state: &mut AudioState) {
     state.hold.reset();
     state.hold_live.reset();
+    state.bursts.reset();
 }
 
 /// Back to no hold: a new connection measures its own. Restores Target
@@ -104,6 +153,8 @@ pub fn reset_connection(shared: &Shared, state: &mut AudioState) {
     forget_readings(state);
     state.hold_wait_since_ns = 0;
     state.hold_wait_done = false;
+    state.hold_skew_ms = 0;
+    state.hold_bursts_ms = 0;
     if state.hold_ms == 0 {
         return;
     }
@@ -148,9 +199,21 @@ fn covered_ms(shared: &Shared, state: &AudioState) -> i32 {
     }
 }
 
-fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
+/// Record what one reading asks for, and put the larger of the two in force.
+fn apply(shared: &Shared, state: &mut AudioState, need: Need, change: HoldChange) {
+    let asked_before = state.hold_skew_ms.max(state.hold_bursts_ms);
+    let (skew_ms, bursts_ms) = match need {
+        Need::Skew => (change.to_ms, state.hold_bursts_ms),
+        Need::Bursts => (state.hold_skew_ms, change.to_ms),
+    };
+    let asked_ms = skew_ms.max(bursts_ms);
+    if asked_ms == asked_before {
+        // The other reading asks for more, and it is in force.
+        (state.hold_skew_ms, state.hold_bursts_ms) = (skew_ms, bursts_ms);
+        return;
+    }
     let from_ms = state.hold_ms;
-    let mut to_ms = change.to_ms;
+    let mut to_ms = asked_ms;
     let user_ms = user_target_ms(shared, state);
     if !shared.cfg.low_latency_audio {
         let next = Watermarks::derive(user_ms + to_ms);
@@ -158,17 +221,18 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
         // Target Buffer left room for.
         to_ms = next.target_ms - user_ms;
         if to_ms == from_ms {
+            (state.hold_skew_ms, state.hold_bursts_ms) = (skew_ms, bursts_ms);
             return;
         }
         if !publish_watermarks(shared, state, next) {
             irl_warn!(
-                "Could not grow the jitter buffer to hold audio back {to_ms}ms; video arriving {}ms behind its audio stays covered by delaying video",
-                change.skew_ms
+                "Could not grow the jitter buffer to hold audio back {to_ms}ms; keeping {from_ms}ms"
             );
             return;
         }
     }
 
+    (state.hold_skew_ms, state.hold_bursts_ms) = (skew_ms, bursts_ms);
     state.hold_ms = to_ms;
     shared.conn.audio_hold_ms.store(to_ms, Relaxed);
 
@@ -180,13 +244,39 @@ fn apply(shared: &Shared, state: &mut AudioState, change: HoldChange) {
             user_ms + to_ms
         )
     };
-    let skew_ms = change.skew_ms;
+    let primed = state.clock.is_primed();
+    match need {
+        Need::Skew => log_skew_change(change, from_ms, to_ms, primed, &in_effect),
+        Need::Bursts => log_bursts_change(change.reading_ms, from_ms, to_ms, primed, &in_effect),
+    }
+}
+
+fn log_bursts_change(span_ms: i64, from_ms: i32, to_ms: i32, primed: bool, in_effect: &str) {
+    if to_ms < from_ms {
+        irl_info!(
+            "Audio has arrived in bursts of at most {span_ms}ms for {}s; releasing the audio hold from {from_ms}ms to {to_ms}ms{in_effect}",
+            consts::AUDIO_HOLD_RELAX_WINDOW_MS / 1000
+        );
+    } else if primed {
+        irl_info!(
+            "Audio has arrived in bursts of {span_ms}ms for {}s; holding audio back {to_ms}ms instead of {from_ms}ms so the buffer does not run dry between them, built up by playing up to 2% slow{in_effect}",
+            consts::AUDIO_HOLD_RAISE_WINDOW_MS / 1000
+        );
+    } else {
+        irl_info!(
+            "Audio arrives in bursts of {span_ms}ms; holding audio back {to_ms}ms so the buffer does not run dry between them{in_effect}"
+        );
+    }
+}
+
+fn log_skew_change(change: HoldChange, from_ms: i32, to_ms: i32, primed: bool, in_effect: &str) {
+    let skew_ms = change.reading_ms;
     if to_ms < from_ms {
         irl_info!(
             "Video has arrived at most {skew_ms}ms behind its audio for {}s; releasing the audio hold from {from_ms}ms to {to_ms}ms{in_effect}",
             consts::AUDIO_HOLD_RELAX_WINDOW_MS / 1000
         );
-    } else if state.clock.is_primed() {
+    } else if primed {
         irl_info!(
             "Video has arrived {skew_ms}ms behind its audio for {}s; holding audio back {to_ms}ms instead of {from_ms}ms to keep lip sync, built up by playing up to 2% slow{in_effect}",
             consts::AUDIO_HOLD_RAISE_WINDOW_MS / 1000

@@ -353,6 +353,11 @@ pub const AUDIO_HOLD_RELAX_MIN_MS: i32 = 50;
 /// within `VIDEO_LIVE_MAX_WAIT_MS` of its first packet, so this only runs out
 /// for a video stream that delivers nothing.
 pub const AUDIO_HOLD_PRIME_WAIT_MS: u64 = 2000;
+/// The window the spread of audio arrivals is read across
+/// (`irl_core::audio_hold::AudioBursts`). Longer than the 700 ms that
+/// FFmpeg's MPEG-TS muxer holds audio at most before it writes a PES packet,
+/// so one window always holds a whole burst and the gap before it.
+pub const AUDIO_BURST_WINDOW_MS: u64 = 1000;
 /// How long the last audio playout offset is reused after it goes away.
 pub const VIDEO_OFFSET_HOLD_NS: u64 = 500_000_000;
 /// Video-only fallback: clamp on drift between stream and system clock.
@@ -492,6 +497,7 @@ mod tests {
         assert_eq!(AUDIO_HOLD_RELAX_WINDOW_MS, 10_000);
         assert_eq!(AUDIO_HOLD_RELAX_MIN_MS, 50);
         assert_eq!(AUDIO_HOLD_PRIME_WAIT_MS, 2000);
+        assert_eq!(AUDIO_BURST_WINDOW_MS, 1000);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000);
         assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667);
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50);

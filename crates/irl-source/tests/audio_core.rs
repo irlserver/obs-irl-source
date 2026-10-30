@@ -124,7 +124,7 @@ fn planar_aac_samples_follow_the_video_playout_mapping() {
                 10_000_000_000 + first_sample as u64 * 1_000_000_000 / rate as u64,
                 Relaxed,
             );
-            intake.handle_frame(&shared, &mut flags, &frame, tb);
+            intake.handle_frame(&shared, &mut flags, &frame, tb, clock.load(Relaxed));
 
             while pump.pump_once() {
                 let Some(out) = recorder.emitted.lock().pop() else {
@@ -600,7 +600,7 @@ fn intake_discards_warmup_then_buffers_decoded_audio() {
     let frames = 20;
     for i in 0..frames {
         let frame = audio_frame(i * CHUNK_FRAMES as i64, 0.75);
-        intake.handle_frame(&shared, &mut flags, &frame, tb);
+        intake.handle_frame(&shared, &mut flags, &frame, tb, (i * 20) as u64 * 1_000_000);
     }
 
     // The first IRL_STARTUP_AUDIO_WARMUP_MS (150 ms) is decoder warm-up and

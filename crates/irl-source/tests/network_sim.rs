@@ -208,11 +208,13 @@ impl Sim {
             self.since_delivery = 0;
             for pts in std::mem::take(&mut self.pending) {
                 let frame = common::decoded_audio(pts, CHUNK_NS as i64, CHUNK_FRAMES, |_, _| 0.25);
+                let now = self.now_ns();
                 self.intake.handle_frame(
                     &self.shared,
                     &mut self.flags,
                     &frame,
                     ffmpeg::NS_TIME_BASE,
+                    now,
                 );
                 self.delivered.push(pts);
                 if let Some(skew) = self.video_skew_ns {
@@ -377,20 +379,31 @@ fn a_batching_upstream_does_not_modulate_playback_speed() {
 }
 
 /// The other half of that: a batch period longer than the whole cushion cannot
-/// be smoothed away by any controller, because the buffer genuinely runs dry
-/// between batches. It must still not be made *worse* than the arithmetic
-/// requires — no skipped audio, no silent clock jumps. The fix for that case is
-/// a Target Buffer above the batch period, not a cleverer loop.
+/// be smoothed away by any controller, because the buffer runs dry between
+/// batches. The audio hold reads the batches and deepens the buffer to cover
+/// them (#39). Until it is built the buffer underruns, which must still not be
+/// made worse than the arithmetic requires: no skipped audio, no silent clock
+/// jumps. Once it is built nothing underruns.
 #[test]
-fn a_batch_longer_than_the_buffer_underruns_but_stays_honest() {
+fn a_batch_longer_than_the_buffer_is_covered_by_the_audio_hold() {
     let mut sim = Sim::new(120);
-    sim.burst_ticks = 50; // 1s batches against a 120ms cushion
-    sim.run(120.0, Link::Up);
-
+    // 700 ms, the longest FFmpeg's MPEG-TS muxer holds audio back.
+    sim.burst_ticks = 35;
+    sim.run(30.0, Link::Up);
+    let built = sim.underruns();
     assert!(
-        sim.underruns() > 0,
-        "a 1s batch against a 120ms buffer has to underrun"
+        built > 0,
+        "a 700ms batch against a 120ms buffer underruns at first"
     );
+    let hold_ms = sim.shared.conn.audio_hold_ms.load(Relaxed);
+    let needed_ms = 680 + consts::AUDIO_HOLD_MARGIN_MS - 120;
+    assert!(
+        (hold_ms - needed_ms).abs() <= 20,
+        "held {hold_ms}ms against {needed_ms}ms"
+    );
+
+    sim.run(90.0, Link::Up);
+    assert_eq!(sim.underruns(), built, "underran after the hold was built");
     sim.assert_healthy();
 }
 

@@ -21,6 +21,15 @@
 //! a short burst of late video stays the video delay's to cover. A release
 //! takes the *worst* reading across the longer `AUDIO_HOLD_RELAX_WINDOW_MS`,
 //! so the hold does not pump up and down.
+//!
+//! The same hold also covers a sender that delivers its audio in bursts
+//! ([`AudioBursts`]). FFmpeg's MPEG-TS muxer packs audio frames into one PES
+//! packet until it fills (2930 bytes by default) or 700 ms have passed, so at
+//! a low bitrate, or across silence, a whole third of a second of audio
+//! arrives at once and nothing between (#39). A buffer that holds less than
+//! that runs dry before every burst, however good the link. The plugin cannot
+//! play audio before it arrives, so the only cure is a deeper buffer, and the
+//! reading that sizes it is the span of audio that arrives together.
 
 use crate::consts;
 use crate::window::{Extreme, WindowExtreme};
@@ -48,9 +57,9 @@ pub struct HoldChange {
     pub from_ms: i32,
     /// The hold now, in ms.
     pub to_ms: i32,
-    /// The skew it was sized from, in ms.
-    pub skew_ms: i64,
-    /// The skew called for more than the ceiling allows.
+    /// The reading it was sized from, in ms: the skew, or the burst span.
+    pub reading_ms: i64,
+    /// The reading called for more than the ceiling allows.
     pub capped: bool,
 }
 
@@ -131,7 +140,7 @@ impl AudioHold {
         (to_ms != current_ms).then_some(HoldChange {
             from_ms: current_ms,
             to_ms,
-            skew_ms,
+            reading_ms: skew_ms,
             capped: wanted_ms > i64::from(max_ms),
         })
     }
@@ -144,6 +153,95 @@ impl Default for AudioHold {
             first_ns: None,
             lowest: WindowExtreme::new(RAISE_WINDOW_NS, Extreme::Lowest),
             highest: WindowExtreme::new(RELAX_WINDOW_NS, Extreme::Highest),
+        }
+    }
+}
+
+const BURST_WINDOW_NS: u64 = consts::AUDIO_BURST_WINDOW_MS * 1_000_000;
+
+/// How bunched up the sender delivers its audio, as hold readings.
+///
+/// Every decoded frame contributes its arrival time minus its PTS. A sender
+/// that delivers as it encodes keeps that steady to within the link's jitter;
+/// one that sends a burst at a time spreads it by the span of the burst,
+/// since the first frame of a burst waited for the last one to be encoded.
+/// The reading is that spread across `AUDIO_BURST_WINDOW_MS`, which is longer
+/// than the longest PES delay FFmpeg's muxer uses.
+///
+/// Readings start a window after the first arrival, and again after any gap
+/// in the audio longer than a window. A connection opens with the probe's
+/// backlog, and a stall ends with the link's, each handed over at one
+/// arrival time; that is a property of the moment, not of the sender, and by
+/// then it has left the window.
+#[derive(Debug)]
+pub struct AudioBursts {
+    /// The first arrival since the last reset or gap.
+    since_ns: Option<u64>,
+    last_ns: u64,
+    lowest: WindowExtreme,
+    highest: WindowExtreme,
+    readings: AudioHold,
+}
+
+impl AudioBursts {
+    /// Forget everything: a new connection, or a timeline that broke.
+    pub fn reset(&mut self) {
+        self.restart();
+        self.readings.reset();
+    }
+
+    fn restart(&mut self) {
+        self.since_ns = None;
+        self.lowest.clear();
+        self.highest.clear();
+    }
+
+    /// Whether a reading has been taken since the last reset.
+    pub fn measured(&self) -> bool {
+        self.readings.measured()
+    }
+
+    /// An audio frame stamped `pts_ns` arrived at `received_ns`.
+    pub fn observe(&mut self, received_ns: u64, pts_ns: i64) {
+        // A gap past the window is an outage, and the readings around it are
+        // the outage's: start over, including the raise and relax windows.
+        if self.since_ns.is_some() && received_ns.saturating_sub(self.last_ns) > BURST_WINDOW_NS {
+            self.reset();
+        }
+        self.last_ns = received_ns;
+        let since_ns = *self.since_ns.get_or_insert(received_ns);
+        let late_ns = received_ns as i64 - pts_ns;
+        self.lowest.push(received_ns, late_ns);
+        self.highest.push(received_ns, late_ns);
+        if received_ns.saturating_sub(since_ns) < BURST_WINDOW_NS {
+            return;
+        }
+        if let (Some(low), Some(high)) = (self.lowest.value(), self.highest.value()) {
+            self.readings.observe(received_ns, high - low);
+        }
+    }
+
+    /// [`AudioHold::before_prime`] over the burst spans. `covered_ms` is how
+    /// much audio the buffer already keeps without a hold: Target Buffer.
+    pub fn before_prime(&self, current_ms: i32, covered_ms: i32) -> Option<HoldChange> {
+        self.readings.before_prime(current_ms, covered_ms)
+    }
+
+    /// [`AudioHold::regulate`] over the burst spans.
+    pub fn regulate(&self, now_ns: u64, current_ms: i32, covered_ms: i32) -> Option<HoldChange> {
+        self.readings.regulate(now_ns, current_ms, covered_ms)
+    }
+}
+
+impl Default for AudioBursts {
+    /// No arrivals yet.
+    fn default() -> Self {
+        Self {
+            since_ns: None,
+            last_ns: 0,
+            lowest: WindowExtreme::new(BURST_WINDOW_NS, Extreme::Lowest),
+            highest: WindowExtreme::new(BURST_WINDOW_NS, Extreme::Highest),
+            readings: AudioHold::default(),
         }
     }
 }
@@ -207,7 +305,7 @@ mod tests {
         let change = h.before_prime(0, COVERED).expect("raised");
         assert_eq!(change.from_ms, 0);
         assert_eq!(change.to_ms, 250);
-        assert_eq!(change.skew_ms, 350);
+        assert_eq!(change.reading_ms, 350);
         assert!(!change.capped);
         // Only ever up before priming.
         assert_eq!(h.before_prime(250, COVERED), None);
@@ -354,5 +452,97 @@ mod tests {
         h.reset();
         assert!(!h.measured());
         assert_eq!(h.before_prime(0, COVERED), None);
+    }
+
+    /// An AAC frame at 48 kHz.
+    const AAC: u64 = 21_333_333;
+    /// Target Buffer 120 ms, which is all a burst can draw on.
+    const TARGET: i32 = 120;
+
+    /// Audio for `secs` from capture `from_ns`, delivered `per_pes` frames at
+    /// a time once the last of them is encoded, 20 ms after capture. Returns
+    /// the capture time it stopped at.
+    fn deliver(b: &mut AudioBursts, from_ns: u64, secs: f64, per_pes: u64) -> u64 {
+        let frames = (secs * 1e9 / AAC as f64) as u64 / per_pes * per_pes;
+        for i in 0..frames {
+            let pes_end = (i / per_pes + 1) * per_pes;
+            b.observe(
+                from_ns + pes_end * AAC + 20 * MS,
+                (from_ns + i * AAC) as i64,
+            );
+        }
+        from_ns + frames * AAC
+    }
+
+    #[test]
+    fn audio_delivered_as_encoded_needs_no_hold() {
+        let mut b = AudioBursts::default();
+        let t = deliver(&mut b, 0, 20.0, 1);
+        assert!(b.measured());
+        assert_eq!(b.before_prime(0, TARGET), None);
+        assert_eq!(b.regulate(t, 0, TARGET), None);
+    }
+
+    #[test]
+    fn bursts_size_the_hold_from_their_span_before_priming() {
+        let mut b = AudioBursts::default();
+        // Not before a window of arrivals: the first ones may be a backlog.
+        deliver(&mut b, 0, 0.5, 17);
+        assert!(!b.measured());
+        deliver(&mut b, 0, 2.0, 17);
+        let change = b.before_prime(0, TARGET).expect("raised");
+        // FFmpeg's default packing of near-silent AAC (#39): 17 frames, of
+        // which the first waits 16 frames for the last.
+        assert_eq!(change.reading_ms, 341);
+        assert_eq!(change.to_ms, 341 + consts::AUDIO_HOLD_MARGIN_MS - TARGET);
+    }
+
+    #[test]
+    fn bursts_that_start_mid_stream_raise_the_hold_after_the_raise_window() {
+        let mut b = AudioBursts::default();
+        let t = deliver(&mut b, 0, 5.0, 1);
+        let end = deliver(
+            &mut b,
+            t,
+            2.0 + consts::AUDIO_BURST_WINDOW_MS as f64 / 1000.0,
+            8,
+        );
+        let change = b.regulate(end + 20 * MS, 0, TARGET).expect("raised");
+        assert_eq!(change.reading_ms, 149);
+    }
+
+    #[test]
+    fn the_backlog_a_stall_hands_over_raises_nothing() {
+        let mut b = AudioBursts::default();
+        let mut t = deliver(&mut b, 0, 5.0, 1);
+        for stall_ms in [500u64, 900, 1500, 3000] {
+            // Everything captured during the stall arrives at its end.
+            let stall_ns = stall_ms * MS;
+            let frames = stall_ns / AAC;
+            for i in 0..frames {
+                b.observe(t + stall_ns + 20 * MS, (t + i * AAC) as i64);
+            }
+            t += frames * AAC;
+            for _ in 0..(5_000 * MS / AAC) {
+                b.observe(t + 20 * MS, t as i64);
+                assert_eq!(
+                    b.regulate(t + 20 * MS, 0, TARGET),
+                    None,
+                    "{stall_ms}ms stall"
+                );
+                t += AAC;
+            }
+        }
+    }
+
+    #[test]
+    fn a_sender_that_stops_bursting_has_the_hold_released() {
+        let mut b = AudioBursts::default();
+        let t = deliver(&mut b, 0, 3.0, 17);
+        let held = b.before_prime(0, TARGET).expect("raised").to_ms;
+        let t = deliver(&mut b, t, 9.0, 1);
+        assert_eq!(b.regulate(t, held, TARGET), None);
+        let t = deliver(&mut b, t, 3.0, 1);
+        assert_eq!(b.regulate(t, held, TARGET).map(|c| c.to_ms), Some(0));
     }
 }

@@ -45,13 +45,16 @@ impl AudioIntake {
     /// One decoded frame: format change handling, PTS repair, warm-up
     /// discard, silence insertion, resample to interleaved f32, pre-keyframe
     /// discard, write to the jitter buffer, publish
-    /// `decoded_frame_samples` / `latest_audio_stream_pts_ns`.
+    /// `decoded_frame_samples` / `latest_audio_stream_pts_ns`, and the burst
+    /// reading of the audio hold. `received_ns` is when the packet behind the
+    /// frame reached the receiver.
     pub fn handle_frame(
         &mut self,
         shared: &Shared,
         flags: &mut ReceiverFlags,
         frame: &ffmpeg::Frame,
         tb: ffmpeg::Rational,
+        received_ns: u64,
     ) {
         let out_channels = frame.channels();
         let out_rate = frame.sample_rate();
@@ -175,6 +178,7 @@ impl AudioIntake {
         let mut state = shared.audio_state();
         state.latest_audio_stream_pts_ns = frame_pts_ns;
         state.decoded_frame_samples = out_samples;
+        crate::audio::hold::observe_audio_frame(shared, &mut state, received_ns, frame_pts_ns);
     }
 
     /// The PTS half of [`Self::handle_frame`]: the frame's timestamp (or an

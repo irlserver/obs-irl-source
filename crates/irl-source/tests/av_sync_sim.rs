@@ -144,6 +144,9 @@ struct Scenario {
     /// A relay replaying video from its last keyframe: how far behind live
     /// the replay starts, and how many times faster than real time it runs.
     relay_backlog: Option<(u64, u64)>,
+    /// Audio frames the sender's muxer packs into one PES packet. None reach
+    /// the plugin before the last of them is encoded.
+    audio_pes_frames: i64,
     events: Vec<(u64, Event)>,
 }
 
@@ -160,8 +163,14 @@ impl Scenario {
             video_lag: Box::new(|_| 0),
             stalls: Vec::new(),
             relay_backlog: None,
+            audio_pes_frames: 1,
             events: Vec::new(),
         }
+    }
+
+    fn audio_pes_frames(mut self, frames: i64) -> Self {
+        self.audio_pes_frames = frames;
+        self
     }
 
     fn fps(mut self, fps: u64) -> Self {
@@ -253,7 +262,11 @@ impl Scenario {
                 if capture >= end_ns {
                     break;
                 }
-                let Some(at) = self.through_stalls(START_NS + capture + NET_NS, false) else {
+                // The packet leaves with its last frame.
+                let pes = self.audio_pes_frames * AUDIO_FRAMES;
+                let last = first + (n - first) / pes * pes + pes - AUDIO_FRAMES;
+                let sent = (sample_pts_ns(last) - FIRST_PTS_NS) as u64;
+                let Some(at) = self.through_stalls(START_NS + sent + NET_NS, false) else {
                     continue;
                 };
                 last_at = at.max(last_at);
@@ -501,6 +514,7 @@ struct StatSample {
     av_skew_ms: i64,
     fill_ms: i32,
     target_ms: i32,
+    underruns: u64,
 }
 
 struct Sim {
@@ -580,11 +594,13 @@ impl Sim {
                 let frame = common::decoded_audio(pts, duration, AUDIO_FRAMES as i32, |i, c| {
                     encode_sample(n + i as i64)[c]
                 });
+                let now = self.now();
                 self.intake.handle_frame(
                     &self.shared,
                     &mut self.flags,
                     &frame,
                     ffmpeg::NS_TIME_BASE,
+                    now,
                 );
             }
             Media::Video(pts) => {
@@ -628,6 +644,7 @@ impl Sim {
                 .as_ref()
                 .map_or(0, irl_core::AudioBuffer::fill_ms),
             target_ms: self.shared.hot.watermarks().target_ms,
+            underruns: self.shared.conn.audio_underruns.load(Relaxed),
         }
     }
 
@@ -1001,6 +1018,44 @@ impl Report {
 /// of its timestamp, and no delay or hold is ever needed. The tick is what
 /// the anchoring frame may be late by (see `VideoThread::
 /// settle_anchor_candidate`), and libobs keeps that error for the connection.
+/// FFmpeg's MPEG-TS muxer packs near-silent AAC 17 frames to a PES packet,
+/// so audio arrives as a 363 ms burst every 363 ms (#39). At the default
+/// Target Buffer the buffer runs dry before every burst until the audio hold
+/// has read the bursts and been built; then it never does, and picture and
+/// sound agree. A Target Buffer that already covers the bursts gets no hold.
+#[test]
+fn audio_in_bursts_is_held_until_the_buffer_covers_them() {
+    let span_ms = 16 * 1024 * 1000 / RATE;
+    for target_ms in [120, 800] {
+        let mut scenario = Scenario::new(70).audio_pes_frames(17);
+        scenario.target_ms = target_ms;
+        let report = scenario.run();
+        let steady = report.assert_settled(20.0, 70.0);
+        report.print(&format!("bursts at {target_ms}ms"), &steady);
+        // Built about three seconds in: a burst window to the first reading,
+        // the raise window, and the build at -2 % that the concealment of
+        // the underruns before it shortens.
+        let at_5s = report
+            .stats
+            .iter()
+            .find(|s| s.at_ns >= START_NS + 5 * SEC)
+            .expect("sampled");
+        assert_eq!(
+            at_5s.underruns,
+            report.last_stats().underruns,
+            "{target_ms}ms: underran after the hold was built"
+        );
+
+        let hold_ms = report.last_stats().audio_hold_ms;
+        let needed_ms = (span_ms + consts::AUDIO_HOLD_MARGIN_MS - target_ms).max(0);
+        assert!(
+            (hold_ms - needed_ms).abs() <= 3,
+            "{target_ms}ms: hold {hold_ms}ms against {needed_ms}ms"
+        );
+        report.assert_healthy();
+    }
+}
+
 #[test]
 fn a_clean_link_is_in_sync_from_the_first_frame() {
     for fps in [30, 60] {

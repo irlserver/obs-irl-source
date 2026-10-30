@@ -87,7 +87,7 @@ fn drain_audio_frames(
             }
             Ok(()) => {
                 flags.audio_decode_errors = 0;
-                audio_in.handle_frame(shared, flags, frame, audio_tb);
+                audio_in.handle_frame(shared, flags, frame, audio_tb, obs::time::gettime_ns());
                 frame.unref();
             }
         }
