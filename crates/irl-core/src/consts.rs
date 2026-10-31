@@ -93,8 +93,6 @@ pub const FADE_DURATION_MS: i32 = 50;
 pub const STARTUP_AUDIO_WARMUP_MS: i32 = 150;
 /// Above this fill the receiver stops reading and lets the transport buffer.
 pub const BLEED_PACE_FILL_MS: i32 = 1000;
-/// Playout offset drift past the primed baseline that triggers a re-anchor.
-pub const AUDIO_OFFSET_REANCHOR_MARGIN_MS: i64 = 400;
 /// Recovery hold after an underrun (microseconds).
 pub const AUDIO_RECOVERY_HOLD_US: u64 = 1_500_000;
 /// Recovery hold after the audio decoder was flushed or the stream timeline
@@ -195,7 +193,7 @@ pub const AUDIO_PUMP_SLEEP_MS: u32 = 1;
 /// taking two mutexes each, on a thread that has nothing to do. Sleeping to the
 /// deadline instead costs nothing in responsiveness, because the deadline is
 /// what gates emission. The cap keeps the per-cycle work that is not emission
-/// (the concealment re-anchor, the fill peak the stats line reports) running at
+/// (the drift baseline, the fill peak the stats line reports) running at
 /// a sane rate, and bounds how long a stop request waits for this thread.
 pub const AUDIO_PUMP_MAX_SLEEP_MS: u32 = 20;
 /// Maximum channels remembered for silence shaping.
@@ -437,7 +435,6 @@ mod tests {
         assert_eq!(FADE_DURATION_MS, 50);
         assert_eq!(STARTUP_AUDIO_WARMUP_MS, 150);
         assert_eq!(BLEED_PACE_FILL_MS, 1000);
-        assert_eq!(AUDIO_OFFSET_REANCHOR_MARGIN_MS, 400);
         assert_eq!(AUDIO_RECOVERY_HOLD_US, 1_500_000);
         assert_eq!(AUDIO_RESET_RECOVERY_HOLD_US, 2_500_000);
         assert_eq!(VIDEO_PKT_GATE_TIMEOUT_US, 5_000_000);

@@ -187,12 +187,9 @@ impl AudioPump {
         }
 
         if state.clock.is_primed() {
-            // Cap runaway concealment latency before it desyncs A/V. Runs
-            // even on a healthy-lead cycle: the offset inflates from past
-            // outages, not from the current queue depth.
-            if !low_latency {
-                maybe_reanchor_offset(shared, state, now, chunk_ns, fmt.target_ms);
-            }
+            // The first offset after priming is what the stats line's
+            // `av_drift` is measured from.
+            state.mapping.take_baseline(state.hold_ms);
 
             let next_ts = state.clock.next_ts(fmt.rate as u32);
 
@@ -607,67 +604,6 @@ fn suspend_low_latency_clock(shared: &Shared, state: &mut AudioState, lag_ns: u6
     irl_warn!(
         "Low-latency audio input empty for {}ms; suspending output clock until audio resumes",
         lag_ns / 1_000_000
-    );
-}
-
-/// The audio→OBS playout offset is (obs clock end) − (stream PTS end) of the
-/// latest chunk handed to OBS; the video path adds this same offset to every
-/// frame PTS for lip sync. Concealment freezes the stream-PTS side while
-/// advancing the OBS side, so a delivery stall inflates the offset by the
-/// outage length. Once primed the only recovery is the speed-drain bleeding
-/// buffer backlog, which does nothing when the concealed audio was dropped
-/// rather than delayed: the latency then sticks and every later blip stacks
-/// onto it.
-///
-/// When the offset drifts too far past its primed baseline AND the buffer has
-/// already drained back to target, reclaim it with one declared re-anchor:
-/// restart the output clock line and drop the stale mapping so the next chunk
-/// rebuilds it fresh. That costs a single concealed splice but caps the
-/// latency instead of letting it ratchet up without bound.
-fn maybe_reanchor_offset(
-    shared: &Shared,
-    state: &mut AudioState,
-    now: u64,
-    chunk_ns: u64,
-    buffer_target_ms: i32,
-) {
-    // The baseline is the first offset seen after priming.
-    if state.mapping.take_baseline(state.hold_ms) {
-        return;
-    }
-    // A raised audio hold grows the offset on purpose, by playing slower
-    // until the buffer holds it; that is latency asked for, not drift.
-    let Some(excess_ns) = state.mapping.drift_ns(state.hold_ms) else {
-        return;
-    };
-    let margin_ns = consts::AUDIO_OFFSET_REANCHOR_MARGIN_MS * 1_000_000;
-    if excess_ns <= margin_ns {
-        return;
-    }
-
-    // Only reclaim latency the speed-drain cannot. While backlog is queued
-    // the inflation is real buffered audio, which the controller drains
-    // without skipping a sample. Once the buffer is back at or below target
-    // the residual offset is phantom: concealment silence with no backing
-    // audio (the concealed packets were dropped, not late), which no speed-up
-    // can recover. Re-anchoring here skips nothing.
-    //
-    // The audio state lock is already held (see `pump_once`); taking the
-    // buffer mutex underneath it is the documented order.
-    let fill_ms = shared.audio_buf().as_ref().map_or(0, |b| b.fill_ms());
-    if fill_ms > buffer_target_ms {
-        return;
-    }
-
-    state.clock.restart(now + chunk_ns);
-    state.mapping.clear();
-    state.conceal_fade_pending = true;
-
-    shared.lifetime.audio_offset_reanchors.fetch_add(1, Relaxed);
-    irl_warn!(
-        "Audio latency drifted +{}ms past baseline (>{}ms) with buffer at/below target; re-anchoring output clock",
-        excess_ns / 1_000_000,
-        consts::AUDIO_OFFSET_REANCHOR_MARGIN_MS
     );
 }
 

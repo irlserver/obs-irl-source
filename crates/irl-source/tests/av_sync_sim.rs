@@ -10,7 +10,7 @@
 //! - every audio sample carries its own index on the sender's timeline
 //!   ([`encode_sample`]), so the OBS time at which content PTS `p` plays is
 //!   read off the submitted PCM, through speed changes, concealment and
-//!   re-anchors;
+//!   output restarts;
 //! - every video frame carries its PTS in its first luma bytes, so the frame
 //!   libobs received is known whatever timestamp it was given.
 //!
@@ -752,7 +752,6 @@ impl Sim {
             tick_ns: scenario.canvas_tick_ns(),
             frame_ns: scenario.frame_ns(),
             restarts: self.shared.conn.audio_output_restarts.load(Relaxed),
-            reanchors: self.shared.lifetime.audio_offset_reanchors.load(Relaxed),
             audible_skipped: self.shared.conn.audible_skipped_chunks.load(Relaxed),
         }
     }
@@ -770,7 +769,6 @@ struct Report {
     tick_ns: u64,
     frame_ns: u64,
     restarts: u64,
-    reanchors: u64,
     audible_skipped: u64,
 }
 
@@ -853,7 +851,7 @@ impl Report {
         println!(
             "{name}: offset {:.1}..{:.1}ms (mean {:.1}) late {} (max {:.1}ms) over {:.0}-{:.0}s; \
              anchor error {:.1}ms, shown {}/{} video_delay={}ms audio_hold={}ms av_skew={}ms \
-             reanchors={} restarts={}",
+             restarts={}",
             steady.min_offset_ms,
             steady.max_offset_ms,
             steady.mean_offset_ms,
@@ -867,7 +865,6 @@ impl Report {
             s.video_delay_ms,
             s.audio_hold_ms,
             s.av_skew_ms,
-            self.reanchors,
             self.restarts,
         );
     }
@@ -895,7 +892,7 @@ impl Report {
     }
 
     /// The libobs audio contract: timestamps contiguous except across the
-    /// restarts and re-anchors the plugin declares and counts.
+    /// restarts the plugin declares and counts.
     fn assert_clock_only_jumps_where_declared(&self) {
         let mut jumps = 0;
         for pair in self.submissions.windows(2) {
@@ -906,7 +903,7 @@ impl Report {
                 jumps += 1;
             }
         }
-        let declared = self.restarts + self.reanchors;
+        let declared = self.restarts;
         assert!(
             jumps <= declared,
             "{jumps} discontinuities against {declared} declared"
@@ -1231,13 +1228,13 @@ fn a_full_stall_during_a_hold_build_recovers_sync() {
     report.assert_healthy();
 }
 
-/// A loss while the delay stands (a hold build in progress) leaves audio
-/// latency inflated by its concealment, which the pump re-anchors away once
-/// the buffer is back at its target, under a video floor sized for the skew. Video
-/// follows the playout down only as far as the floor: in sync within a few
-/// seconds of the loss, with no lasting offset.
+/// A loss while the delay stands (a hold build in progress), under a video
+/// floor sized for the skew. Concealment grows the playout by the outage and
+/// video follows it back down only as far as the floor: in sync within a few
+/// seconds of the loss, with no lasting offset and the output clock never
+/// reset.
 #[test]
-fn a_reanchor_while_the_video_delay_stands_recovers_sync() {
+fn a_loss_while_the_video_delay_stands_recovers_sync() {
     let report = Scenario::new(120)
         .video_lag(lag_profile(SKEW_RISES_TO_600_MS))
         .loss(26.0, 1500)
@@ -1248,14 +1245,14 @@ fn a_reanchor_while_the_video_delay_stands_recovers_sync() {
         at_loss.video_delay_ms > 0,
         "the delay had gone before the loss: {at_loss:?}"
     );
-    assert_eq!(report.reanchors, 1);
+    assert_eq!(report.restarts, 0);
 
     let before = report.assert_settled(0.0, 20.0);
     let resynced_s = report.resynced_after(27.5, 120.0);
     assert!(resynced_s <= 3.0, "in sync {resynced_s:.2}s after the loss");
     let after = report.assert_settled(30.0, 120.0);
-    report.print("re-anchor under delay", &after);
-    println!("re-anchor under delay: in sync {resynced_s:.2}s after the loss");
+    report.print("loss under delay", &after);
+    println!("loss under delay: in sync {resynced_s:.2}s after the loss");
 
     report.assert_no_drift(&before, &after);
     assert_eq!(report.video_delay_ms(28.0), 0..=0);

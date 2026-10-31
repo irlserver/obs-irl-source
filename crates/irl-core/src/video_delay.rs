@@ -9,8 +9,8 @@
 //! `pts + max(O, min(F, O + max))`, so the delay against the audio,
 //! `clamp(F - O, 0, max)`, is derived and never stored. When the audio playout
 //! grows (an audio hold building, concealment) the delay shrinks by the same
-//! amount and nothing on screen moves; when it shrinks (a re-anchor, a hold
-//! released) the floor keeps video where its frames can still be shown. The
+//! amount and nothing on screen moves; when it shrinks (a backlog drained, a
+//! hold released) the floor keeps video where its frames can still be shown. The
 //! delay is a lip-sync error traded for a smooth picture.
 //!
 //! The floor carries the stream's PTS epoch, so it is forgotten whenever the
@@ -531,7 +531,8 @@ mod tests {
         let past = O + set as i64 + 50_000_000;
         assert_eq!(d.delay_ns(past), 0);
         assert_eq!(d.due_ns(PTS, (PTS + past) as u64), (PTS + past) as u64);
-        // And back below it (a re-anchor): the floor holds video back again.
+        // And back below it (a backlog drained): the floor holds video back
+        // again.
         assert_eq!(d.delay_ns(O), set);
         // The ceiling applies to the derived delay, wherever the offset is.
         assert_eq!(d.delay_ns(O - 5_000_000_000), MAX);

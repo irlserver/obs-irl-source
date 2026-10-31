@@ -373,10 +373,10 @@ impl VideoThread {
     /// Re-derive every queued frame's due time from the offset as it stands
     /// now and the floor as it stands now.
     ///
-    /// The audio side reclaims playout latency two ways, and both would leave
+    /// The audio side moves the playout offset two ways, and both would leave
     /// paced video behind for the depth of this queue. The speed controller
-    /// moves the offset continuously, so a frame frozen at intake shows ~5% of
-    /// its residence late for the whole drain; a re-anchor steps the offset
+    /// moves it continuously, so a frame frozen at intake shows ~5% of its
+    /// residence late for the whole drain; an output restart steps it
     /// outright. Rescheduling against one offset per cycle preserves the
     /// spacing between frames and moves the whole queue with the audio it is
     /// mapped to. Without a mapping each frame keeps the fallback due time it
@@ -699,8 +699,8 @@ impl VideoThread {
 
     /// Mirror the delay the schedule carries for the stats, and say so once
     /// when the audio playout moving (not the floor) takes it to or from
-    /// zero: an audio hold that finished building, or a re-anchor that put
-    /// the playout back below what video needs.
+    /// zero: an audio hold that finished building, or a drained backlog or a
+    /// released hold that put the playout back below what video needs.
     fn publish_delay(&mut self) {
         let delay_ns = self
             .offset_ns

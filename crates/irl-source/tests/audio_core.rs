@@ -306,9 +306,8 @@ fn underrun_conceals_with_shaped_silence() {
     let mut pts_ns = 0i64;
     write_chunks(&shared, &mut pts_ns, 15, 0.5);
 
-    // Feed nothing more: the buffer drains and the pump has to conceal. The
-    // run stops short of the re-anchor margin (400 ms of concealment), so the
-    // clock line below must be contiguous end to end.
+    // Feed nothing more: the buffer drains and the pump has to conceal, on a
+    // clock line that stays contiguous end to end.
     for _ in 0..25 {
         while pump.pump_once() {}
         clock.fetch_add(CHUNK_NS, Relaxed);
@@ -320,7 +319,6 @@ fn underrun_conceals_with_shaped_silence() {
         shared.conn.audio_underruns.load(Relaxed)
     );
     assert_eq!(fill_ms(&shared), 0);
-    assert_eq!(shared.lifetime.audio_offset_reanchors.load(Relaxed), 0);
 
     let emitted = recorder.emitted.lock();
     let last = emitted.last().expect("emitted something");

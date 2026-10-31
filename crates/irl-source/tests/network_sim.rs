@@ -157,10 +157,6 @@ impl Sim {
         self.shared.conn.audio_hold_ms.load(Relaxed)
     }
 
-    fn reanchors(&self) -> u64 {
-        self.shared.lifetime.audio_offset_reanchors.load(Relaxed)
-    }
-
     /// OBS time of the first chunk submitted, relative to the sim's start.
     fn first_audio_out_ms(&self) -> u64 {
         let first = self.audio_out.emitted.lock().first().map(|e| e.timestamp);
@@ -279,10 +275,9 @@ impl Sim {
     /// flushes everything OBS has queued for this source.
     ///
     /// The plugin is allowed to break it, but only where it says so: an output
-    /// restart after the audio thread was starved, and the offset re-anchor
-    /// that caps concealment-inflated latency. Both are counted, both cost one
-    /// concealed splice, and both are the deliberate alternative to letting OBS
-    /// add global buffering. So the invariant is not "never jumps" — it is
+    /// restart after the audio thread was starved. It is counted, costs one
+    /// concealed splice, and is the deliberate alternative to letting OBS add
+    /// global buffering. So the invariant is not "never jumps" — it is
     /// **never jumps silently**.
     fn assert_clock_only_jumps_where_declared(&self) {
         let emitted = self.audio_out.emitted.lock();
@@ -298,8 +293,7 @@ impl Sim {
             }
         }
 
-        let declared = self.shared.conn.audio_output_restarts.load(Relaxed)
-            + self.shared.lifetime.audio_offset_reanchors.load(Relaxed);
+        let declared = self.shared.conn.audio_output_restarts.load(Relaxed);
         assert!(
             jumps <= declared,
             "{jumps} discontinuities against {declared} declared restarts"
@@ -653,10 +647,8 @@ fn audio_starts_without_a_skew_reading_once_the_wait_runs_out() {
 /// The sender starts sending its video 700 ms behind its audio halfway
 /// through. Nothing can be done for the picture at once, so the video delay
 /// covers it; after the raise window the hold rises to match, and the speed
-/// controller builds it by playing slower until video is back on time. The
-/// growth is the hold the user did not have to ask for, so it must not be
-/// mistaken for concealment drift and thrown away by a re-anchor. Built, the
-/// playout leaves video a canvas tick in hand on top of the tick it needs to
+/// controller builds it by playing slower until video is back on time. Built,
+/// the playout leaves video a canvas tick in hand on top of the tick it needs to
 /// decode: the floor any delay was sized to sits under the offset, and the
 /// delay it implies is zero.
 #[test]
@@ -688,7 +680,6 @@ fn video_that_falls_behind_mid_stream_is_caught_up_by_slowing_audio() {
         "video arriving now is {}ms early: a floor sized from this skew would still delay it",
         sim.video_margin_now_ms()
     );
-    assert_eq!(sim.reanchors(), 0, "the hold building was read as drift");
     sim.assert_healthy();
     assert_eq!(sim.underruns(), 0);
 }

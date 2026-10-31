@@ -22,8 +22,7 @@ The periodic stats log line reports buffer fill, speed, underruns, output
 restarts, the largest PTS gap, the A/V skew and the delay and hold that cover
 it, and the video queues together, so a single log line describes the health
 of the whole path. Underruns, startup trims, output clock restarts and
-re-anchors, and decoder corruption bursts also log a line each when they
-happen.
+decoder corruption bursts also log a line each when they happen.
 
 ## Audio behavior
 

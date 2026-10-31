@@ -239,10 +239,6 @@ pub struct LifetimeStats {
     pub pacing_peak: AtomicI32,
     pub pacing_bytes: AtomicUsize,
     pub audio_fill_peak_ms: AtomicI32,
-    /// Declared output-clock re-anchors. Not a stat: the network simulation
-    /// counts them, with the output restarts, as the only places the OBS
-    /// clock may jump.
-    pub audio_offset_reanchors: AtomicU64,
     pub video_pkt_eagain: AtomicU64,
     pub audio_pkt_eagain: AtomicU64,
     pub video_pkt_dropped: AtomicU64,
