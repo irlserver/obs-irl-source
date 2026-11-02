@@ -24,18 +24,29 @@
 //!    dialogs when done ([`wake_dialogs`]).
 //!
 //! `url` stays the single source of truth. Nothing on the streaming path knows
-//! these settings exist; `tests/provider_seam.rs` pins that.
+//! these settings exist; `tests/provider_seam.rs` pins that. The one thing that
+//! runs without a dialog is [`start_url_watch`], and it reaches a source only
+//! the way the dialog does: by writing `url`.
 //!
 //! Which providers the dropdown lists comes from the [`Catalog`], read once
 //! from the `providers.json` shipped in the plugin's data directory
 //! ([`load_catalog`]). The repo's `data/providers.json` is the stock list.
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
-use irl_core::consts::SOURCE_ID;
-use irl_provider::{Catalog, Hooks, Ingest, Level};
-use obs::{ClickAction, Data, ModifiedAction, Properties, PropertiesRef, TextType};
+use irl_core::consts::{PROVIDER_WATCH_POLL_MS, SOURCE_ID};
+use irl_core::url_recheck::UrlRecheck;
+use irl_provider::{Catalog, Hooks, Ingest, Level, ResolveError};
+use obs::{
+    CallData, ClickAction, Data, MediaState, ModifiedAction, OwnedData, OwnedSource, Properties,
+    PropertiesRef, SourceHandle, TextType,
+};
 use parking_lot::Mutex;
 
 use crate::module_text;
@@ -121,6 +132,18 @@ pub fn init() {
         log,
         wake_dialogs,
     });
+    start_url_watch();
+}
+
+/// Stop the [`start_url_watch`] thread. A request in flight holds this up by
+/// the provider client's timeouts, and the module cannot unload under it.
+pub fn shutdown() {
+    let Some(watch) = URL_WATCH.lock().take() else {
+        return;
+    };
+    WATCH_STOPPING.store(true, Relaxed);
+    let _ = watch.tx.send(WatchMsg::Stop);
+    let _ = watch.thread.join();
 }
 
 fn log(level: Level, msg: &str) {
@@ -135,6 +158,12 @@ fn log(level: Level, msg: &str) {
 /// signalled: `obs_enum_sources` holds libobs's source list while the callback
 /// runs, and re-entering it is not worth the risk for a cosmetic refresh.
 fn wake_dialogs() {
+    for source in &irl_sources() {
+        source.handle().update_properties();
+    }
+}
+
+fn irl_sources() -> Vec<OwnedSource> {
     let mut sources = Vec::new();
     obs::source::enum_sources(&mut |source| {
         if source.unversioned_id() == SOURCE_ID
@@ -144,9 +173,190 @@ fn wake_dialogs() {
         }
         true
     });
-    for source in &sources {
-        source.handle().update_properties();
+    sources
+}
+
+/// The running [`start_url_watch`] thread and the way to reach it.
+struct UrlWatch {
+    tx: Sender<WatchMsg>,
+    thread: JoinHandle<()>,
+}
+
+static URL_WATCH: Mutex<Option<UrlWatch>> = Mutex::new(None);
+/// Set before [`WatchMsg::Stop`] is sent, so the thread skips the requests
+/// queued ahead of it instead of holding up the unload with each one.
+static WATCH_STOPPING: AtomicBool = AtomicBool::new(false);
+
+enum WatchMsg {
+    Resolve(Pick),
+    Stop,
+}
+
+/// A source's provider pick, read from its settings on the UI thread.
+#[derive(PartialEq, Eq)]
+struct Pick {
+    source_name: CString,
+    slot: Slot,
+    base_url: String,
+    ingest_id: String,
+    url: String,
+    /// Compared by [`write_fresh_url`]: a different count means media arrived
+    /// during the request.
+    frames: i64,
+}
+
+/// While a picked source receives nothing, ask its provider for the URL again,
+/// because a key rotated on the provider's side leaves `url` on a key the
+/// server refuses. [`UrlRecheck`] says when.
+///
+/// A source that receives media is never touched and a failed request leaves `url`
+/// alone, so streaming still never waits on a provider.
+///
+/// This thread does the waiting and the network. Settings are read and written
+/// on the UI thread, in tasks that hand back to it over the channel, since a
+/// properties dialog edits the same unlocked object. It never waits for one of
+/// those tasks, because the UI thread joins it at unload. For the same reason
+/// tasks carry a source's name and look it up: a task that never runs must not
+/// strand a reference. It also means stopping takes an explicit message, since
+/// an unrun task strands its clone of the sender.
+fn start_url_watch() {
+    let (tx, rx) = mpsc::channel();
+    let thread_tx = tx.clone();
+    let spawned = std::thread::Builder::new()
+        .name("irl-provider-watch".into())
+        .spawn(move || {
+            obs::panic::guard_unit("provider URL watch", || {
+                let poll = Duration::from_millis(PROVIDER_WATCH_POLL_MS);
+                let mut watched = HashMap::new();
+                loop {
+                    match rx.recv_timeout(poll) {
+                        Err(RecvTimeoutError::Timeout) => scan_sources(&mut watched, &thread_tx),
+                        Ok(WatchMsg::Resolve(pick)) if !WATCH_STOPPING.load(Relaxed) => {
+                            resolve_again(pick, &mut watched);
+                        }
+                        Ok(WatchMsg::Resolve(_)) => {}
+                        Ok(WatchMsg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            });
+        });
+    match spawned {
+        Ok(thread) => *URL_WATCH.lock() = Some(UrlWatch { tx, thread }),
+        Err(e) => irl_warn!("Could not start the provider URL watch: {e}"),
     }
+}
+
+/// Stopped and None have no connection to repair, and rewriting the URL of a
+/// stopped source would start it, since an update counts as a request to run.
+fn should_be_receiving(source: SourceHandle) -> bool {
+    !matches!(source.media_state(), MediaState::Stopped | MediaState::None)
+}
+
+/// Frames decoded on the current connection, through the proc obs-websocket's
+/// GetStats calls.
+fn decoded_frames(source: SourceHandle) -> i64 {
+    let mut stats = CallData::new();
+    if !source.proc_handler().call(c"get_stats", &mut stats) {
+        return 0;
+    }
+    stats.get_i64(c"total_audio_frames").unwrap_or(0)
+        + stats.get_i64(c"total_video_frames").unwrap_or(0)
+}
+
+/// Rebuilding the map drops the view of a source that was stopped, and of one
+/// that is gone.
+fn scan_sources(watched: &mut HashMap<CString, UrlRecheck>, tx: &Sender<WatchMsg>) {
+    let now_ms = obs::time::gettime_ns() / 1_000_000;
+    let mut still_watched = HashMap::new();
+    for source in &irl_sources() {
+        let source = source.handle();
+        if !should_be_receiving(source) {
+            continue;
+        }
+        let Ok(name) = CString::new(source.name()) else {
+            continue;
+        };
+        let mut recheck = watched.remove(&name).unwrap_or_default();
+        if recheck.poll(now_ms, decoded_frames(source)) {
+            let tx = tx.clone();
+            let name = name.clone();
+            obs::task::queue_ui(Box::new(move || {
+                if let Some((_, pick)) = current_pick(&name) {
+                    let _ = tx.send(WatchMsg::Resolve(pick));
+                }
+            }));
+        }
+        still_watched.insert(name, recheck);
+    }
+    *watched = still_watched;
+}
+
+/// UI thread only. `None` unless the named source should be receiving and its
+/// `url` is still what its pick resolved to: one edited by hand is the user's.
+fn current_pick(source_name: &CStr) -> Option<(OwnedSource, Pick)> {
+    let source = obs::source::get_source_by_name(source_name)?;
+    if !should_be_receiving(source.handle()) {
+        return None;
+    }
+    let owned = source.handle().settings();
+    let settings = owned.data();
+    let selected = settings.get_str(KEY_PROVIDER)?;
+    let slot = Slot::all().find(|slot| slot.value() == selected)?;
+    let ingest_id = settings.get_str(&slot.key(PREFIX_RESOLVED_ID))?;
+    let resolved = settings.get_str(&slot.key(PREFIX_RESOLVED_URL))?;
+    let url = settings.get_str(KEY_URL)?;
+    if resolved != url {
+        return None;
+    }
+    let base_url = slot.base_url(Some(&settings))?;
+    let pick = Pick {
+        source_name: source_name.to_owned(),
+        slot,
+        base_url,
+        ingest_id,
+        url,
+        frames: decoded_frames(source.handle()),
+    };
+    Some((source, pick))
+}
+
+fn resolve_again(pick: Pick, watched: &mut HashMap<CString, UrlRecheck>) {
+    let fresh = match irl_provider::resolve(&pick.base_url, &pick.ingest_id) {
+        Ok(fresh) => fresh,
+        Err(ResolveError::NotSignedIn) => return,
+        Err(e) => {
+            irl_info!("Could not ask the provider for the stream's URL again: {e}");
+            return;
+        }
+    };
+    if fresh == pick.url {
+        return;
+    }
+    let Ok(fresh) = CString::new(fresh) else {
+        irl_warn!("The provider returned a URL with a NUL in it");
+        return;
+    };
+    if let Some(recheck) = watched.get_mut(&pick.source_name) {
+        recheck.url_changed();
+    }
+    obs::task::queue_ui(Box::new(move || write_fresh_url(&pick, &fresh)));
+}
+
+/// UI thread only. Looks again first, because the request took a while: media
+/// may be arriving by now, and that connection must not be restarted.
+fn write_fresh_url(pick: &Pick, fresh: &CStr) {
+    let Some((source, current)) = current_pick(&pick.source_name) else {
+        return;
+    };
+    if current != *pick {
+        return;
+    }
+    crate::log::log_input_url("The provider has a new URL for this stream", fresh);
+    let changes = OwnedData::new();
+    let data = changes.data();
+    data.set_str(KEY_URL, fresh);
+    data.set_str(&pick.slot.key(PREFIX_RESOLVED_URL), fresh);
+    source.handle().update(&data);
 }
 
 pub fn defaults(settings: &Data<'_>) {

@@ -113,6 +113,8 @@ Signing in opens your browser at the provider and hands the session back to OBS 
 
 Signing in changes nothing about how a source streams. The Ingest list writes a plain URL into the URL field, and that field is all the receiver ever reads. A scene collection you saved months ago keeps working with an expired session, a provider that is down, or no sign-in at all. Only the list stops filling. When a session expires the plugin notices on the next refresh and the button goes back to Sign in.
 
+If a source whose URL came from the Ingest list receives nothing, the plugin asks the provider for that URL again, first after 30 seconds and then every 2 minutes. A key you rotated at the provider therefore recovers by itself, without opening the dialog. It does not touch a source that is receiving, or a URL you edited by hand.
+
 The ingest list never contains stream keys. Picking an entry asks the provider for that one URL, which goes straight into the URL field. Any service can be a provider by implementing [docs/provider-protocol.md](docs/provider-protocol.md); paste its base URL under Custom provider.
 
 The Provider dropdown's list is `providers.json`, next to the plugin's `locale` folder. If you host OBS for others and want the dropdown to offer only your own service, edit that file: it can list any providers and hide Custom provider. The format is in [docs/provider-protocol.md](docs/provider-protocol.md#what-the-user-sees). Upgrading the plugin writes the stock file again, so keep your copy and re-apply it.

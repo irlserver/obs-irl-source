@@ -122,7 +122,11 @@ Authorization: Bearer {access_token}
 { "url": "srt://relay.provider.example:4000?streamid=play/stream/abc123" }
 ```
 
-The plugin writes `url` into its URL setting and forgets it. The server may mint, rotate, or scope the key inside the URL however it likes; nothing in the plugin depends on the URL's shape beyond FFmpeg being able to open it.
+The plugin writes `url` into its URL setting. The server may rotate or scope the key inside the URL however it likes; nothing in the plugin depends on the URL's shape beyond FFmpeg being able to open it.
+
+Return the same URL for as long as its key stays valid. Do not mint a new key per request, because the plugin asks again on its own and a changed URL restarts the source's connection.
+
+The plugin asks again while a source whose URL came from a pick receives no media: first after 30 seconds, then every 2 minutes, so a rotated key recovers without the user doing anything. Each changed answer doubles the wait, up to 30 minutes, until the source receives media again. A source that receives media is never touched, a URL edited by hand is never replaced, and a failed request leaves the URL as it is.
 
 - 404: the id is unknown or the user no longer has access to it. The plugin leaves the URL setting alone and refreshes the list.
 - 403: the user may see this ingest but not pull it. Same handling as 404, with `error_description` in the OBS log.

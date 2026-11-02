@@ -1,10 +1,10 @@
-//! Providers may feed the properties dialog, and nothing else.
+//! Providers may write the `url` setting, and nothing else.
 //!
 //! The feature is worth nothing if a signed-out user, an expired session or an
 //! unreachable provider can stop an already-configured source from streaming.
-//! The design keeps that true by making the picker write into the existing
-//! `url` setting and touch nothing else, so `url` stays the single source of
-//! truth and the receiver never learns providers exist.
+//! The design keeps that true by making the picker and the URL watch write into
+//! the existing `url` setting and touch nothing else, so `url` stays the single
+//! source of truth and the receiver never learns providers exist.
 //!
 //! Two tests: one on the configuration itself, and one structural, in the
 //! style of `locale_keys.rs`, because the way this invariant would
@@ -58,7 +58,8 @@ fn the_streaming_path_does_not_know_about_providers() {
     // If a provider key ever reaches Config, the receiver starts depending on
     // sign-in and an expired session takes a stream off the air. The dialog
     // (`providers.rs`, `settings.rs`) and the module entry point (`lib.rs`,
-    // which installs the hooks) are the only places providers may appear.
+    // which installs the hooks and stops the URL watch) are the only places
+    // providers may appear.
     let allowed = ["providers.rs", "settings.rs", "lib.rs"];
     let mut leaks = Vec::new();
     for (file, src) in sources() {

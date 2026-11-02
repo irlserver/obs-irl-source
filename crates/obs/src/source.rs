@@ -31,6 +31,19 @@ impl MediaState {
             Self::Stopped => M::OBS_MEDIA_STATE_STOPPED,
         }
     }
+
+    /// The states outside the subset read as `None`: a live input never
+    /// reports them.
+    fn from_sys(state: obs_sys::obs_media_state) -> Self {
+        use obs_sys::obs_media_state as M;
+        match state {
+            M::OBS_MEDIA_STATE_PLAYING => Self::Playing,
+            M::OBS_MEDIA_STATE_OPENING => Self::Opening,
+            M::OBS_MEDIA_STATE_BUFFERING => Self::Buffering,
+            M::OBS_MEDIA_STATE_STOPPED => Self::Stopped,
+            _ => Self::None,
+        }
+    }
 }
 
 /// An OBS input source type. One `impl` per registered source id.
@@ -386,6 +399,22 @@ impl SourceHandle {
     pub fn media_started(&self) {
         // SAFETY: live handle.
         unsafe { obs_sys::obs_source_media_started(self.as_ptr()) };
+    }
+
+    /// `obs_source_update`: merge `changes` into the source's live settings and
+    /// apply them. libobs copies what it merges. Merging writes to the object a
+    /// properties dialog edits, so call this on the UI thread
+    /// ([`crate::task::queue_ui`]).
+    pub fn update(&self, changes: &Data<'_>) {
+        // SAFETY: live handle and live settings for the duration of the call.
+        unsafe { obs_sys::obs_source_update(self.as_ptr(), changes.as_ptr()) };
+    }
+
+    /// `obs_source_media_get_state`. Safe from any thread: it only calls the
+    /// source's own `media_get_state`.
+    pub fn media_state(&self) -> MediaState {
+        // SAFETY: live handle.
+        MediaState::from_sys(unsafe { obs_sys::obs_source_media_get_state(self.as_ptr()) })
     }
 
     /// `obs_source_get_proc_handler`.

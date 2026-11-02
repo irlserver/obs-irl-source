@@ -132,6 +132,15 @@ pub enum obs_media_state {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum obs_task_type {
+    OBS_TASK_UI = 0,
+    OBS_TASK_GRAPHICS = 1,
+    OBS_TASK_AUDIO = 2,
+    OBS_TASK_DESTROY = 3,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum obs_bounds_type {
     OBS_BOUNDS_NONE = 0,
     OBS_BOUNDS_STRETCH = 1,
@@ -609,6 +618,17 @@ unsafe extern "C" {
     /// properties dialog for it. Only signals, so safe from a worker thread —
     /// the Qt side hops to the UI thread through a queued connection.
     pub fn obs_source_update_properties(source: *mut obs_source_t);
+    /// Merges `settings` into the source's live settings and applies them.
+    pub fn obs_source_update(source: *mut obs_source_t, settings: *mut obs_data_t);
+    pub fn obs_source_media_get_state(source: *mut obs_source_t) -> obs_media_state;
+    /// Queues `task` on the given task thread. `OBS_TASK_UI` goes through the
+    /// frontend's handler.
+    pub fn obs_queue_task(
+        task_type: obs_task_type,
+        task: Option<unsafe extern "C" fn(param: *mut c_void)>,
+        param: *mut c_void,
+        wait: bool,
+    );
 
     // ── obs.h: scenes and scene items ──────────────────────────────────
     pub fn obs_scene_from_source(source: *const obs_source_t) -> *mut obs_scene_t;

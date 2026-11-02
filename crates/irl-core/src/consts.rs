@@ -380,6 +380,20 @@ pub const UDP_FIFO_DEFAULT_PACKETS: i64 = 7 * 4096;
 /// Interval of the periodic receiver stats log line.
 pub const STATS_LOG_INTERVAL_NS: u64 = 30_000_000_000;
 
+// ── Provider URL watch (see `url_recheck`) ──
+
+/// How often the watch looks for sources that receive nothing.
+pub const PROVIDER_WATCH_POLL_MS: u64 = 5000;
+/// How long a source goes without a decoded frame before its provider is first
+/// asked. Long enough that an ordinary reconnect never reaches the provider.
+pub const PROVIDER_RECHECK_FIRST_MS: u64 = 30_000;
+/// How often the provider is asked after that. The longest a rotated key waits
+/// once the first check has passed, and one request per offline source.
+pub const PROVIDER_RECHECK_MS: u64 = 120_000;
+/// The ceiling for the interval, which doubles each time the URL changes
+/// without the source receiving anything.
+pub const PROVIDER_RECHECK_MAX_MS: u64 = 1_800_000;
+
 /// Ring capacity when the format is degenerate and `4 × max_ms` works out to
 /// nothing.
 pub const AUDIO_BUFFER_FALLBACK_CAPACITY: usize = 65536;
@@ -510,5 +524,11 @@ mod tests {
         assert_eq!(RTMP_BUFFER_MS, 1000);
         assert_eq!(UDP_FIFO_DEFAULT_PACKETS, 28_672); // 7 * 4096
         assert_eq!(STATS_LOG_INTERVAL_NS, 30_000_000_000);
+
+        // ── provider URL watch ──
+        assert_eq!(PROVIDER_WATCH_POLL_MS, 5000);
+        assert_eq!(PROVIDER_RECHECK_FIRST_MS, 30_000);
+        assert_eq!(PROVIDER_RECHECK_MS, 120_000);
+        assert_eq!(PROVIDER_RECHECK_MAX_MS, 1_800_000);
     }
 }

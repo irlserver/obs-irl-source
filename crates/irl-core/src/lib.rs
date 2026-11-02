@@ -25,6 +25,7 @@ pub mod speed;
 pub mod stats;
 pub mod timing;
 pub mod url_opts;
+pub mod url_recheck;
 pub mod video_delay;
 pub mod video_time;
 mod window;

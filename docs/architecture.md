@@ -37,6 +37,7 @@ Video decodes on the video thread, not the receiver, for two reasons. Decoding e
 - **Receiver thread** owns demux and the audio decoder as a plain struct on its own stack. It writes the jitter buffer and pushes video packets onto the video channel. It never touches the GPU.
 - **Video thread** owns the video decoder, handed over by the receiver at stream open (`VideoMsg::Decoder`, queued ahead of its packets). Its pacing queue is a local `PacingQueue` with no lock.
 - **Audio thread** drains the jitter buffer and submits audio, paced against the output clock.
+- **Provider watch thread** is one thread for the module, not one per run. While a picked source decodes no frames, it asks the provider for that URL again (`docs/provider-protocol.md`). It reads the stats and makes the request, and it leaves the settings to tasks on the UI thread, because a properties dialog edits the same object and libobs does not lock it. It never waits for one of those tasks, because the UI thread joins it at unload.
 
 The lock order is `audio_state` → `audio_buf` → `hot.watermarks`, and `video.q` is never held together with any of them. The audio pump takes `audio_state` once per iteration and passes `&mut AudioState` down. parking_lot mutexes are not recursive, so a nested acquire would hang the audio thread and then the video thread behind it.
 

@@ -25,6 +25,7 @@ pub mod proc;
 pub mod properties;
 pub mod scene;
 pub mod source;
+pub mod task;
 pub mod time;
 pub mod video;
 pub mod websocket;
