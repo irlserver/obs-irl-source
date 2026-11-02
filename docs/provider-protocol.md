@@ -16,7 +16,7 @@ This document is the contract, version 1. A provider implements it against a hos
 
 ## What the user sees
 
-The dialog starts with a Provider dropdown. The stock build lists the built in providers, highest priority first, plus a Custom entry, which reveals a text field for a provider base URL. Below it sit the ingest list and the sign in, refresh and sign out buttons for the selected provider, then the plain URL field. Picking an ingest writes its URL into that field and stays selected. The URL field remains the single source of truth: editing it by hand resets the ingest list to its blank entry.
+The dialog starts with a Provider dropdown. The stock build lists the built in providers, highest priority first, plus a Custom entry, which reveals a text field for a provider base URL. Below it sit the ingest list and the sign in, refresh and sign out buttons for the selected provider, then the plain URL field. Picking an ingest writes its URL into that field and stays selected. A provider that lists exactly one ingest needs no pick: if the URL field is empty after sign in, the plugin picks that ingest by itself. The URL field remains the single source of truth: editing it by hand resets the ingest list to its blank entry.
 
 The list and the Custom entry come from `providers.json` in the plugin's data directory (the folder that holds `locale/`). Every release archive and the installer ship the stock one, which is `data/providers.json` in the repository. A hosted OBS that wants to show its own provider and nothing else edits that file and runs the official release binary:
 

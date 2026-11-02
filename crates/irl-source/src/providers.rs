@@ -382,10 +382,18 @@ impl ModifiedAction for IngestPicked {
             return false;
         };
         // `get_str` is `None` for the empty string, so item 0 and the resets
-        // below land here and do nothing. That is also what stops the rebuild
-        // this returns `true` for from looping.
-        let Some(pick) = settings.get_str(name) else {
-            return false;
+        // below land here and, unless the list leaves no choice to make, do
+        // nothing. That is also what stops the rebuild this returns `true` for
+        // from looping.
+        let pick = match settings.get_str(name) {
+            Some(pick) => pick,
+            None => {
+                let Some(only) = only_ingest(slot, settings) else {
+                    return false;
+                };
+                settings.set_str(name, &cstring(&only));
+                only
+            }
         };
         let id_key = slot.key(PREFIX_RESOLVED_ID);
         let url_key = slot.key(PREFIX_RESOLVED_URL);
@@ -427,6 +435,24 @@ impl ModifiedAction for IngestPicked {
             None => settings.set_str(name, c""),
         }
         true
+    }
+}
+
+/// The ingest a source takes without being asked: the only one its selected
+/// provider lists, once signed in. Only into an empty `url`, so a URL typed or
+/// picked before is never replaced. This runs when the dialog re-runs the
+/// builder after a sign-in, because libobs applies the settings to a fresh
+/// property list.
+fn only_ingest(slot: Slot, settings: &Data<'_>) -> Option<String> {
+    if settings.get_str(KEY_PROVIDER).as_deref() != Some(slot.value())
+        || settings.get_str(KEY_URL).is_some()
+    {
+        return None;
+    }
+    let view = irl_provider::provider_for(&slot.base_url(Some(settings))?)?;
+    match view.ingests.as_slice() {
+        [only] => Some(only.id.clone()),
+        _ => None,
     }
 }
 
