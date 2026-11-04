@@ -14,9 +14,9 @@
 //! - every video frame carries its PTS in its first luma bytes, so the frame
 //!   libobs received is known whatever timestamp it was given.
 //!
-//! The offset of a frame is when libobs shows it (its timestamp, or its
-//! hand-over if that was later) minus when the audio of the same instant
-//! plays. Positive is picture behind sound.
+//! The offset of a frame is when libobs shows it, by a model of its async
+//! queue and play head ([`VideoOut`]), minus when the audio of the same
+//! instant plays. Positive is picture behind sound.
 //!
 //! **What it does not cover.** The demuxer and the decoder, as in
 //! `network_sim.rs`. Video packets go through the real channel and the video
@@ -426,34 +426,145 @@ struct Shown {
     pts_ns: i64,
     timestamp: u64,
     handed_ns: u64,
-    /// How far libobs's play head runs behind the OBS clock (negative:
-    /// ahead). libobs takes the anchoring frame up on the first render tick
-    /// after it arrives, sets the play head to its timestamp there and
-    /// advances it by tick times, so every frame after it is shown that much
-    /// off its timestamp.
-    anchor_error_ns: i64,
-    /// Whether this is the frame that anchored the play head.
+    /// The render tick that took it up; `None` if libobs dropped it, or the
+    /// run ended first.
+    displayed_ns: Option<u64>,
+    /// Whether this frame anchored the play head.
     anchor: bool,
+    /// The same picture as the frame before it.
+    repeat: bool,
 }
 
 impl Shown {
-    /// When libobs shows it: at its timestamp as the anchored play head
-    /// reaches it, or on arrival if it came later than that.
-    fn displayed_ns(&self) -> u64 {
-        (self.timestamp as i64 + self.anchor_error_ns).max(self.handed_ns as i64) as u64
-    }
-
     fn late_ns(&self) -> i64 {
         self.handed_ns as i64 - self.timestamp as i64
     }
 }
 
+/// `MAX_ASYNC_FRAMES`: a queue this deep is thrown away whole.
+const LIBOBS_MAX_ASYNC_FRAMES: usize = 30;
+/// `MAX_TS_VAR`: a timestamp this far from the play head resets it.
+const LIBOBS_MAX_TS_VAR_NS: u64 = 2 * SEC;
+/// `ready_async_frame` keeps a frame this close behind the play head for the
+/// next tick when it already has one to show.
+const LIBOBS_FRAME_SMOOTHING_NS: u64 = 2 * MS;
+
+/// libobs's async video path, as `cache_video`, `async_tick`,
+/// `get_closest_frame` and `ready_async_frame` in obs-source.c run it.
+///
+/// What it adds to a frame's timestamp is the play head: it only advances on a
+/// tick that finds a frame queued, while the tick still counts as elapsed, so
+/// a tick with an empty queue is lost from it for good and every later frame
+/// shows that much late. Audio goes by its own timestamps and does not follow.
 #[derive(Default)]
 struct VideoOut {
     shown: Vec<Shown>,
-    /// `None` while libobs's play head is unanchored: at the start, and after
-    /// a clear.
-    anchor_error_ns: Option<i64>,
+    /// Indices into `shown`, oldest first.
+    queue: std::collections::VecDeque<usize>,
+    last_frame_ts: u64,
+    last_sys_ns: u64,
+    next_tick_ns: u64,
+    /// How far the play head trailed the tick, at the latest tick.
+    play_head_lag_ns: i64,
+    /// How many times the queue overflowed and was thrown away.
+    overflows: u32,
+    /// `async_unbuffered`, set in low-latency mode: no play head, and each
+    /// tick takes the newest frame.
+    unbuffered: bool,
+}
+
+impl VideoOut {
+    /// Run every render tick up to `now_ns`, which fall on multiples of
+    /// `tick_ns`.
+    fn tick_to(&mut self, now_ns: u64, tick_ns: u64) {
+        if self.next_tick_ns == 0 {
+            self.next_tick_ns = (now_ns / tick_ns + 1) * tick_ns;
+            self.last_sys_ns = self.next_tick_ns - tick_ns;
+        }
+        while self.next_tick_ns <= now_ns {
+            let tick = self.next_tick_ns;
+            self.async_tick(tick);
+            self.next_tick_ns += tick_ns;
+        }
+    }
+
+    fn async_tick(&mut self, sys_ns: u64) {
+        if !self.queue.is_empty() {
+            let unanchored = self.last_frame_ts == 0;
+            if unanchored || self.ready_async_frame(sys_ns) {
+                let index = self.queue.pop_front().expect("not empty");
+                let frame = &mut self.shown[index];
+                frame.displayed_ns = Some(sys_ns);
+                if self.last_frame_ts == 0 {
+                    frame.anchor = true;
+                    self.last_frame_ts = frame.timestamp;
+                }
+            }
+        }
+        self.last_sys_ns = sys_ns;
+        if self.last_frame_ts != 0 && !self.unbuffered {
+            self.play_head_lag_ns = sys_ns as i64 - self.last_frame_ts as i64;
+        }
+    }
+
+    fn ready_async_frame(&mut self, sys_ns: u64) -> bool {
+        if self.unbuffered {
+            while self.queue.len() > 1 {
+                self.queue.pop_front();
+            }
+            self.last_frame_ts = sys_ns;
+            return true;
+        }
+        let timestamp = |out: &Self, at: usize| out.shown[out.queue[at]].timestamp;
+        let sys_offset = sys_ns - self.last_sys_ns;
+        let mut next = timestamp(self, 0);
+        if next.abs_diff(self.last_frame_ts) > LIBOBS_MAX_TS_VAR_NS {
+            self.last_frame_ts = next;
+            return true;
+        }
+        // Unsigned in libobs too: a timestamp older than the one before it
+        // wraps, reads as a jump forward and moves the play head.
+        let mut frame_offset = next.wrapping_sub(self.last_frame_ts);
+        self.last_frame_ts += sys_offset;
+
+        let mut have_frame = false;
+        let mut frame_time = next;
+        while self.last_frame_ts > next {
+            if have_frame && self.last_frame_ts - next < LIBOBS_FRAME_SMOOTHING_NS {
+                break;
+            }
+            if have_frame {
+                self.queue.pop_front();
+            }
+            if self.queue.len() == 1 {
+                return true;
+            }
+            have_frame = true;
+            next = timestamp(self, 1);
+            if next.wrapping_sub(frame_time) > LIBOBS_MAX_TS_VAR_NS {
+                self.last_frame_ts = next.wrapping_sub(frame_offset);
+            }
+            frame_time = next;
+            frame_offset = frame_time.wrapping_sub(self.last_frame_ts);
+        }
+        have_frame
+    }
+
+    fn cache_video(&mut self, frame: Shown) {
+        self.shown.push(frame);
+        if self.queue.len() >= LIBOBS_MAX_ASYNC_FRAMES {
+            self.queue.clear();
+            self.last_frame_ts = 0;
+            self.overflows += 1;
+            return;
+        }
+        self.queue.push_back(self.shown.len() - 1);
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.last_frame_ts = 0;
+    }
 }
 
 #[derive(Clone)]
@@ -472,22 +583,23 @@ impl VideoSink for VideoProbe {
         let pts = unsafe { std::ptr::read_unaligned(raw.data[0].cast::<i64>()) };
         let handed_ns = self.clock.load(Relaxed);
         let mut out = self.out.lock();
-        let anchor = out.anchor_error_ns.is_none();
-        let taken_up_ns = (handed_ns / self.tick_ns + 1) * self.tick_ns;
-        let anchor_error_ns = *out
-            .anchor_error_ns
-            .get_or_insert(taken_up_ns as i64 - raw.timestamp as i64);
-        out.shown.push(Shown {
+        out.tick_to(handed_ns, self.tick_ns);
+        let repeat = out.shown.last().is_some_and(|last| last.pts_ns == pts);
+        out.cache_video(Shown {
             pts_ns: pts,
             timestamp: raw.timestamp,
             handed_ns,
-            anchor_error_ns,
-            anchor,
+            displayed_ns: None,
+            anchor: false,
+            repeat,
         });
     }
 
     fn output_video_none(&self) {
-        self.out.lock().anchor_error_ns = None;
+        let now = self.clock.load(Relaxed);
+        let mut out = self.out.lock();
+        out.tick_to(now, self.tick_ns);
+        out.clear();
     }
 }
 
@@ -551,7 +663,10 @@ impl Sim {
                 .with_us_clock(Box::new(move || us.load(Relaxed) / 1000))
         };
 
-        let video_out = Arc::new(Mutex::new(VideoOut::default()));
+        let video_out = Arc::new(Mutex::new(VideoOut {
+            unbuffered: scenario.low_latency,
+            ..VideoOut::default()
+        }));
         let sink = VideoProbe {
             out: Arc::clone(&video_out),
             clock: Arc::clone(&clock),
@@ -729,6 +844,11 @@ impl Sim {
             self.clock.store(next.max(now + 1), Relaxed);
         }
 
+        let (shown, play_head_lag_ns, overflows) = {
+            let mut out = self.video_out.lock();
+            out.tick_to(end_ns, scenario.canvas_tick_ns());
+            (out.shown.clone(), out.play_head_lag_ns, out.overflows)
+        };
         let video_sent = arrivals
             .iter()
             .filter(|a| matches!(a.media, Media::Video(_)))
@@ -746,7 +866,9 @@ impl Sim {
         Report {
             submissions: self.audio_out.0.lock().clone(),
             played,
-            shown: self.video_out.lock().shown.clone(),
+            shown,
+            play_head_lag_ns,
+            overflows,
             stats,
             video_sent,
             tick_ns: scenario.canvas_tick_ns(),
@@ -764,6 +886,10 @@ struct Report {
     /// The submissions of real audio played straight.
     played: Vec<Submission>,
     shown: Vec<Shown>,
+    /// How far libobs's play head trailed the OBS clock when the run ended.
+    play_head_lag_ns: i64,
+    /// How many times libobs threw its async queue away.
+    overflows: u32,
     stats: Vec<StatSample>,
     video_sent: usize,
     tick_ns: u64,
@@ -799,7 +925,15 @@ impl Report {
     /// Picture minus sound for one frame, in ms; positive is picture behind.
     fn offset_ms(&self, frame: &Shown) -> Option<f64> {
         let audio = self.audio_plays_at(frame.pts_ns)?;
-        Some((frame.displayed_ns() as f64 - audio) / 1e6)
+        Some((frame.displayed_ns? as f64 - audio) / 1e6)
+    }
+
+    /// The new pictures libobs showed, in order. A repeat shows nothing new,
+    /// and libobs drops a frame the next one overtook.
+    fn pictures(&self) -> impl Iterator<Item = &Shown> {
+        self.shown
+            .iter()
+            .filter(|f| !f.repeat && f.displayed_ns.is_some())
     }
 
     /// The frames handed over between `from_s` and `to_s` after the open.
@@ -807,8 +941,7 @@ impl Report {
         let from = START_NS + (from_s * SEC as f64) as u64;
         let to = START_NS + (to_s * SEC as f64) as u64;
         let frames: Vec<&Shown> = self
-            .shown
-            .iter()
+            .pictures()
             .filter(|f| (from..to).contains(&f.handed_ns))
             .collect();
         // A frame whose audio had not played by the end has nothing to be
@@ -820,8 +953,7 @@ impl Report {
             .collect();
         let offsets: Vec<f64> = frames.iter().filter_map(|f| self.offset_ms(f)).collect();
         // The anchoring frame may go up to a canvas tick late by design (see
-        // `VideoThread::settle_anchor_candidate`); what that costs shows up
-        // in every later frame's offset instead.
+        // `VideoThread::settle_anchor_candidate`).
         let late: Vec<i64> = frames
             .iter()
             .filter(|f| !f.anchor)
@@ -850,8 +982,8 @@ impl Report {
         let s = self.last_stats();
         println!(
             "{name}: offset {:.1}..{:.1}ms (mean {:.1}) late {} (max {:.1}ms) over {:.0}-{:.0}s; \
-             anchor error {:.1}ms, shown {}/{} video_delay={}ms audio_hold={}ms av_skew={}ms \
-             restarts={}",
+             play head lag {:.1}ms, repeats {}, overflows {}, shown {}/{} video_delay={}ms \
+             audio_hold={}ms av_skew={}ms restarts={}",
             steady.min_offset_ms,
             steady.max_offset_ms,
             steady.mean_offset_ms,
@@ -859,8 +991,13 @@ impl Report {
             steady.max_late_ms,
             steady.from_s,
             steady.to_s,
-            self.shown.first().map_or(0, |f| f.anchor_error_ns) as f64 / 1e6,
-            self.shown.len(),
+            self.play_head_lag_ns as f64 / 1e6,
+            self.shown.iter().filter(|f| f.repeat).count(),
+            self.overflows,
+            self.shown
+                .iter()
+                .filter(|f| !f.repeat && f.displayed_ns.is_some())
+                .count(),
             self.video_sent,
             s.video_delay_ms,
             s.audio_hold_ms,
@@ -917,31 +1054,30 @@ impl Report {
         self.assert_play_head_on_the_clock();
     }
 
-    /// Every frame that anchored libobs's play head, at the start and after
-    /// each clear, left it on the OBS clock.
+    /// libobs's play head ended the run on the OBS clock, and its queue never
+    /// overflowed. A lag here is a lasting lip-sync error nothing in the
+    /// plugin can see: sound ahead of the picture by exactly this much.
     fn assert_play_head_on_the_clock(&self) {
-        for frame in self.shown.iter().filter(|f| f.anchor) {
-            assert!(
-                frame.anchor_error_ns.abs() <= consts::VIDEO_PACING_SLACK_NS,
-                "the play head runs {:.1}ms behind the OBS clock",
-                frame.anchor_error_ns as f64 / 1e6
-            );
-        }
+        assert!(
+            self.play_head_lag_ns.abs() <= consts::VIDEO_PACING_SLACK_NS,
+            "the play head runs {:.1}ms behind the OBS clock",
+            self.play_head_lag_ns as f64 / 1e6
+        );
+        assert_eq!(self.overflows, 0, "libobs threw its async queue away");
     }
 
-    /// Every frame sent from `from_s` on was shown: nothing dropped once the
-    /// play head anchored.
+    /// Every frame sent from `from_s` on reached libobs: nothing dropped once
+    /// the play head anchored. libobs itself drops one when its timestamp and
+    /// the next both fall inside one tick, which a 60 fps stream on a 60 fps
+    /// canvas does as the two clocks slip past each other.
     fn assert_nothing_dropped_after(&self, from_s: f64) {
         let from = START_NS + (from_s * SEC as f64) as u64;
-        let first = self
-            .shown
-            .iter()
+        let handed = || self.shown.iter().filter(|f| !f.repeat);
+        let first = handed()
             .find(|f| f.handed_ns >= from)
             .expect("frames shown")
             .pts_ns;
-        let shown: Vec<i64> = self
-            .shown
-            .iter()
+        let shown: Vec<i64> = handed()
             .filter(|f| f.pts_ns >= first)
             .map(|f| f.pts_ns)
             .collect();
@@ -961,12 +1097,13 @@ impl Report {
         w
     }
 
-    /// Sync in `later` is where it was in `earlier`: whatever happened in
-    /// between left no lasting offset.
+    /// Sync in `later` is where it was in `earlier`, to within the render tick
+    /// a frame's display is quantised to: whatever happened in between left no
+    /// lasting offset.
     fn assert_no_drift(&self, earlier: &Window, later: &Window) {
         let drift = later.mean_offset_ms - earlier.mean_offset_ms;
         assert!(
-            drift.abs() <= 2.0,
+            drift.abs() <= self.tick_ns as f64 / 1e6,
             "sync drifted {drift:+.1}ms: {earlier:?} then {later:?}"
         );
     }
@@ -1011,8 +1148,7 @@ impl Report {
         let to = START_NS + (to_s * SEC as f64) as u64;
         let tol = SYNC_TOLERANCE_NS as f64 / 1e6;
         let frames: Vec<&Shown> = self
-            .shown
-            .iter()
+            .pictures()
             .filter(|f| (from..to).contains(&f.handed_ns))
             .collect();
         let last_bad = frames.iter().rposition(|f| {
@@ -1071,8 +1207,9 @@ fn audio_in_bursts_is_held_until_the_buffer_covers_them() {
     }
 }
 
-/// Nothing wrong with the link or the sender: picture and sound agree from
-/// the first frame shown, every frame is handed over ahead of its timestamp,
+/// Nothing wrong with the link or the sender: picture and sound agree within
+/// a canvas tick from the first frame shown (a frame shows on the first tick
+/// past its timestamp), every frame is handed over ahead of its timestamp,
 /// and no delay or hold is ever needed. The anchoring frame may go out up to
 /// a tick late (see `VideoThread::settle_anchor_candidate`) and is taken up
 /// on the tick after that, which libobs would keep for the connection if the
@@ -1084,7 +1221,10 @@ fn a_clean_link_is_in_sync_from_the_first_frame() {
         let all = report.window(0.0, 30.0);
         report.print(&format!("clean {fps}fps"), &all);
 
-        report.assert_in_sync(&all, 5 * MS as i64);
+        report.assert_in_sync(
+            &all,
+            report.tick_ns as i64 + 2 * consts::VIDEO_PACING_SLACK_NS,
+        );
         report.assert_paced(&all);
         report.assert_nothing_dropped_after(0.0);
         report.assert_healthy();
@@ -1338,8 +1478,9 @@ fn video_without_audio_is_paced_a_tick_behind_its_arrival() {
     report.assert_nothing_dropped_after(0.0);
     // The anchoring frame carries the time of the tick that takes it up,
     // not its due time, so the spacing is measured from the frame after it.
-    for pair in report.shown[1..].windows(2) {
-        let step = pair[1].timestamp - pair[0].timestamp;
+    let spaced: Vec<u64> = report.pictures().skip(1).map(|f| f.timestamp).collect();
+    for pair in spaced.windows(2) {
+        let step = pair[1] - pair[0];
         assert!(step.abs_diff(report.frame_ns) <= 1, "frames {step}ns apart");
     }
 }
@@ -1358,5 +1499,20 @@ fn a_relay_catching_up_at_connect_sets_no_delay_and_ends_in_sync() {
     assert_eq!(report.last_stats().audio_hold_ms, 0);
     report.assert_nothing_dropped_after(0.0);
     report.assert_latency_settled();
+    report.assert_healthy();
+}
+
+/// Video stops for 1.5 s while audio plays on (#39, #40). Nothing can show in
+/// the gap, but libobs's play head must keep running through it: if its queue
+/// sits empty the time is lost from it for good, and the sound stays ahead of
+/// the picture for the rest of the connection. Measured on a real OBS, this
+/// stall left 343 ms that way.
+#[test]
+fn a_video_stall_leaves_no_lasting_offset() {
+    let report = Scenario::new(70).stall(30.0, 1500, Streams::Video).run();
+    let before = report.assert_settled(5.0, 30.0);
+    let after = report.assert_settled(45.0, 70.0);
+    report.print("video stall", &after);
+    report.assert_no_drift(&before, &after);
     report.assert_healthy();
 }

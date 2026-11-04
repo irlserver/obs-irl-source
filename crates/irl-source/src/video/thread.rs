@@ -114,6 +114,11 @@ pub struct VideoThread {
     /// Where the wait for the audio playout mapping stands. See
     /// [`Self::awaiting_audio_mapping`].
     anchor_wait: AnchorWait,
+    /// The frame libobs last received, to repeat through a gap in the video.
+    /// See [`Self::keep_play_head_running`].
+    last_frame: Option<Paced>,
+    /// The newest timestamp libobs has received.
+    handed_until_ns: u64,
     /// The floor under the video schedule, so that video which reaches this
     /// thread too late to be paced against the audio playout still can be.
     /// See [`Self::settle_anchor_candidate`].
@@ -174,6 +179,8 @@ impl VideoThread {
             // A fresh source has libobs's `last_frame_ts` at 0 too.
             anchor_pending: true,
             anchor_wait: AnchorWait::Idle,
+            last_frame: None,
+            handed_until_ns: 0,
             delay: VideoDelay::default(),
             offset_ns: None,
             floor_moved: false,
@@ -226,6 +233,8 @@ impl VideoThread {
             // to 0, so the next frame re-anchors the play head.
             self.anchor_pending = true;
             self.anchor_wait = AnchorWait::Idle;
+            self.last_frame = None;
+            self.handed_until_ns = 0;
             // The floor was sized for the connection that just ended.
             self.reset_delay();
             self.publish_delay();
@@ -254,6 +263,7 @@ impl VideoThread {
             return Duration::from_millis(consts::VIDEO_PACING_MAX_WAIT_MS);
         }
         self.pacing_emit_due(now_ns, slack_ns);
+        self.keep_play_head_running(slack_ns);
         self.publish_counters();
         self.publish_delay();
         // Fresh clock for the sleep: the emit above may have taken long
@@ -471,7 +481,22 @@ impl VideoThread {
             } else {
                 due_ns
             };
+            // A backlog after a stall comes due all at once. libobs would show
+            // only the newest of it and discard the rest, and more than
+            // `MAX_ASYNC_FRAMES` in one tick makes it throw its whole queue
+            // away and re-anchor the play head on a late frame.
+            if !self.anchor_pending && self.pacing.next_due().is_some_and(|next| next <= now_ns) {
+                continue;
+            }
+            // Never older than what libobs already holds: it compares timestamps
+            // unsigned, so an older one reads as a jump forward and moves the
+            // play head. A late frame after a repeat is the usual case, and it
+            // shows on the next tick either way.
+            let timestamp = timestamp.max(self.handed_until_ns);
             let submitted = self.output_frame(paced.frame(), timestamp);
+            if submitted {
+                self.handed_until_ns = timestamp;
+            }
             // The play head is only anchored by a frame libobs actually
             // received, at its real due time. A conversion that failed
             // submitted nothing, and an early frame would anchor early, so
@@ -479,7 +504,54 @@ impl VideoThread {
             if self.anchor_pending && verdict == DueVerdict::Emit && submitted {
                 self.anchor_pending = false;
             }
+            self.last_frame = Some(paced);
         }
+    }
+
+    /// Repeat the last frame when libobs's async queue would otherwise be
+    /// empty at its next render tick.
+    ///
+    /// libobs advances its play head only on a tick that finds a frame queued,
+    /// while the tick still counts as elapsed, so a tick with an empty queue
+    /// is lost from the play head for good. Every later frame then shows that
+    /// much late, and audio, which goes by its own timestamps, stays ahead
+    /// (#39). A video stall empties the queue, and so does any concealment,
+    /// which pushes the next frame's due time past the lead it was to arrive
+    /// with. The repeat shows the picture already on screen, so nothing moves.
+    ///
+    /// libobs takes a frame up on the first tick past its timestamp, so a frame
+    /// stamped at or after the tick just gone is still queued at the next one.
+    /// A repeat stamped with the next tick is queued at that tick and taken up
+    /// on the one after, which leaves this thread a tick of room to wake late.
+    ///
+    /// In unbuffered mode libobs has no play head to keep running.
+    fn keep_play_head_running(&mut self, slack_ns: i64) {
+        let Some(next_tick_ns) = self.next_render_tick() else {
+            return;
+        };
+        if self.handed_until_ns + self.canvas_tick_ns() >= next_tick_ns {
+            return;
+        }
+        if let Some(due_ns) = self.pacing.next_due()
+            && due_ns as i64 - slack_ns <= next_tick_ns as i64
+        {
+            return; // a real frame goes out before that tick
+        }
+        if let Some(last) = self.last_frame.take() {
+            if self.output_frame(last.frame(), next_tick_ns) {
+                self.handed_until_ns = next_tick_ns;
+            }
+            self.last_frame = Some(last);
+        }
+    }
+
+    /// The next render tick, when a repeat could be called for at all.
+    fn next_render_tick(&self) -> Option<u64> {
+        if self.anchor_pending || self.shared.cfg.low_latency_audio {
+            return None;
+        }
+        self.last_frame.as_ref()?;
+        Some((self.render_tick_ns)()? + self.canvas_tick_ns())
     }
 
     /// Whether video must keep waiting for the audio playout mapping before
@@ -798,11 +870,16 @@ impl VideoThread {
         lifetime.pacing_bytes.store(self.pacing.bytes(), Relaxed);
     }
 
-    /// How long to sleep: until the head frame is due, capped at
+    /// How long to sleep: until the head frame is due, or just past the render
+    /// tick after which a repeat may be needed, capped at
     /// `VIDEO_PACING_MAX_WAIT_MS`, never below 1 ms, and zero when the head is
     /// already due (go round again).
     fn sleep_hint(&self, now_ns: u64, slack_ns: i64) -> Duration {
         let mut wait_ms = consts::VIDEO_PACING_MAX_WAIT_MS;
+        if let Some(next_tick_ns) = self.next_render_tick() {
+            let until_ns = next_tick_ns as i64 + consts::VIDEO_PACING_SLACK_NS - now_ns as i64;
+            wait_ms = wait_ms.min((until_ns.max(0) / 1_000_000) as u64);
+        }
         if let Some(due_ns) = self.pacing.next_due() {
             let until_ns = due_ns as i64 - now_ns as i64;
             if until_ns <= slack_ns {

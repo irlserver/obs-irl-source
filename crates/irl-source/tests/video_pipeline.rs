@@ -1201,7 +1201,9 @@ fn a_single_late_burst_after_the_anchor_does_not_raise_the_delay() {
         );
         run_at(&mut thread, &clock, due_of(i) - 100_000_000);
     }
-    run_at(&mut thread, &clock, due_of(50));
+    for i in 46..=50u64 {
+        run_at(&mut thread, &clock, due_of(i));
+    }
 
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);
     assert_eq!(
@@ -1489,4 +1491,33 @@ fn video_catching_up_to_live_at_connection_start_sets_no_delay() {
         );
     }
     assert!(emitted.len() >= 85, "{} frames shown", emitted.len());
+}
+
+/// A backlog that comes due at once: libobs would show only the newest of it
+/// and discard the rest, and more than its queue limit in one tick would make
+/// it throw the queue away and re-anchor the play head on a late frame. So
+/// only the newest goes out, and the next frame is paced as usual.
+#[test]
+fn a_backlog_that_comes_due_at_once_hands_over_only_the_newest_frame() {
+    let shared = shared_with_audio();
+    let (mut thread, recorder, clock) = thread_with(shared.clone());
+    let t0 = anchor_with_margin(&shared, &mut thread, &clock);
+    assert_eq!(recorder.emitted().len(), 1);
+
+    let due_of = |i: u64| t0 + 100_000_000 + i * FRAME;
+    // A second of frames lands in one piece, all but the last already due.
+    let landed = due_of(40) + 1_000_000;
+    for i in 1..=40u64 {
+        feed(&mut thread, 10_000_000_000 + (i * FRAME) as i64, landed);
+    }
+    run_at(&mut thread, &clock, landed);
+    assert_eq!(recorder.emitted().len(), 2, "the newest frame only");
+
+    feed(
+        &mut thread,
+        10_000_000_000 + (41 * FRAME) as i64,
+        due_of(41) - 100_000_000,
+    );
+    run_at(&mut thread, &clock, due_of(41));
+    assert_eq!(recorder.emitted().len(), 3);
 }
