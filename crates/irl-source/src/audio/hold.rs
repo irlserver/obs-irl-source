@@ -86,6 +86,15 @@ pub fn observe_audio_frame(shared: &Shared, state: &mut AudioState, received_ns:
     }
 }
 
+/// The read loop held back to let a backlog drain. While it does, audio
+/// arrives as fast as playback uses it, not as the sender delivers it, so the
+/// burst readings would release a hold the sender still needs.
+///
+/// Takes `audio_state`. The caller must hold none of the audio locks.
+pub fn read_was_paced(shared: &Shared) {
+    shared.audio_state().bursts.reset();
+}
+
 /// What a hold change was sized from.
 #[derive(Debug, Clone, Copy)]
 enum Need {

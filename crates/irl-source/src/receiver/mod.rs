@@ -226,8 +226,13 @@ impl Receiver {
             pace_ms = buffer_max_ms + 100;
         }
 
+        let mut paced = false;
         while self.shared.is_active() && self.audio_fill_ms() > pace_ms {
+            paced = true;
             obs::time::sleep_ms(5);
+        }
+        if paced {
+            crate::audio::hold::read_was_paced(&self.shared);
         }
         self.shared.is_active()
     }

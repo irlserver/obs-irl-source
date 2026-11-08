@@ -401,6 +401,33 @@ fn a_batch_longer_than_the_buffer_is_covered_by_the_audio_hold() {
     sim.assert_healthy();
 }
 
+/// While the read loop is held back to drain a backlog, audio arrives as
+/// fast as playback uses it, however the sender delivers it. That says nothing
+/// about the sender, so the hold its bursts needed stays. Once reading is free
+/// again, a sender that really stopped bursting still has the hold released.
+#[test]
+fn draining_a_backlog_does_not_release_the_burst_hold() {
+    let mut sim = Sim::new(120);
+    sim.burst_ticks = 35;
+    sim.run(30.0, Link::Up);
+    let held_ms = sim.hold_ms();
+    assert!(held_ms > 0, "the batches built no hold");
+
+    sim.burst_ticks = 1;
+    for _ in 0..30 {
+        sim.run(0.5, Link::Up);
+        hold::read_was_paced(&sim.shared);
+    }
+    assert_eq!(sim.hold_ms(), held_ms, "the paced reads released the hold");
+
+    sim.run(14.0, Link::Up);
+    assert_eq!(
+        sim.hold_ms(),
+        0,
+        "a sender that stopped bursting keeps its hold"
+    );
+}
+
 #[test]
 fn a_clean_link_holds_the_target_and_never_breaks_the_clock() {
     let mut sim = Sim::new(120);
