@@ -1256,6 +1256,68 @@ fn a_sender_off_the_obs_clock_stays_in_sync_and_reads_no_drift() {
     }
 }
 
+/// The same senders in Low Latency Audio, with and without video that
+/// trails its audio (#41 ran an iPhone 65 ms behind). That mode's speed only
+/// follows the sender's clock, holding its one-chunk cushion under the hold.
+/// Without it a fast sender's backlog grew into the cap and was cut every
+/// 20 s, and a slow one drained the hold until the picture ran 259 ms behind
+/// the sound. Now nothing is cut, the clock never restarts, and picture and
+/// sound stay in sync from the start.
+#[test]
+fn low_latency_audio_follows_a_sender_off_the_obs_clock() {
+    for rate in [1.003, 0.997] {
+        for lag_ms in [0, 200] {
+            let report = Scenario::new(240)
+                .low_latency()
+                .sender_rate(rate)
+                .video_lag(move |_| lag_ms * MS)
+                .run();
+            let all = report.assert_settled(0.0, 240.0);
+            report.print(
+                &format!("low latency, sender at {rate}x, lag {lag_ms}ms"),
+                &all,
+            );
+            report.assert_healthy();
+            assert_eq!(report.restarts, 0, "{rate}x, lag {lag_ms}ms");
+            assert_eq!(report.last_stats().underruns, 0, "{rate}x, lag {lag_ms}ms");
+            assert_eq!(
+                report.video_delay_ms(10.0),
+                0..=0,
+                "{rate}x, lag {lag_ms}ms"
+            );
+
+            let learned = report.stats_at(150.0).av_drift_ms;
+            let moved_ms = report.last_stats().av_drift_ms - learned;
+            assert!(
+                moved_ms.abs() <= 3,
+                "{rate}x, lag {lag_ms}ms: av_drift moved {moved_ms}ms after 150s"
+            );
+        }
+    }
+}
+
+/// A stall's backlog in Low Latency Audio is cut rather than played out
+/// fast: latency wins there. A stall shorter than the output clock's lag
+/// limit leaves no backlog, since the clock catches up on what arrives, so
+/// this one is longer: the empty input stands the clock down (counted as an
+/// underrun, and the one new clock line in the run), playback primes again on
+/// the burst, and the cut takes the rest. Sync comes back with the audio.
+#[test]
+fn low_latency_audio_cuts_a_stall_backlog_and_stays_in_sync() {
+    let report = Scenario::new(40)
+        .low_latency()
+        .stall(15.0, 600, Streams::Both)
+        .run();
+    let before = report.assert_settled(0.0, 15.0);
+    let after = report.assert_settled(18.0, 40.0);
+    report.print("low latency stall", &after);
+    report.assert_no_drift(&before, &after);
+    report.assert_play_head_on_the_clock();
+    assert!(report.audible_skipped > 0, "the backlog was not cut");
+    assert_eq!(report.last_stats().underruns, 1, "one stand-down");
+    assert_eq!(report.restarts, 0);
+}
+
 /// Nothing wrong with the link or the sender: picture and sound agree within
 /// a canvas tick from the first frame shown (a frame shows on the first tick
 /// past its timestamp), every frame is handed over ahead of its timestamp,
@@ -1490,8 +1552,9 @@ fn target_edit_during_build() -> Report {
         .run()
 }
 
-/// Low Latency Audio has no target and no speed control: the hold is sized
-/// before audio starts and kept queued on top of the single chunk of lead.
+/// Low Latency Audio has no Target Buffer: the hold is sized before audio
+/// starts and kept queued with the mode's one-chunk cushion, which covers a
+/// chunk of the skew as the single chunk of lead does.
 #[test]
 fn low_latency_audio_with_trailing_video_is_in_sync_from_the_first_frame() {
     let report = Scenario::new(40)
@@ -1503,8 +1566,9 @@ fn low_latency_audio_with_trailing_video_is_in_sync_from_the_first_frame() {
 
     let hold = report.last_stats().audio_hold_ms;
     let lead_ms = (sample_pts_ns(AUDIO_FRAMES) / 1_000_000) as i32;
+    let cushion_ms = irl_core::timing::low_latency_cushion_ms(AUDIO_FRAMES as i32, RATE);
     assert!(
-        (hold - (350 + consts::AUDIO_HOLD_MARGIN_MS - lead_ms)).abs() <= 3,
+        (hold - (350 + consts::AUDIO_HOLD_MARGIN_MS - lead_ms - cushion_ms)).abs() <= 3,
         "hold {hold}ms"
     );
     assert_eq!(report.video_delay_ms(0.0), 0..=0);

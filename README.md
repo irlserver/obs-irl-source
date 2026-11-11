@@ -124,7 +124,7 @@ The Provider dropdown's list is `providers.json`, next to the plugin's `locale` 
 `Low Latency Audio` does more than flip an OBS flag. It changes how the plugin buffers.
 
 - Buffered mode is the default and the one to use for IRL. It keeps the cushion you asked for, plays at normal speed almost all the time, and covers dropouts with shaped silence instead of noise. Backlog from a stall gets played back sped up, never thrown away.
-- Low latency mode plays audio as soon as it shows up and turns off the plugin's own correction. Use it when absolute delay matters more than surviving a rough connection.
+- Low latency mode plays audio as soon as it shows up, with one chunk of cushion. The only correction it keeps is an inaudible match to the sender's clock, so latency does not creep on a phone whose clock runs fast or slow. Backlog from a stall is cut instead of played back sped up. Use it when absolute delay matters more than surviving a rough connection.
 
 ## Stats overlay
 
@@ -232,7 +232,7 @@ Buffer regulation happens through playback speed alone, asymmetric like IRLToolk
 
 The jitter buffer is a ring sized in milliseconds with a parallel PTS chunk queue, so it adapts to any sample rate or channel count. The speed controller's watermarks derive from `Target Buffer`: low at half the target, full drain speed at target plus 200ms. Retuning the target live grows the ring if needed (it never shrinks) and moves the watermarks while keeping every queued sample.
 
-`Low Latency Audio` switches the source to OBS async unbuffered semantics and drains chunks as soon as they are available, instead of building the startup cushion and running plugin-side correction.
+`Low Latency Audio` switches the source to OBS async unbuffered semantics and drains chunks as soon as they are available, keeping one chunk queued instead of the startup cushion. Its only plugin-side correction follows the sender's clock.
 
 The jitter buffer, adaptive latency control, PTS repair tiers and timestamp handling are covered in detail in [Audio pipeline](docs/audio-pipeline.md).
 

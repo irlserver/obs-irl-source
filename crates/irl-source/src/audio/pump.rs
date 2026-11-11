@@ -23,7 +23,8 @@
 //! Backlog is trimmed only before playback primes; after that, content is
 //! preserved: the read loop applies transport backpressure above a fill
 //! ceiling and playback bleeds the excess at up to the configured Catch-Up
-//! Speed.
+//! Speed. Low-latency mode is the exception: its speed only follows the
+//! sender's clock, and a backlog above its cap is cut, faded both sides.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
@@ -144,6 +145,11 @@ impl AudioPump {
 
         let chunk_ns = timing::frames_to_ns(base_samples as u64, fmt.rate as u32);
         let lead_ns = timing::output_lead_ns(base_samples, fmt.rate, low_latency);
+        // Low-latency mode has no Target Buffer: it primes on, and the speed
+        // trim holds, its cushion plus the hold. Elsewhere the hold is folded
+        // into the published watermarks already.
+        let low_latency_target_ms =
+            timing::low_latency_cushion_ms(base_samples, fmt.rate) + state.hold_ms;
         let now = (self.now_ns)();
 
         if !state.clock.is_primed() {
@@ -227,12 +233,11 @@ impl AudioPump {
         }
 
         if !state.clock.is_primed() {
-            let mut prime_ms = timing::prime_threshold_ms(fmt.target_ms, lead_ns, low_latency);
-            // Elsewhere the hold is part of the target already; low-latency
-            // mode has none, and keeps the hold queued instead.
-            if low_latency {
-                prime_ms += state.hold_ms;
-            }
+            let prime_ms = if low_latency {
+                low_latency_target_ms
+            } else {
+                timing::prime_threshold_ms(fmt.target_ms, lead_ns)
+            };
             if !has_audio || fill_ms < prime_ms {
                 return false;
             }
@@ -277,12 +282,15 @@ impl AudioPump {
             return self.emit_concealment_silence(shared, state, base_samples, &fmt);
         }
 
-        // Low-latency mode has no speed control; cap runaway backlog by
-        // skipping old chunks (latency wins over continuity here).
-        // The audio hold is kept queued on top.
-        if low_latency && fill_ms > consts::AUDIO_LL_MAX_FILL_MS + state.hold_ms {
+        // Low-latency mode's speed only follows the sender's clock, so a
+        // backlog (a stall's burst) is cut instead: latency wins over
+        // continuity here. The chunk before the cut fades out and the one
+        // after fades in, so the seam is a dip rather than a click. The cut
+        // keeps the target and one chunk, with the hold inside the target.
+        if state.low_latency_cut_pending {
+            state.low_latency_cut_pending = false;
             let chunk_ms = (chunk_ns / 1_000_000) as i32;
-            let keep_ms = (if chunk_ms * 2 > 0 { chunk_ms * 2 } else { 42 }) + state.hold_ms;
+            let keep_ms = low_latency_target_ms + chunk_ms;
             let (trimmed, post) = {
                 let mut guard = shared.audio_buf();
                 match guard.as_mut() {
@@ -295,8 +303,18 @@ impl AudioPump {
                     .conn
                     .audible_skipped_chunks
                     .fetch_add(trimmed as u64, Relaxed);
-                fill_ms = post.map_or(0, |s| s.fill_ms);
+                let post_ms = post.map_or(0, |s| s.fill_ms);
+                irl_warn!(
+                    "Low-latency audio: skipped {}ms of backlog to keep latency down (fill {}ms, now {}ms)",
+                    fill_ms - post_ms,
+                    fill_ms,
+                    post_ms
+                );
+                fill_ms = post_ms;
             }
+            state.conceal_fade_pending = true;
+        } else if low_latency && fill_ms > consts::AUDIO_LL_MAX_FILL_MS + state.hold_ms {
+            state.low_latency_cut_pending = true;
         }
 
         // Normally one decoded chunk; once, just after priming, whatever puts
@@ -335,7 +353,15 @@ impl AudioPump {
         let in_frames = (got / (fmt.channels as usize * fmt.bytes_per_sample as usize)) as i32;
         let stream_duration_ns = timing::frames_to_ns(in_frames as u64, fmt.rate as u32);
 
-        let watermarks = shared.hot.watermarks();
+        let watermarks = if low_latency {
+            irl_core::Watermarks {
+                target_ms: low_latency_target_ms,
+                min_ms: 0,
+                max_ms: consts::AUDIO_LL_MAX_FILL_MS + state.hold_ms,
+            }
+        } else {
+            shared.hot.watermarks()
+        };
         let adaptive = shared.hot.adaptive_speed.load(Relaxed);
         // One reading of the catch-up ceiling and one of the clock for the
         // whole cycle: the ramp, the anti-windup, the actuator clamp and the
@@ -378,7 +404,7 @@ Video stays in sync with it; check the sender's frame rate and clock",
 
         let mut frames_out = in_frames as u32;
         let mut use_speed_buf = false;
-        if !low_latency && adaptive {
+        if adaptive {
             let produced = Self::apply_output_speed(
                 &mut self.speed_swr,
                 &mut self.speed_scratch,
@@ -409,7 +435,10 @@ Video stays in sync with it; check the sender's frame rate and clock",
             } else {
                 &mut self.pump_scratch[..emit_bytes]
             };
-            if state.fade_in_frames_remaining > 0 {
+            if state.low_latency_cut_pending {
+                self.float
+                    .edit(emit_buf, |pcm| dsp::apply_fade_out(pcm, channels, fmt.rate));
+            } else if state.fade_in_frames_remaining > 0 {
                 let total = fmt.rate * consts::FADE_DURATION_MS / 1000;
                 let mut remaining = state.fade_in_frames_remaining;
                 self.float.edit(emit_buf, |pcm| {

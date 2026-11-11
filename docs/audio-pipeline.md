@@ -31,7 +31,7 @@ Low-latency mode uses a shorter path:
 decode -> PTS repair -> minimal buffer -> OBS output
 ```
 
-In that mode the plugin still repairs discontinuities and keeps monotonic OBS-facing timestamps, but it starts playback as soon as audio exists and it does not use buffered latency correction.
+In that mode the plugin still repairs discontinuities and keeps monotonic OBS-facing timestamps, but it starts playback once a single chunk (plus any audio hold) is queued. Its speed control keeps only the integral trim and the deadband slope (±0.2%), so it follows a sender whose clock runs fast or slow and corrects nothing audibly. The chunk of cushion is what lets it see a slow sender: a level that rests at zero can only rise. A backlog above 100 ms plus the hold is cut, with a fade out before the cut and a fade in after it, and the cut is logged.
 
 ### 1. Jitter buffer (absorbs short-term network jitter)
 
@@ -147,7 +147,7 @@ When there is no audio playout mapping yet (audio-less start), video falls back 
 | Stable connection | Works fine, but adds seconds of latency | Buffered mode adds the target buffer plus a fixed output lead (about 200ms total at defaults), low-latency mode keeps the source much closer to real time |
 | Brief packet loss (< 70ms) | Audio pop, possible stutter | Interpolated silently, inaudible |
 | Cell tower handoff (100-500ms gap) | Loud click, audio jumps ahead | Silence inserted, smooth transition |
-| Sender clock drift / slow latency creep | Buffer grows forever, latency increases | Bounded speed correction drains the creep gradually while video stays synced to audio |
+| Sender clock drift / slow latency creep | Buffer grows forever, latency increases | Bounded speed correction drains the creep gradually while video stays synced to audio. Low-latency mode follows the sender's clock with the trim alone |
 | RTMP congestion with a buffering encoder | Stream skips ahead or dies | Stream pauses, resumes exactly where it stopped, and bleeds the extra delay off at up to the Catch-Up Speed (+5% by default) |
 | Connection drops and reconnects | Loud click on disconnect, possibly corrupted frames on reconnect | Fade out, clean reconnect, keyframe gate, fade in |
 | Decoder corruption | Gray/corrupt flicker until manual restart | H.264: timestamped concealed frames are passed through to preserve cadence. HEVC: frames predicted from a missing reference (rendered gray by FFmpeg) are held back until the next keyframe. The video decoder is never flushed; only the audio decoder is, on repeated hard errors |

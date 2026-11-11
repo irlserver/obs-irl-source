@@ -760,16 +760,18 @@ fn the_hold_is_released_when_the_sender_recovers() {
     sim.assert_healthy();
 }
 
-/// Low-latency mode keeps no cushion and has no speed control to build one
-/// with, so the hold is sized once, before audio starts, and kept queued.
+/// Low-latency mode's speed only follows the sender's clock, so it cannot
+/// build a hold mid-stream: the hold is sized once, before audio starts, and
+/// kept queued with the mode's one-chunk cushion.
 #[test]
 fn low_latency_audio_holds_at_connection_start_only() {
     let mut sim = Sim::with_mode(120, true).with_video_trailing_by(350);
     sim.run(20.0, Link::Up);
 
-    // The lead is a single 20 ms chunk, and there is no target.
+    // The lead and the cushion are a 20 ms chunk each, and Target Buffer
+    // plays no part.
     let hold = sim.hold_ms();
-    assert_eq!(hold, 350 + 100 - 20);
+    assert_eq!(hold, 350 + 100 - 20 - 20);
     assert_eq!(sim.shared.hot.watermarks().target_ms, 120, "nothing folded");
     sim.assert_in_lip_sync();
 

@@ -149,6 +149,9 @@ pub struct AudioState {
     /// buffer's residual grid instead of leaving the loop to straddle it. See
     /// [`irl_core::timing::aligning_read_frames`].
     pub align_read_pending: bool,
+    /// Low-latency mode: the chunk just emitted faded out ahead of a backlog
+    /// cut, and the next read makes the cut.
+    pub low_latency_cut_pending: bool,
 
     /// The audio hold (`irl_core::audio_hold`, wired in by `audio::hold`):
     /// the skew readings, taken by the receiver as it reads each video packet.

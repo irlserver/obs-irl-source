@@ -28,7 +28,10 @@ pub struct SpeedInputs {
     pub wm: Watermarks,
     /// Adaptive Latency Control.
     pub adaptive: bool,
-    /// Low Latency Audio: no speed control at all.
+    /// Low Latency Audio: the ramp keeps only its deadband slope, so the trim
+    /// follows the sender's clock and nothing else is corrected audibly. `wm`
+    /// then carries that mode's target, a backlog above it is the cap's to
+    /// cut, and `min_ms`/`max_ms` go unread.
     pub low_latency: bool,
     /// Drain ceiling, from [`catchup_speed_max`].
     pub max_speed: f32,
@@ -150,12 +153,11 @@ impl SpeedController {
 
     /// Advance one pump cycle and return the smoothed speed.
     ///
-    /// Adaptive latency control off, or low-latency audio on, pins the speed
-    /// at 1.0 immediately and forgets the trim: there is no buffer to
-    /// regulate, so a trim learned before the setting changed describes a loop
-    /// that no longer runs.
+    /// Adaptive latency control off pins the speed at 1.0 immediately and
+    /// forgets the trim: there is no buffer to regulate, so a trim learned
+    /// before the setting changed describes a loop that no longer runs.
     pub fn update(&mut self, fill_ms: i32, trim: &mut SpeedTrim, inp: SpeedInputs) -> f32 {
-        if !inp.adaptive || inp.low_latency {
+        if !inp.adaptive {
             self.current = 1.0;
             trim.reset();
             return 1.0;
@@ -169,7 +171,14 @@ impl SpeedController {
         self.level += (fill_ms as f32 - self.level) * consts::AUDIO_SPEED_LEVEL_SMOOTHING;
         let fill_ms = self.level.round() as i32;
 
-        let ramp = Self::ramp(fill_ms, inp.wm, inp.max_speed);
+        let mut ramp = Self::ramp(fill_ms, inp.wm, inp.max_speed);
+        if inp.low_latency {
+            // The slope is what damps the trim (see
+            // `AUDIO_SPEED_DEADBAND_SLOPE`), so it stays; the authority
+            // beyond it is what this mode gives up.
+            let slope = consts::AUDIO_SPEED_DEADBAND_SLOPE;
+            ramp = ramp.clamp(1.0 - slope, 1.0 + slope);
+        }
         trim.update(fill_ms, inp.wm.target_ms, ramp, &inp);
 
         // The trim shifts the operating point the ramp swings around, but the
@@ -490,17 +499,35 @@ mod tests {
     }
 
     #[test]
-    fn low_latency_pins_speed_to_one() {
+    fn low_latency_keeps_only_the_deadband_slope() {
+        let ll = |now_us| SpeedInputs {
+            low_latency: true,
+            ..inputs(now_us)
+        };
+        let settle_ll = |fill_ms| {
+            let mut c = SpeedController::new();
+            let mut trim = SpeedTrim::new();
+            let mut speed = 1.0;
+            for _ in 0..2000 {
+                speed = c.update(fill_ms, &mut trim, ll(at(0)));
+            }
+            speed
+        };
+        let slope = consts::AUDIO_SPEED_DEADBAND_SLOPE;
+        // Inside the deadband nothing changes; beyond it the ramp stops at
+        // the slope's edge instead of building at -2 % or draining at the
+        // catch-up ceiling.
+        assert!((settle_ll(130) - (1.0 + slope / 2.0)).abs() < 1e-4);
+        assert!((settle_ll(WM.max_ms) - (1.0 + slope)).abs() < 1e-4);
+        assert!((settle_ll(0) - (1.0 - slope)).abs() < 1e-4);
+
+        // The trim still learns a sender that runs fast.
         let mut c = SpeedController::new();
         let mut trim = SpeedTrim::new();
-        c.update(0, &mut trim, inputs(at(0)));
-        assert!(c.current() < 1.0);
-        let ll = SpeedInputs {
-            low_latency: true,
-            ..inputs(at(1))
-        };
-        assert_eq!(c.update(0, &mut trim, ll), 1.0);
-        assert_eq!(c.current(), 1.0);
+        for s in 0..400 {
+            c.update(140, &mut trim, ll(at(s)));
+        }
+        assert!(trim.value() > 0.0);
     }
 
     #[test]

@@ -41,7 +41,7 @@ use crate::window::{Extreme, WindowExtreme};
 /// `skew_ms` is audio PTS minus video PTS at the same point in the mux, so a
 /// positive value is video trailing audio. `covered_ms` is how long audio
 /// already waits between arriving and playing: Target Buffer plus the output
-/// lead, or the output lead alone in low-latency mode.
+/// lead, or in low-latency mode its one-chunk cushion plus the output lead.
 pub fn hold_ms(skew_ms: i64, covered_ms: i32, margin_ms: i32, max_ms: i32) -> i32 {
     let need_ms = skew_ms + i64::from(margin_ms) - i64::from(covered_ms);
     need_ms.clamp(0, i64::from(max_ms)) as i32

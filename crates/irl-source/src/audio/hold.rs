@@ -14,10 +14,11 @@
 //! whose target *is* Target Buffer plus the hold, so the prime threshold, the
 //! speed controller, the hidden trim and the video thread's anchor wait all
 //! follow it without knowing it exists, and `Config::apply_hot` composes a
-//! Target Buffer edit with it. Low-latency mode has neither a target to fold
-//! it into nor a speed controller to build it with: the pump primes once it
-//! holds the hold's worth of audio and keeps that much queued, and the hold is
-//! sized before priming only. It also takes no burst readings: a cushion
+//! Target Buffer edit with it. Low-latency mode has no target to fold it
+//! into, and its speed only follows the sender's clock, so it cannot build one:
+//! the pump primes once it holds the hold's worth of audio on top of the
+//! mode's one-chunk cushion and keeps that much queued, and the hold is sized
+//! before priming only. It also takes no burst readings: a cushion
 //! between bursts is exactly what that mode gives up for latency.
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -194,15 +195,15 @@ fn user_target_ms(shared: &Shared, state: &AudioState) -> i32 {
 }
 
 /// How long audio already waits between arriving and playing without any
-/// hold: Target Buffer plus the output lead, or the lead alone in
-/// low-latency mode, which keeps no cushion.
+/// hold: Target Buffer plus the output lead, or in low-latency mode its
+/// one-chunk cushion plus the lead.
 fn covered_ms(shared: &Shared, state: &AudioState) -> i32 {
     let low_latency = shared.cfg.low_latency_audio;
     let rate = shared.audio_buf().as_ref().map_or(0, |b| b.sample_rate());
     let lead_ms =
         (timing::output_lead_ns(state.decoded_frame_samples, rate, low_latency) / 1_000_000) as i32;
     if low_latency {
-        lead_ms
+        timing::low_latency_cushion_ms(state.decoded_frame_samples, rate) + lead_ms
     } else {
         user_target_ms(shared, state) + lead_ms
     }

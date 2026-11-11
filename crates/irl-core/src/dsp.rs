@@ -130,6 +130,29 @@ pub fn apply_fade_in(samples: &mut [f32], channels: usize, rate: i32) {
     }
 }
 
+/// Fade out over the last `min(AUDIO_CONCEAL_FADE_MS, whole chunk)`.
+///
+/// Applied to the last chunk before low-latency mode cuts a backlog, so the
+/// cut lands in silence and [`apply_fade_in`] brings the audio back.
+pub fn apply_fade_out(samples: &mut [f32], channels: usize, rate: i32) {
+    if channels == 0 {
+        return;
+    }
+    let frames = samples.len() / channels;
+    let fade_frames = conceal_fade_frames(rate, frames);
+    if fade_frames == 0 {
+        return;
+    }
+
+    let start = frames - fade_frames;
+    for f in 0..fade_frames {
+        let gain = (fade_frames - 1 - f) as f32 / fade_frames as f32;
+        for ch in 0..channels {
+            samples[(start + f) * channels + ch] *= gain;
+        }
+    }
+}
+
 /// Fill `samples` with silence that decays from `last` to zero: the whole
 /// buffer is silence and only its head carries the decay.
 pub fn shape_silence_from_last(samples: &mut [f32], channels: usize, rate: i32, last: &LastSample) {
@@ -257,6 +280,22 @@ mod tests {
         // ... and everything past the fade is untouched.
         assert_eq!(samples[FADE * 2], 1.0);
         assert_eq!(*samples.last().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn fade_out_ends_the_chunk_in_silence() {
+        let mut samples = vec![1.0f32; 960 * 2];
+        apply_fade_out(&mut samples, 2, RATE);
+
+        let start = (960 - FADE) * 2;
+        assert_eq!(samples[start - 1], 1.0, "nothing before the fade moves");
+        assert!((samples[start] - (FADE - 1) as f32 / FADE as f32).abs() < 1e-6);
+        assert_eq!(samples[start + 1], samples[start]);
+        assert_eq!(*samples.last().unwrap(), 0.0);
+
+        let mut short = vec![1.0f32; 4];
+        apply_fade_out(&mut short, 1, RATE);
+        assert_eq!(short, vec![0.75, 0.5, 0.25, 0.0]);
     }
 
     #[test]

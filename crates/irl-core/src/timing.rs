@@ -119,12 +119,24 @@ pub fn soft_compensation_samples(expected: i32, actual: i32) -> i32 {
     delta
 }
 
-/// Fill required before priming: `target + lead`, or 0 in low-latency mode.
-pub fn prime_threshold_ms(target_ms: i32, lead_ns: u64, low_latency: bool) -> i32 {
-    if low_latency {
+/// Fill required before buffered playback primes: `target + lead`.
+pub fn prime_threshold_ms(target_ms: i32, lead_ns: u64) -> i32 {
+    target_ms + (lead_ns / 1_000_000) as i32
+}
+
+/// The fill low-latency mode keeps under the audio hold: one decoded chunk.
+///
+/// The speed trim learns the sender's clock from the level, and a level that
+/// rests at zero can only rise. A sender slower than the OBS clock would then
+/// read as an empty input instead of a falling level, and the trim would never
+/// see it. One chunk is the least room that shows both directions. The
+/// pump primes on it, the controller holds it, and the hold counts it as
+/// cover the way buffered mode counts Target Buffer.
+pub fn low_latency_cushion_ms(chunk_samples: i32, rate: i32) -> i32 {
+    if rate <= 0 || chunk_samples <= 0 {
         return 0;
     }
-    target_ms + (lead_ns / 1_000_000) as i32
+    (frames_to_ns(chunk_samples as u64, rate as u32) / 1_000_000) as i32
 }
 
 /// Frames to read this cycle so the buffer's reachable levels straddle the
@@ -331,8 +343,14 @@ mod tests {
     #[test]
     fn prime_threshold_is_target_plus_lead() {
         let lead = output_lead_ns(OPUS, RATE, false);
-        assert_eq!(prime_threshold_ms(120, lead, false), 200);
-        assert_eq!(prime_threshold_ms(120, lead, true), 0);
+        assert_eq!(prime_threshold_ms(120, lead), 200);
+    }
+
+    #[test]
+    fn low_latency_cushion_is_one_chunk() {
+        assert_eq!(low_latency_cushion_ms(AAC, RATE), 21);
+        assert_eq!(low_latency_cushion_ms(OPUS, RATE), 20);
+        assert_eq!(low_latency_cushion_ms(0, RATE), 0);
     }
 
     #[test]
