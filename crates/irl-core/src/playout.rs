@@ -9,6 +9,13 @@
 /// nothing on its own; only its movement does. Concealment advances the OBS
 /// side while the stream side stands still, so an outage grows the offset by
 /// its length, and that growth is what [`Self::drift_ns`] reports.
+///
+/// Two things move the offset on purpose, and the drift is net of both. The
+/// audio hold grows it to wait for late video. The speed trim plays a sender
+/// whose clock is not the OBS clock at that clock's rate, so the stream side
+/// runs ahead of (or behind) the OBS side by the clock difference, forever:
+/// 50 ppm is 3 ms a minute. Neither is latency the plugin added, and video
+/// maps through the same offset, so neither moves lip sync.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PlayoutMapping {
     obs_end_ns: u64,
@@ -19,9 +26,11 @@ pub struct PlayoutMapping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Baseline {
     offset_ns: i64,
-    /// The audio hold when the baseline was taken. The hold moves the offset
-    /// on purpose, so drift is measured net of how far it moved since.
+    /// The audio hold when the baseline was taken, so drift is measured net
+    /// of how far it moved since.
     hold_ms: i32,
+    /// How far the speed trim has moved the offset since the baseline.
+    trim_moved_ns: i64,
 }
 
 impl PlayoutMapping {
@@ -72,18 +81,36 @@ impl PlayoutMapping {
         let Some(offset_ns) = self.offset_ns() else {
             return false;
         };
-        self.baseline = Some(Baseline { offset_ns, hold_ms });
+        self.baseline = Some(Baseline {
+            offset_ns,
+            hold_ms,
+            trim_moved_ns: 0,
+        });
         true
     }
 
+    /// Record a chunk of real audio that played `stream_ns` of stream time
+    /// with the speed trim at `trim` (see `SpeedTrim::value`). Played at
+    /// `1 + trim`, it takes `stream_ns / (1 + trim)` of OBS time, and the
+    /// difference is the trim's part of the offset's movement. Ignored until
+    /// a baseline is held, since the drift is only measured from one.
+    pub fn note_trimmed_chunk(&mut self, stream_ns: u64, trim: f32) {
+        let Some(baseline) = self.baseline.as_mut() else {
+            return;
+        };
+        let trim = f64::from(trim);
+        let stream_ns = stream_ns as f64;
+        baseline.trim_moved_ns += (stream_ns / (1.0 + trim) - stream_ns).round() as i64;
+    }
+
     /// How far the offset has grown past its baseline, net of what the audio
-    /// hold (now `hold_ms`) moved it by since. `None` without a published
-    /// mapping or a baseline.
+    /// hold (now `hold_ms`) and the speed trim moved it by since. `None`
+    /// without a published mapping or a baseline.
     pub fn drift_ns(&self, hold_ms: i32) -> Option<i64> {
         let offset_ns = self.offset_ns()?;
         let baseline = self.baseline?;
         let hold_moved_ns = i64::from(hold_ms - baseline.hold_ms) * 1_000_000;
-        Some(offset_ns - baseline.offset_ns - hold_moved_ns)
+        Some(offset_ns - baseline.offset_ns - hold_moved_ns - baseline.trim_moved_ns)
     }
 
     /// Forget the latest chunk and the baseline.
@@ -156,6 +183,42 @@ mod tests {
         assert_eq!(mapping.drift_ns(300), Some(0));
         // A hold released below the baseline's reads the other way.
         assert_eq!(mapping.drift_ns(0), Some(300_000_000));
+    }
+
+    #[test]
+    fn drift_is_net_of_the_trim_following_the_sender_clock() {
+        // A sender 50 ppm fast, played at that rate: every second of stream
+        // time takes a little less than a second of OBS time, and after an
+        // hour the stream side is 180 ms further ahead.
+        let trim = 50e-6_f32;
+        let chunk_ns = 1_000_000_000_u64;
+        let mut mapping = published(3_000_000_000, 10_000_000_000);
+        assert!(mapping.take_baseline(0));
+        let (mut obs_ns, mut pts_ns) = (3_000_000_000_f64, 10_000_000_000_i64);
+        for _ in 0..3600 {
+            obs_ns += chunk_ns as f64 / (1.0 + f64::from(trim));
+            pts_ns += chunk_ns as i64;
+            mapping.publish(obs_ns.round() as u64, pts_ns);
+            mapping.note_trimmed_chunk(chunk_ns, trim);
+        }
+        let moved_ns = mapping.offset_ns().unwrap() - (3_000_000_000 - 10_000_000_000);
+        assert!(moved_ns < -170_000_000, "offset moved {moved_ns}ns");
+        // Each chunk's share rounds to a whole nanosecond.
+        let drift_ns = mapping.drift_ns(0).unwrap();
+        assert!(drift_ns.abs() <= 3600 / 2, "drift {drift_ns}ns");
+
+        // A 300 ms outage on top still reads as 300 ms.
+        mapping.publish(obs_ns.round() as u64 + 300_000_000, pts_ns);
+        let drift_ms = mapping.drift_ns(0).unwrap() as f64 / 1e6;
+        assert!((drift_ms - 300.0).abs() < 0.01, "drift {drift_ms}ms");
+    }
+
+    #[test]
+    fn the_trim_counts_only_from_the_baseline() {
+        let mut mapping = published(3_000_000_000, 10_000_000_000);
+        mapping.note_trimmed_chunk(1_000_000_000, 0.01);
+        assert!(mapping.take_baseline(0));
+        assert_eq!(mapping.drift_ns(0), Some(0));
     }
 
     #[test]

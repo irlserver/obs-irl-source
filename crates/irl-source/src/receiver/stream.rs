@@ -515,24 +515,19 @@ impl Receiver {
         let conn = &shared.conn;
         let lifetime = &shared.lifetime;
 
-        // Drift of the audio->OBS playout offset from its primed baseline.
-        // Stays near 0 when healthy; a climbing value is concealment inflating
-        // the video lip-sync mapping. Computed inside the lock rather than
-        // from separate reads: its three inputs are only meaningful against
-        // each other, and the audio thread updates them together.
+        // Read inside the lock rather than from separate reads: the drift's
+        // inputs are only meaningful against each other, and the audio thread
+        // updates them together.
         //
         // The rest of what other threads write are atomics and need no lock,
         // and the stats line must not introduce an audio_state / video queue
         // lock edge.
         let (av_drift_ms, av_skew_ms) = {
             let state = shared.audio_state();
-            let skew = crate::source::av_skew_ms(shared, &state);
-            // Net of the audio hold, which moves the offset on purpose.
-            let drift = state
-                .mapping
-                .drift_ns(state.hold_ms)
-                .map_or(0, |drift_ns| drift_ns / 1_000_000);
-            (drift, skew)
+            (
+                crate::source::av_drift_ms(&state),
+                crate::source::av_skew_ms(shared, &state),
+            )
         };
 
         let video_frame_interval_ns = conn.video_frame_interval_ns.load(Relaxed);

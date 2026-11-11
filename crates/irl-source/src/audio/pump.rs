@@ -448,6 +448,11 @@ Video stays in sync with it; check the sender's frame rate and clock",
             fmt.rate as u32,
             chunk_pts_ns + stream_duration_ns as i64,
         );
+        if use_speed_buf {
+            state
+                .mapping
+                .note_trimmed_chunk(stream_duration_ns, state.speed_trim.value());
+        }
         if first_mapping {
             // Video holds its first frame until this mapping exists and then
             // has about one chunk to hand it over on time; a wake here beats

@@ -540,6 +540,17 @@ pub fn av_skew_ms(shared: &Shared, audio: &AudioState) -> i64 {
     (video_pts_ns - audio.latest_audio_stream_pts_ns) / 1_000_000
 }
 
+/// `av_drift` on the stats line: how far the audio playout offset moved since
+/// playback primed, in ms, net of the audio hold and the speed trim. That is
+/// latency the plugin added or reclaimed itself, mostly concealment. Zero
+/// before a baseline exists.
+pub fn av_drift_ms(audio: &AudioState) -> i64 {
+    audio
+        .mapping
+        .drift_ns(audio.hold_ms)
+        .map_or(0, |drift_ns| drift_ns / 1_000_000)
+}
+
 /// Snapshot every stat, consistently: the audio state (and, under it, the
 /// jitter buffer) is locked once.
 ///

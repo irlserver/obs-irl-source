@@ -36,7 +36,7 @@ use obs_irl_source::receiver::ReceiverFlags;
 use obs_irl_source::receiver::audio_in::AudioIntake;
 use obs_irl_source::receiver::decode::note_video_arrival;
 use obs_irl_source::shared::{Shared, TimedPacket};
-use obs_irl_source::source::av_skew_ms;
+use obs_irl_source::source::{av_drift_ms, av_skew_ms};
 use obs_irl_source::video::VideoSink;
 use obs_irl_source::video::thread::VideoThread;
 
@@ -147,6 +147,8 @@ struct Scenario {
     /// Audio frames the sender's muxer packs into one PES packet. None reach
     /// the plugin before the last of them is encoded.
     audio_pes_frames: i64,
+    /// Seconds of stream time the sender stamps per second of OBS clock.
+    sender_rate: f64,
     events: Vec<(u64, Event)>,
 }
 
@@ -164,6 +166,7 @@ impl Scenario {
             stalls: Vec::new(),
             relay_backlog: None,
             audio_pes_frames: 1,
+            sender_rate: 1.0,
             events: Vec::new(),
         }
     }
@@ -171,6 +174,17 @@ impl Scenario {
     fn audio_pes_frames(mut self, frames: i64) -> Self {
         self.audio_pes_frames = frames;
         self
+    }
+
+    fn sender_rate(mut self, rate: f64) -> Self {
+        self.sender_rate = rate;
+        self
+    }
+
+    /// The OBS time since the open at which the sender stamps `stream_ns`
+    /// past its first PTS.
+    fn on_obs_clock(&self, stream_ns: i64) -> i64 {
+        (stream_ns as f64 / self.sender_rate).round() as i64
     }
 
     fn fps(mut self, fps: u64) -> Self {
@@ -258,14 +272,14 @@ impl Scenario {
             let first = FIRST_PTS_NS * i64::from(RATE) / 1_000_000_000;
             let mut last_at = 0;
             for n in (first..).step_by(AUDIO_FRAMES as usize) {
-                let capture = (sample_pts_ns(n) - FIRST_PTS_NS) as u64;
+                let capture = self.on_obs_clock(sample_pts_ns(n) - FIRST_PTS_NS) as u64;
                 if capture >= end_ns {
                     break;
                 }
                 // The packet leaves with its last frame.
                 let pes = self.audio_pes_frames * AUDIO_FRAMES;
                 let last = first + (n - first) / pes * pes + pes - AUDIO_FRAMES;
-                let sent = (sample_pts_ns(last) - FIRST_PTS_NS) as u64;
+                let sent = self.on_obs_clock(sample_pts_ns(last) - FIRST_PTS_NS) as u64;
                 let Some(at) = self.through_stalls(START_NS + sent + NET_NS, false) else {
                     continue;
                 };
@@ -284,10 +298,10 @@ impl Scenario {
         for k in 0.. {
             let j = k as i64 - backlog as i64;
             let offset = j * frame as i64;
-            if offset >= end_ns as i64 {
+            let capture = (START_NS as i64 + self.on_obs_clock(offset)) as u64;
+            if capture >= START_NS + end_ns {
                 break;
             }
-            let capture = (START_NS as i64 + offset) as u64;
             let mut at = capture + NET_NS + (self.video_lag)(capture.saturating_sub(START_NS));
             if let Some((_, speedup)) = self.relay_backlog {
                 at = at.max(START_NS + NET_NS + k * frame / speedup);
@@ -628,6 +642,7 @@ struct StatSample {
     video_delay_ms: u64,
     audio_hold_ms: i32,
     av_skew_ms: i64,
+    av_drift_ms: i64,
     fill_ms: i32,
     target_ms: i32,
     underruns: u64,
@@ -763,6 +778,7 @@ impl Sim {
             video_delay_ms: self.shared.conn.video_delay_ns.load(Relaxed) / MS,
             audio_hold_ms: self.shared.conn.audio_hold_ms.load(Relaxed),
             av_skew_ms: av_skew_ms(&self.shared, &state),
+            av_drift_ms: av_drift_ms(&state),
             fill_ms: self
                 .shared
                 .audio_buf()
@@ -983,7 +999,7 @@ impl Report {
         println!(
             "{name}: offset {:.1}..{:.1}ms (mean {:.1}) late {} (max {:.1}ms) over {:.0}-{:.0}s; \
              play head lag {:.1}ms, repeats {}, overflows {}, shown {}/{} video_delay={}ms \
-             audio_hold={}ms av_skew={}ms restarts={}",
+             audio_hold={}ms av_skew={}ms av_drift={}ms restarts={}",
             steady.min_offset_ms,
             steady.max_offset_ms,
             steady.mean_offset_ms,
@@ -1002,6 +1018,7 @@ impl Report {
             s.video_delay_ms,
             s.audio_hold_ms,
             s.av_skew_ms,
+            s.av_drift_ms,
             self.restarts,
         );
     }
@@ -1204,6 +1221,38 @@ fn audio_in_bursts_is_held_until_the_buffer_covers_them() {
             "{target_ms}ms: hold {hold_ms}ms against {needed_ms}ms"
         );
         report.assert_healthy();
+    }
+}
+
+/// A sender whose clock runs fast or slow against the OBS clock: two iPhones
+/// measured 50 ppm fast (#41), a sender set to the wrong frame rate is off by
+/// 0.1 %, and 0.3 % here makes the effect plain inside a short run. The speed
+/// trim learns the rate and plays the stream at it, so the playout offset
+/// moves by the clock difference for as long as the stream runs. Video maps
+/// through the same offset, so picture and sound stay where they were and the
+/// buffer stays on target. `av_drift` reports none of it once the trim has
+/// learned the rate, which takes it about 100 s at 0.3 %. Until then the
+/// proportional ramp carries part of the rate and the reading keeps that
+/// part: at 50 ppm a few milliseconds, here over 100 ms.
+#[test]
+fn a_sender_off_the_obs_clock_stays_in_sync_and_reads_no_drift() {
+    for rate in [1.003, 0.997] {
+        let report = Scenario::new(160).sender_rate(rate).run();
+        let early = report.assert_settled(10.0, 30.0);
+        let late = report.assert_settled(130.0, 160.0);
+        report.print(&format!("sender at {rate}x"), &late);
+        report.assert_no_drift(&early, &late);
+        report.assert_latency_settled();
+        report.assert_healthy();
+
+        // Uncorrected, the reading would move 0.3 % of the 40 s between the
+        // two samples: 120 ms.
+        let learned = report.stats_at(120.0).av_drift_ms;
+        let moved_ms = report.last_stats().av_drift_ms - learned;
+        assert!(
+            moved_ms.abs() <= 3,
+            "{rate}x: av_drift moved {moved_ms}ms after 120s (from {learned}ms)"
+        );
     }
 }
 

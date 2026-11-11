@@ -332,7 +332,7 @@ The plugin also logs stats to the OBS log every 30 seconds:
 [irl-source] Stats: video=1801 audio=1406 buf=118ms peak=164ms target=120ms speed=1.000 ll=off max_gap=0ms underruns=0 restarts=0 av_drift=0ms av_skew=-14ms hold=0ms vdelay=0ms vfps=60.0 vq_drops=0 pktq=7/38(96KB,116ms) paced=14/16(43MB) eagain=0/0 pktdrop=0/0 res=1920x1080
 ```
 
-A healthy stream shows `speed` near 1.000, `underruns=0`, `restarts=0`, `av_drift` near 0, and `vdelay` and `hold` at 0. `buf` wanders inside a deadband around `target` by design, and `peak` is the highest fill since the source was created. `ll` is Low Latency Audio, and `ctrl=off` appears only when Adaptive Latency Control is turned off. The rest describe the video path:
+A healthy stream shows `speed` near 1.000, `underruns=0`, `restarts=0`, `av_drift` near 0, and `vdelay` and `hold` at 0. `buf` wanders inside a deadband around `target` by design, and `peak` is the highest fill since the source was created. `ll` is Low Latency Audio, and `ctrl=off` appears only when Adaptive Latency Control is turned off. `av_drift` is how far the audio latency has moved since playback started, leaving out the audio hold and the correction for a sender whose clock runs fast or slow. It rises when concealment adds latency and falls as a backlog drains. It is not a lip-sync reading: video is scheduled against the same audio playout, so it moves with it. The rest describe the video path:
 
 - `vfps`: the frame rate the sender is delivering.
 - `vq_drops`: compressed video packets dropped because the decode queue overflowed (should stay 0).
