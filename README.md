@@ -168,7 +168,7 @@ The source registers as a controllable media input, so it appears in OBS's media
 
 - `TriggerMediaInputAction` with `OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART` drops the connection and reconnects. This is the one to use for a chat bot's "fix my stream" command.
 - `..._STOP` (or `..._PAUSE`) stops the receiver and blanks the source until a restart or a settings edit; `..._PLAY` starts it again.
-- `GetMediaInputStatus` reports `OBS_MEDIA_STATE_PLAYING` once frames are flowing, `OBS_MEDIA_STATE_BUFFERING` while connected but still filling, `OBS_MEDIA_STATE_OPENING` while reconnecting, and `OBS_MEDIA_STATE_STOPPED` when the receiver is not running.
+- `GetMediaInputStatus` reports `OBS_MEDIA_STATE_PLAYING` once frames are flowing, `OBS_MEDIA_STATE_BUFFERING` while the first connection opens or a connection is still filling, `OBS_MEDIA_STATE_OPENING` from a lost connection or a failed attempt until a new connection opens, and `OBS_MEDIA_STATE_STOPPED` when the receiver is not running.
 
 Unlike OBS's own media source, writing settings does **not** implicitly restart the stream: changing anything other than URL, FFmpeg Options, Hardware Decode or Low Latency Audio is applied to the running stream in place, so retuning the buffer never costs a reconnect. Ask for a restart explicitly.
 

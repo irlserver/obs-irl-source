@@ -24,7 +24,7 @@ use ffmpeg::sys::{AVColorRange, AVColorSpace, AVColorTransferCharacteristic};
 use obs::{ColorRange, ColorSpace, VideoFormat};
 use parking_lot::Mutex;
 
-use shared::Shared;
+use shared::{ConnectionEnd, Shared};
 use video::VideoSink;
 use video::output;
 use video::thread::VideoThread;
@@ -33,6 +33,9 @@ use video::thread::VideoThread;
 const TICK: u64 = 16_666_667;
 /// One 30fps frame interval.
 const FRAME: u64 = 33_333_333;
+/// A connection that ends with Show Nothing When the Stream Ends on, the
+/// default.
+const CLEAR: ConnectionEnd = ConnectionEnd { clear: true };
 
 /* ── Harness ──────────────────────────────────────────────── */
 
@@ -554,7 +557,7 @@ fn a_full_pacing_queue_does_not_keep_the_video_thread_awake() {
     assert!(shared.video.has_work(true));
 
     // A clear always wakes it, whatever the queue looks like.
-    shared.video.request_clear();
+    shared.video.end_connection(CLEAR);
     assert!(shared.video.has_work(false));
 }
 
@@ -567,7 +570,7 @@ fn a_decoder_handover_is_taken_even_with_no_pacing_room() {
     common::push_packet(&shared, 0, 1);
     assert!(!shared.video.next_is_decoder(), "a packet is at the front");
 
-    shared.video.request_clear();
+    shared.video.end_connection(CLEAR);
     common::push_packet(&shared, 0, 1);
     assert!(!shared.video.next_is_decoder());
 }
@@ -644,7 +647,7 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
     run_at(&mut thread, &clock, now);
     assert_eq!(thread.pacing().len(), 1, "parked until its due time");
 
-    shared.video.request_clear();
+    shared.video.end_connection(CLEAR);
     let wait = run_at(&mut thread, &clock, now);
 
     assert_eq!(recorder.cleared.load(Relaxed), 1);
@@ -659,6 +662,42 @@ fn a_clear_request_drops_the_queue_and_blanks_the_source() {
         1,
         "nothing repainted after a clear"
     );
+}
+
+/// The receiver ended the connection while this thread was finishing one of
+/// its frames (#42). That frame lands after the receiver's own resets, counts
+/// itself and anchors the fallback clock, which made the source read PLAYING
+/// with nothing connected and took the next connection's "first frame". So
+/// the end of the connection resets both here, after it, whether or not the
+/// source is cleared, and the frame is never shown.
+#[test]
+fn a_connection_end_forgets_a_frame_finished_after_it() {
+    for clear in [true, false] {
+        let shared = shared();
+        let (mut thread, recorder, clock) = thread_with(shared.clone());
+        let now = clock.now();
+        feed(&mut thread, 0, now);
+        run_at(&mut thread, &clock, now + TICK);
+        assert_eq!(recorder.emitted().len(), 1);
+
+        shared.video.end_connection(ConnectionEnd { clear });
+        // The frame in flight: the intake counts it, and pacing it anchors
+        // the fallback clock, since the disconnect took the audio mapping.
+        shared.conn.total_video_frames.fetch_add(1, Relaxed);
+        feed(&mut thread, FRAME as i64, now + TICK);
+        assert!(shared.conn.video_ts_init.load(Relaxed));
+
+        run_at(&mut thread, &clock, now + 2 * TICK);
+        assert_eq!(
+            shared.conn.total_video_frames.load(Relaxed),
+            0,
+            "clear={clear}"
+        );
+        assert!(!shared.conn.video_ts_init.load(Relaxed), "clear={clear}");
+        assert_eq!(thread.pacing().len(), 0, "clear={clear}");
+        assert_eq!(recorder.emitted().len(), 1, "clear={clear}: nothing shown");
+        assert_eq!(recorder.cleared.load(Relaxed), usize::from(clear));
+    }
 }
 
 #[test]
@@ -1228,7 +1267,7 @@ fn a_clear_forgets_the_video_delay() {
     run_at(&mut thread, &clock, t0);
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 10 * TICK);
 
-    shared.video.request_clear();
+    shared.video.end_connection(CLEAR);
     let t1 = t0 + 5_000_000_000;
     run_at(&mut thread, &clock, t1);
     assert_eq!(shared.conn.video_delay_ns.load(Relaxed), 0);

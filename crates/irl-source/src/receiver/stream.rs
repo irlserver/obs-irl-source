@@ -8,7 +8,7 @@ use irl_core::{HwDecode, consts};
 
 use crate::audio;
 use crate::receiver::{Receiver, probe};
-use crate::shared::{AudioState, Shared, VideoDecoder};
+use crate::shared::{AudioState, ConnectionEnd, Shared, VideoDecoder};
 
 /// Installed only for forced NVDEC, where a software fallback is exactly what
 /// must not happen.
@@ -435,6 +435,10 @@ impl Receiver {
     }
 
     /// Returns whether the run is still active.
+    ///
+    /// The source stays reconnecting through the wait and the attempts after
+    /// it, until [`Self::prepare_new_connection`]: nothing is connected in
+    /// between, and media state reads OPENING for all of it.
     pub(super) fn wait_for_reconnect(&mut self) -> bool {
         self.shared.flags.reconnecting.store(true, Relaxed);
         // Sampled once: a delay edited mid-wait should apply to the next
@@ -442,7 +446,6 @@ impl Receiver {
         let delay_s = self.shared.hot.reconnect_delay_s.load(Relaxed);
         irl_info!("Reconnecting in {delay_s}s...");
         probe::reconnect_sleep(delay_s, &self.shared.flags.thread_active);
-        self.shared.flags.reconnecting.store(false, Relaxed);
         self.shared.is_active()
     }
 
@@ -468,14 +471,14 @@ impl Receiver {
 
         self.close_ffmpeg();
 
-        // Blank the source instead of leaving the last decoded frame frozen
-        // on screen, matching what OBS's own media source does on media end
-        // (its clear_on_media_end, likewise on by default). The audio fade-out
-        // above is the same idea for the other half of the stream. The video
-        // thread performs the actual clear.
-        if shared.hot.clear_on_disconnect.load(Relaxed) {
-            shared.video.request_clear();
-        }
+        // Blanking the source instead of leaving the last decoded frame
+        // frozen on screen matches what OBS's own media source does on media
+        // end (its clear_on_media_end, likewise on by default). The audio
+        // fade-out above is the same idea for the other half of the stream.
+        // The video thread performs the clear, and resets the video counters.
+        shared.video.end_connection(ConnectionEnd {
+            clear: shared.hot.clear_on_disconnect.load(Relaxed),
+        });
 
         {
             let mut state = shared.audio_state();
@@ -499,7 +502,6 @@ impl Receiver {
         conn.audible_skipped_chunks.store(0, Relaxed);
         conn.pts_max_gap_ms.store(0, Relaxed);
         conn.total_audio_frames.store(0, Relaxed);
-        conn.total_video_frames.store(0, Relaxed);
         self.last_stats_time = 0;
     }
 

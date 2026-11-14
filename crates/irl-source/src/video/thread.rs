@@ -19,7 +19,7 @@ use irl_core::consts;
 use irl_core::pacing::{DueVerdict, PacingQueue};
 use irl_core::video_delay::{DelayRaise, DelayRelax, VideoDelay};
 
-use crate::shared::{Shared, TimedPacket, VideoDecoder, VideoMsg};
+use crate::shared::{ConnectionEnd, Shared, TimedPacket, VideoDecoder, VideoMsg};
 use crate::video::VideoSink;
 use crate::video::decode;
 use crate::video::intake::{self, DecodeState};
@@ -216,29 +216,8 @@ impl VideoThread {
     /// pass; zero means "go round again immediately".
     pub fn run_once(&mut self) -> Duration {
         let now_ns = self.now_ns();
-        if self.shared.video.take_clear() {
-            // The receiver already dropped `video_queue`; the paced frames
-            // behind it must go too, or the blank would be repainted a lead
-            // later.
-            self.pacing.drain();
-            // A cleared source is showing nothing; no reason to keep a lead's
-            // worth of recycled buffers resident while it does. The next frame
-            // rebuilds the pool.
-            self.xfer_pool = None;
-            // The offset belongs to the connection that just ended; the next
-            // one brings its own PTS epoch.
-            self.playout_offset_ns = 0;
-            self.playout_offset_time_ns = 0;
-            // `obs_source_output_video(NULL)` resets libobs's `last_frame_ts`
-            // to 0, so the next frame re-anchors the play head.
-            self.anchor_pending = true;
-            self.anchor_wait = AnchorWait::Idle;
-            self.last_frame = None;
-            self.handed_until_ns = 0;
-            // The floor was sized for the connection that just ended.
-            self.reset_delay();
-            self.publish_delay();
-            self.sink.output_video_none();
+        if let Some(end) = self.shared.video.take_end() {
+            self.end_connection(end);
             return Duration::ZERO;
         }
 
@@ -342,8 +321,45 @@ impl VideoThread {
         }
     }
 
-    /// A new connection's decoder. Anything the old one produced is already
-    /// paced or was cleared with the disconnect.
+    /// Close out a connection the receiver lost. The receiver already dropped
+    /// its queued packets; what the old decoder still holds and every paced
+    /// frame go too, since their audio was faded out with the disconnect.
+    /// The frame count and the fallback anchor reset here rather than in the
+    /// receiver, after any frame this thread was finishing when the
+    /// connection ended (see `VideoChannel::end_connection`).
+    fn end_connection(&mut self, end: ConnectionEnd) {
+        self.decoder = None;
+        self.state.reset();
+        self.pacing.drain();
+        self.shared.conn.total_video_frames.store(0, Relaxed);
+        self.shared.conn.video_ts_init.store(false, Relaxed);
+        if !end.clear {
+            // The last frame stays on screen, and the play head keeps running
+            // on it until the next connection's frames arrive.
+            return;
+        }
+        // A cleared source is showing nothing; no reason to keep a lead's
+        // worth of recycled buffers resident while it does. The next frame
+        // rebuilds the pool.
+        self.xfer_pool = None;
+        // The offset belongs to the connection that just ended; the next one
+        // brings its own PTS epoch.
+        self.playout_offset_ns = 0;
+        self.playout_offset_time_ns = 0;
+        // `obs_source_output_video(NULL)` resets libobs's `last_frame_ts` to
+        // 0, so the next frame re-anchors the play head.
+        self.anchor_pending = true;
+        self.anchor_wait = AnchorWait::Idle;
+        self.last_frame = None;
+        self.handed_until_ns = 0;
+        // The floor was sized for the connection that just ended.
+        self.reset_delay();
+        self.publish_delay();
+        self.sink.output_video_none();
+    }
+
+    /// A new connection's decoder. Anything the old one produced was dropped
+    /// with the disconnect.
     fn adopt_decoder(&mut self, decoder: VideoDecoder) {
         self.decoder = Some(decoder);
         self.state.reset();

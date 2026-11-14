@@ -301,10 +301,17 @@ struct VideoQueue {
     msgs: std::collections::VecDeque<VideoMsg>,
     packets: usize,
     bytes: usize,
-    /// Set by the receiver on disconnect; the *video* thread performs the
-    /// actual `obs_source_output_video(NULL)` so a frame already mid-conversion
-    /// cannot repaint after the clear.
-    clear_pending: bool,
+    /// Set by the receiver when a connection ends; the video thread closes it
+    /// out. See [`VideoChannel::end_connection`].
+    end_pending: Option<ConnectionEnd>,
+}
+
+/// A connection the receiver lost, for the video thread to close out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionEnd {
+    /// Blank the source (Show Nothing When the Stream Ends) rather than leave
+    /// the last frame on screen.
+    pub clear: bool,
 }
 
 impl VideoQueue {
@@ -315,7 +322,7 @@ impl VideoQueue {
     }
 
     fn has_work(&self, has_room: bool) -> bool {
-        self.clear_pending || (has_room && !self.msgs.is_empty())
+        self.end_pending.is_some() || (has_room && !self.msgs.is_empty())
     }
 
     /// Media time between the oldest and newest queued packet.
@@ -375,19 +382,26 @@ impl VideoChannel {
         self.cv.notify_one();
     }
 
-    /// Receiver thread, on disconnect: drop everything queued and ask the
-    /// video thread to clear the OBS frame.
-    pub fn request_clear(&self) {
+    /// Receiver thread, on disconnect: drop everything queued and hand the
+    /// video thread the end of the connection.
+    ///
+    /// The video thread, not the receiver, resets what it writes per
+    /// connection (the frame count, the fallback anchor, the frame on screen),
+    /// because it may be mid-decode on a packet of the connection that just
+    /// ended. A frame it finishes after a reset made here would count as the
+    /// next connection's first and anchor its clock, so the source would read
+    /// as playing with nothing connected.
+    pub fn end_connection(&self, end: ConnectionEnd) {
         let mut q = self.q.lock();
         q.clear();
-        q.clear_pending = true;
+        q.end_pending = Some(end);
         drop(q);
         self.cv.notify_one();
     }
 
-    /// Video thread: consume the clear request.
-    pub fn take_clear(&self) -> bool {
-        std::mem::take(&mut self.q.lock().clear_pending)
+    /// Video thread: take the end of the connection, if one is pending.
+    pub fn take_end(&self) -> Option<ConnectionEnd> {
+        self.q.lock().end_pending.take()
     }
 
     /// Whether the next message is a decoder handover, which the video thread
