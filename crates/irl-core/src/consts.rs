@@ -267,6 +267,12 @@ pub const VIDEO_PACING_SLACK_NS: i64 = 1_000_000;
 /// at one to four source frames, far under the 30 at which `cache_video()`
 /// discards the whole async queue.
 pub const VIDEO_PACING_LEAD_TICKS: u64 = 2;
+/// Frames handed to libobs between two of its render ticks before the next
+/// waits for a tick. A render loop on time never lets this many build up: a
+/// 120fps source on a 30fps canvas hands four. More means the loop stalled,
+/// and every frame handed meanwhile piles into an async queue that
+/// `cache_video()` throws away whole at 30.
+pub const VIDEO_FRAMES_PER_RENDER_TICK_MAX: u32 = 4;
 /// Ceiling on that lead, for a canvas running at an unusually low frame rate.
 pub const VIDEO_PACING_MAX_LEAD_NS: u64 = 50_000_000;
 /// Canvas tick assumed when libobs has not reported one yet (60fps).
@@ -510,6 +516,7 @@ mod tests {
         assert_eq!(AUDIO_HOLD_PRIME_WAIT_MS, 2000);
         assert_eq!(AUDIO_BURST_WINDOW_MS, 1000);
         assert_eq!(VIDEO_PACING_MAX_LEAD_NS, 50_000_000);
+        assert_eq!(VIDEO_FRAMES_PER_RENDER_TICK_MAX, 4);
         assert_eq!(VIDEO_CANVAS_TICK_DEFAULT_NS, 16_666_667);
         assert_eq!(VIDEO_PACING_MAX_WAIT_MS, 50);
         assert_eq!(VIDEO_OFFSET_HOLD_NS, 500_000_000);

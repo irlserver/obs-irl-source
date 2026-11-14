@@ -119,6 +119,12 @@ pub struct VideoThread {
     last_frame: Option<Paced>,
     /// The newest timestamp libobs has received.
     handed_until_ns: u64,
+    /// Frames handed to libobs since its last render tick. See
+    /// [`Self::libobs_has_room`].
+    handed_since_tick: HandedSinceTick,
+    /// This cycle held a frame back for libobs's render loop, which nothing
+    /// signals the end of, so the sleep polls for its next tick.
+    held_for_render: bool,
     /// The floor under the video schedule, so that video which reaches this
     /// thread too late to be paced against the audio playout still can be.
     /// See [`Self::settle_anchor_candidate`].
@@ -143,6 +149,13 @@ pub struct VideoThread {
     /// same reason as the canvas tick.
     render_tick_ns: Box<dyn Fn() -> Option<u64> + Send>,
     pub(crate) sink: Box<dyn VideoSink>,
+}
+
+/// The render tick libobs last ran, and how many frames it was handed since.
+#[derive(Debug, Default, Clone, Copy)]
+struct HandedSinceTick {
+    tick_ns: u64,
+    frames: u32,
 }
 
 impl VideoThread {
@@ -181,6 +194,8 @@ impl VideoThread {
             anchor_wait: AnchorWait::Idle,
             last_frame: None,
             handed_until_ns: 0,
+            handed_since_tick: HandedSinceTick::default(),
+            held_for_render: false,
             delay: VideoDelay::default(),
             offset_ns: None,
             floor_moved: false,
@@ -224,6 +239,7 @@ impl VideoThread {
         // Sampled once for both the emit and the sleep, so a canvas frame
         // rate changed mid-cycle cannot make them disagree.
         let slack_ns = self.emit_slack_ns();
+        self.held_for_render = false;
 
         self.decode_intake();
         // Before both the emit and the sleep below, so each cycle schedules
@@ -451,6 +467,12 @@ impl VideoThread {
     fn pacing_emit_due(&mut self, now_ns: u64, slack_ns: i64) {
         let tick_ns = self.canvas_tick_ns();
         if self.anchor_pending {
+            // The anchor is stamped for the tick after the one libobs last
+            // ran, which a stalled render loop skips.
+            if self.render_stalled(now_ns) {
+                self.held_for_render = true;
+                return;
+            }
             self.settle_anchor_candidate(now_ns, tick_ns);
         }
         loop {
@@ -461,6 +483,10 @@ impl VideoThread {
                 return;
             };
             if let DueVerdict::Wait(_) = verdict {
+                return;
+            }
+            if !self.libobs_has_room() {
+                self.held_for_render = true;
                 return;
             }
             // `due_now` keeps the head in place, so its due time is still the
@@ -512,6 +538,7 @@ impl VideoThread {
             let submitted = self.output_frame(paced.frame(), timestamp);
             if submitted {
                 self.handed_until_ns = timestamp;
+                self.handed_since_tick.frames += 1;
             }
             // The play head is only anchored by a frame libobs actually
             // received, at its real due time. A conversion that failed
@@ -553,12 +580,47 @@ impl VideoThread {
         {
             return; // a real frame goes out before that tick
         }
+        if !self.libobs_has_room() {
+            self.held_for_render = true;
+            return;
+        }
         if let Some(last) = self.last_frame.take() {
             if self.output_frame(last.frame(), next_tick_ns) {
                 self.handed_until_ns = next_tick_ns;
+                self.handed_since_tick.frames += 1;
             }
             self.last_frame = Some(last);
         }
+    }
+
+    /// Whether libobs's render loop is too late for the tick after the one it
+    /// last ran to be its next. `video_sleep` skips every tick it missed, so
+    /// an anchor frame stamped for that tick would be taken up on a later one,
+    /// and the play head would trail the OBS clock by the ticks skipped for
+    /// the rest of the connection: sound ahead of picture until a reconnect.
+    /// A render loop that lags at all lags most while OBS starts up. False
+    /// before libobs has ticked.
+    fn render_stalled(&self, now_ns: u64) -> bool {
+        (self.render_tick_ns)().is_some_and(|last_ns| now_ns >= last_ns + 2 * self.canvas_tick_ns())
+    }
+
+    /// Whether libobs can take another frame before its next render tick.
+    ///
+    /// Nothing leaves libobs's async queue while its render loop stalls, and a
+    /// queue that reaches `MAX_ASYNC_FRAMES` is thrown away whole, with the
+    /// play head re-anchored on whatever frame comes next: a lasting offset as
+    /// long as the stall. The bound stops short of that without holding
+    /// everything back, because a tick that finds the queue empty is lost from
+    /// the play head for good. A render loop on time takes frames faster than
+    /// the bound lets them through.
+    fn libobs_has_room(&mut self) -> bool {
+        let Some(tick_ns) = (self.render_tick_ns)() else {
+            return true;
+        };
+        if tick_ns != self.handed_since_tick.tick_ns {
+            self.handed_since_tick = HandedSinceTick { tick_ns, frames: 0 };
+        }
+        self.handed_since_tick.frames < consts::VIDEO_FRAMES_PER_RENDER_TICK_MAX
     }
 
     /// The next render tick, when a repeat could be called for at all.
@@ -891,6 +953,9 @@ impl VideoThread {
     /// `VIDEO_PACING_MAX_WAIT_MS`, never below 1 ms, and zero when the head is
     /// already due (go round again).
     fn sleep_hint(&self, now_ns: u64, slack_ns: i64) -> Duration {
+        if self.held_for_render {
+            return Duration::from_millis(1);
+        }
         let mut wait_ms = consts::VIDEO_PACING_MAX_WAIT_MS;
         if let Some(next_tick_ns) = self.next_render_tick() {
             let until_ns = next_tick_ns as i64 + consts::VIDEO_PACING_SLACK_NS - now_ns as i64;

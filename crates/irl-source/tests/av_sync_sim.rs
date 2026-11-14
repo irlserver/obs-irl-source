@@ -149,6 +149,8 @@ struct Scenario {
     audio_pes_frames: i64,
     /// Seconds of stream time the sender stamps per second of OBS clock.
     sender_rate: f64,
+    /// A stretch of OBS time, from the open, in which libobs renders nothing.
+    render_stall: Option<RenderStall>,
     events: Vec<(u64, Event)>,
 }
 
@@ -167,12 +169,24 @@ impl Scenario {
             relay_backlog: None,
             audio_pes_frames: 1,
             sender_rate: 1.0,
+            render_stall: None,
             events: Vec::new(),
         }
     }
 
     fn audio_pes_frames(mut self, frames: i64) -> Self {
         self.audio_pes_frames = frames;
+        self
+    }
+
+    /// libobs's render loop lags from `at_s` for `len_ms`, as it does while
+    /// OBS starts up: no tick runs inside it.
+    fn render_stall(mut self, at_s: f64, len_ms: u64) -> Self {
+        let start_ns = START_NS + (at_s * SEC as f64) as u64;
+        self.render_stall = Some(RenderStall {
+            start_ns,
+            end_ns: start_ns + len_ms * MS,
+        });
         self
     }
 
@@ -455,6 +469,30 @@ impl Shown {
     }
 }
 
+/// A lag in libobs's render loop. `video_sleep` then skips the ticks it
+/// missed: none of them runs, and `obs_get_video_frame_time` keeps the last
+/// one that did until the loop resumes on the tick grid.
+#[derive(Clone, Copy, Debug)]
+struct RenderStall {
+    start_ns: u64,
+    end_ns: u64,
+}
+
+impl RenderStall {
+    fn skips(&self, tick_ns: u64) -> bool {
+        (self.start_ns..self.end_ns).contains(&tick_ns)
+    }
+}
+
+/// The time of the render tick libobs last ran at OBS time `now_ns`.
+fn last_render_tick(now_ns: u64, tick_ns: u64, stall: Option<RenderStall>) -> u64 {
+    let on_grid = now_ns - now_ns % tick_ns;
+    match stall {
+        Some(stall) if stall.skips(on_grid) => (stall.start_ns - 1) / tick_ns * tick_ns,
+        _ => on_grid,
+    }
+}
+
 /// `MAX_ASYNC_FRAMES`: a queue this deep is thrown away whole.
 const LIBOBS_MAX_ASYNC_FRAMES: usize = 30;
 /// `MAX_TS_VAR`: a timestamp this far from the play head resets it.
@@ -485,6 +523,7 @@ struct VideoOut {
     /// `async_unbuffered`, set in low-latency mode: no play head, and each
     /// tick takes the newest frame.
     unbuffered: bool,
+    stall: Option<RenderStall>,
 }
 
 impl VideoOut {
@@ -497,7 +536,9 @@ impl VideoOut {
         }
         while self.next_tick_ns <= now_ns {
             let tick = self.next_tick_ns;
-            self.async_tick(tick);
+            if !self.stall.is_some_and(|stall| stall.skips(tick)) {
+                self.async_tick(tick);
+            }
             self.next_tick_ns += tick_ns;
         }
     }
@@ -680,6 +721,7 @@ impl Sim {
 
         let video_out = Arc::new(Mutex::new(VideoOut {
             unbuffered: scenario.low_latency,
+            stall: scenario.render_stall,
             ..VideoOut::default()
         }));
         let sink = VideoProbe {
@@ -688,6 +730,7 @@ impl Sim {
             tick_ns: scenario.canvas_tick_ns(),
         };
         let tick = scenario.canvas_tick_ns();
+        let stall = scenario.render_stall;
         let video = {
             let ns = Arc::clone(&clock);
             let render = Arc::clone(&clock);
@@ -695,8 +738,7 @@ impl Sim {
                 .with_clock(Box::new(move || ns.load(Relaxed)))
                 .with_canvas_tick(Box::new(move || Some(tick)))
                 .with_render_tick(Box::new(move || {
-                    let now = render.load(Relaxed);
-                    Some(now - now % tick)
+                    Some(last_render_tick(render.load(Relaxed), tick, stall))
                 }))
                 .with_decode_stub(Box::new(stub_decode))
         };
@@ -1628,4 +1670,45 @@ fn a_video_stall_leaves_no_lasting_offset() {
     report.print("video stall", &after);
     report.assert_no_drift(&before, &after);
     report.assert_healthy();
+}
+
+/// libobs's render loop lags most while OBS starts up, and a source that
+/// connects then would hand over its anchor frame during the lag. Stamped for
+/// the tick after the last one libobs ran, which the lag skips, it would be
+/// taken up on a later tick, and the picture would run behind the sound by
+/// the lag until the next reconnect (a 600 ms lag leaves 608 ms). The anchor
+/// waits for the render loop instead.
+#[test]
+fn a_render_stall_while_anchoring_leaves_no_offset() {
+    for len_ms in [100, 600, 1500] {
+        let report = Scenario::new(20).render_stall(0.0, len_ms).run();
+        let steady = report.window(3.0, 20.0);
+        report.print(
+            &format!("render stall of {len_ms}ms at the anchor"),
+            &steady,
+        );
+        report.assert_in_sync(
+            &steady,
+            report.tick_ns as i64 + 2 * consts::VIDEO_PACING_SLACK_NS,
+        );
+        report.assert_paced(&steady);
+        report.assert_healthy();
+    }
+}
+
+/// A render stall mid-stream. Nothing leaves libobs's async queue while it
+/// lasts, so handing it every frame as it comes due would fill the queue to
+/// 30, where libobs throws it away and re-anchors on whatever frame comes
+/// next (1.5 s leaves the sound 471 ms ahead for good). Only a few frames go
+/// per render tick, and sync after the stall is where it was before it.
+#[test]
+fn a_render_stall_mid_stream_leaves_no_offset() {
+    for len_ms in [300, 1500, 2000] {
+        let report = Scenario::new(25).render_stall(10.0, len_ms).run();
+        let before = report.assert_settled(3.0, 10.0);
+        let after = report.assert_settled(15.0, 25.0);
+        report.print(&format!("render stall of {len_ms}ms mid-stream"), &after);
+        report.assert_no_drift(&before, &after);
+        report.assert_healthy();
+    }
 }
