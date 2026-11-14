@@ -45,13 +45,16 @@ Download from [Releases](../../releases). There is one archive per platform and 
 
 ### Windows
 
-Run `obs-irl-source-<version>-windows-x64-setup.exe`. It finds your OBS Studio folder from the registry, closes OBS if it is running, and can be removed again from Add or Remove Programs.
+Run `obs-irl-source-<version>-windows-x64-setup.exe`. It installs into `C:\ProgramData\obs-studio\plugins`, checks the OBS version it finds from the registry, closes OBS if it is running, and can be removed again from Add or Remove Programs. It also removes the copy that releases up to 2.2 put in the OBS folder.
 
 Or, from the zip:
 
 1. Close OBS
-2. Extract the zip into your OBS Studio install folder (usually `C:\Program Files\obs-studio`), so the DLLs land in `obs-plugins\64bit`
-3. Start OBS
+2. Delete `obs-plugins\64bit\obs-irl-source.dll` and `data\obs-plugins\obs-irl-source` from your OBS Studio folder, if an earlier release put them there
+3. Extract the zip into `C:\ProgramData\obs-studio\plugins\`, so you get `C:\ProgramData\obs-studio\plugins\obs-irl-source`. For a portable OBS 33, extract it into the `plugins` folder of the portable install instead
+4. Start OBS
+
+The folder holds the DLL twice: OBS 33 loads the one at the top, and OBS 32 loads the one in `bin\64bit`. OBS 33 flags a plugin in the OBS folder as Legacy, and OBS 34 will not load it there.
 
 ### macOS (Apple Silicon)
 
@@ -66,10 +69,14 @@ Or, from the zip:
 The release binary bundles its own media stack and resolves libobs symbols from the OBS process at load time rather than linking a libobs, so the OBS version it was built against does not matter. It is compiled against Ubuntu 22.04's glibc 2.35 for compatibility with older distributions and the OBS Flatpak sandbox (Freedesktop SDK); on a still-older distribution, build from source instead (see [Building from source](#building-from-source)).
 
 1. Close OBS
-2. Extract the tarball into `~/.config/obs-studio/plugins/` — for the Flatpak, `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/` (the same layout, under the sandbox's config)
+2. Extract the tarball into the plugin folder for your OBS version:
+   - OBS 33 and newer: `~/.local/share/obs-studio/plugins/`, or for the Flatpak `~/.var/app/com.obsproject.Studio/data/obs-studio/plugins/`
+   - OBS 32: `~/.config/obs-studio/plugins/`, or for the Flatpak `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/`
 3. Start OBS
 
-> **Flatpak:** The tarball works when extracted to the Flatpak config path above. A native Flatpak extension (`com.obsproject.Studio.Plugin.obs-irl-source`) is not yet shipped; if you package one, build against `org.freedesktop.Sdk//25.08` (or newer) and the `com.obsproject.Studio` runtime.
+OBS 33 still loads a copy from the OBS 32 folder but flags it as Legacy, and OBS 34 will not load it there. After an upgrade to OBS 33, extract into the new folder and delete the old `obs-irl-source` folder.
+
+> **Flatpak:** The tarball works when extracted to the Flatpak path above. A native Flatpak extension (`com.obsproject.Studio.Plugin.obs-irl-source`) is not yet shipped; if you package one, build against `org.freedesktop.Sdk//25.08` (or newer) and the `com.obsproject.Studio` runtime.
 
 ## Usage
 

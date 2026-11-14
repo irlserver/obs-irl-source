@@ -297,10 +297,10 @@ jobs:
           if (-not $match) { throw 'Could not read the version from Cargo.toml' }
           $version = $match.Matches[0].Groups[1].Value
 
-          # Staged in the release zip's layout so the .iss has one file list
-          # describing both.
-          New-Item -ItemType Directory -Force -Path dist\windows\obs-plugins\64bit | Out-Null
-          Copy-Item target\release\obs_irl_source.dll dist\windows\obs-plugins\64bit\obs-irl-source.dll
+          # Staged where the release zip has the DLL; the .iss copies it to
+          # both places OBS looks.
+          New-Item -ItemType Directory -Force -Path dist\windows\obs-irl-source | Out-Null
+          Copy-Item target\release\obs_irl_source.dll dist\windows\obs-irl-source\obs-irl-source.dll
 
           $candidates = @(
             "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",

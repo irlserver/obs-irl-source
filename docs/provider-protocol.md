@@ -29,7 +29,7 @@ The list and the Custom entry come from `providers.json` in the plugin's data di
 }
 ```
 
-`priority` orders the dropdown, highest first, and defaults to 0. `allow_custom` defaults to false. Base URLs are normalized the way the Custom field's are and must be unique. A missing file, or one that does not parse, is logged and the dropdown offers Manual URL only. Streaming never depends on it. Upgrading through a release archive or the installer writes the stock file again, so a deployment that edited it re-applies its copy afterwards. The data directory is `data/` next to the plugin binary on Linux, `data/obs-plugins/obs-irl-source/` under the OBS install on Windows, and `Contents/Resources/` inside the plugin bundle on macOS.
+`priority` orders the dropdown, highest first, and defaults to 0. `allow_custom` defaults to false. Base URLs are normalized the way the Custom field's are and must be unique. A missing file, or one that does not parse, is logged and the dropdown offers Manual URL only. Streaming never depends on it. Upgrading through a release archive or the installer writes the stock file again, so a deployment that edited it re-applies its copy afterwards. The data directory is `obs-irl-source/data/` in the plugin folder on Linux and Windows (on Windows, `C:\ProgramData\obs-studio\plugins\obs-irl-source\data\`), and `Contents/Resources/` inside the plugin bundle on macOS.
 
 The provider choice and the picked id are OBS settings, so they land in the scene collection. That is why the contract forbids secrets in ids.
 

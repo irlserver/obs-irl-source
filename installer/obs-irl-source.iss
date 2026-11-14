@@ -3,9 +3,16 @@
 ; Build it with:
 ;   iscc /DPluginVersion=1.3.4 /DPayloadDir=..\dist\windows installer\obs-irl-source.iss
 ;
-; PayloadDir must hold the same layout as the release zip
-; (obs-plugins\64bit\obs-irl-source.dll), so CI stages the zip contents and
-; points this at them rather than maintaining a second file list.
+; PayloadDir must hold the DLL where the release zip has it
+; (obs-irl-source\obs-irl-source.dll); CI stages it there.
+;
+; The plugin goes to C:\ProgramData\obs-studio\plugins\obs-irl-source, which
+; OBS 32 and 33 both scan, with the DLL twice over one data folder: at the
+; folder root, which OBS 33 loads, and under bin\64bit, which OBS 32 loads and
+; OBS 33 skips once the first has loaded. A DLL inside the OBS install folder
+; is flagged Legacy by OBS 33 and not loaded by OBS 34. The wizard still asks
+; for the OBS folder: it is where the version is checked, where earlier
+; releases installed (removed below), and what the last page launches.
 ;
 ; Note on the OBS version check below: the plugin bundles its own FFmpeg, so
 ; unlike plugins that link obs-deps' FFmpeg there is no exact-version coupling
@@ -22,6 +29,7 @@
 
 #define PluginId "obs-irl-source"
 #define AppName "IRL Source for OBS Studio"
+#define PluginDir "{commonappdata}\obs-studio\plugins\" + PluginId
 
 [Setup]
 AppId={{B6E1F4C2-9D3A-4E77-8C15-2A7F0D9B4E31}
@@ -36,7 +44,7 @@ AppendDefaultDirName=no
 DirExistsWarning=no
 DisableProgramGroupPage=yes
 Uninstallable=yes
-UninstallFilesDir={app}\data\obs-plugins\{#PluginId}
+UninstallFilesDir={#PluginDir}
 UninstallDisplayName={#AppName}
 PrivilegesRequired=admin
 ; x64compatible arrived in Inno Setup 6.3 and replaced the older x64 spelling,
@@ -70,22 +78,28 @@ VersionInfoProductVersion={#PluginVersion}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-SelectDirLabel3=Setup will install the plugin into your OBS Studio folder.
-SelectDirBrowseLabel=To continue, click Next. To install into a different OBS Studio folder (a portable install, for example), click Browse.
+SelectDirLabel3=Setup installs the plugin for every OBS Studio on this computer, and checks the version of the OBS Studio in this folder.
+SelectDirBrowseLabel=To continue, click Next. If OBS Studio is in a different folder, click Browse. For a portable OBS Studio, use the zip instead.
 
 [Files]
-Source: "{#PayloadDir}\obs-plugins\64bit\obs-irl-source.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
+Source: "{#PayloadDir}\{#PluginId}\obs-irl-source.dll"; DestDir: "{#PluginDir}"; Flags: ignoreversion
+Source: "{#PayloadDir}\{#PluginId}\obs-irl-source.dll"; DestDir: "{#PluginDir}\bin\64bit"; Flags: ignoreversion
 ; Not optional: obs_module_text() falls back to the lookup key, so without the
 ; locale file the properties dialog renders as bare identifiers.
-Source: "..\data\locale\*"; DestDir: "{app}\data\obs-plugins\{#PluginId}\locale"; Flags: ignoreversion
+Source: "..\data\locale\*"; DestDir: "{#PluginDir}\data\locale"; Flags: ignoreversion
 ; The Provider dropdown's list. A host that edited it re-applies its copy after
 ; an upgrade; see docs/provider-protocol.md.
-Source: "..\data\providers.json"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
-Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
-Source: "..\README.md"; DestDir: "{app}\data\obs-plugins\{#PluginId}"; Flags: ignoreversion
+Source: "..\data\providers.json"; DestDir: "{#PluginDir}\data"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{#PluginDir}\data"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{#PluginDir}\data"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{#PluginDir}\data"; Flags: ignoreversion
 
 [InstallDelete]
+; Releases up to 2.2 installed into the OBS folder itself. OBS 32 would load
+; that copy and this one and fail the second registration, so it goes, along
+; with the uninstaller those releases kept in its data folder.
+Type: files; Name: "{app}\obs-plugins\64bit\obs-irl-source.dll"
+Type: filesandordirs; Name: "{app}\data\obs-plugins\{#PluginId}"
 ; Versions up to 1.x shipped w32-pthreads.dll beside the plugin, because the
 ; C build linked pthreads through it. The Rust plugin never calls pthreads, so
 ; the file is no longer part of the payload; an in-place upgrade would

@@ -14,6 +14,12 @@
 # version in Cargo.toml, which is the single source of truth (release.yml
 # checks the pushed tag against it).
 #
+# OBS 33 scans a plugin folder for `<name>/<name>.<ext>` and flags anything
+# found through the older `bin/64bit` layout as Legacy, which OBS 34 stops
+# loading. OBS 32 knows only `bin/64bit`. So the Windows and Linux folders
+# carry the binary in both places over one shared `data/`, and each OBS loads
+# the copy it looks for first (33 skips the second with a log line).
+#
 # The locale file is not optional packaging: obs_module_text() falls back to
 # the lookup key, so a build shipped without it renders the properties dialog
 # as bare identifiers. THIRD_PARTY_NOTICES.md travels with the binary because
@@ -71,25 +77,28 @@ stage_data() {
 
 case "${platform}" in
 linux)
-	# Extracts into ~/.config/obs-studio/plugins/
+	# Extracts into ~/.local/share/obs-studio/plugins/ (OBS 33 and newer) or
+	# ~/.config/obs-studio/plugins/ (OBS 32). The OBS 32 copy is a symlink,
+	# which dlopen follows, so the archive carries the binary once.
 	archive="${out_dir}/obs-irl-source-${version}-linux-x64.tar.gz"
 	mkdir -p "${staging}/obs-irl-source/bin/64bit"
-	cp "$(artifact libobs_irl_source.so)" \
-		"${staging}/obs-irl-source/bin/64bit/obs-irl-source.so"
+	cp "$(artifact libobs_irl_source.so)" "${staging}/obs-irl-source/obs-irl-source.so"
+	ln -s ../../obs-irl-source.so "${staging}/obs-irl-source/bin/64bit/obs-irl-source.so"
 	stage_data "${staging}/obs-irl-source/data"
 	tar -C "${staging}" -czf "${archive}" obs-irl-source
 	;;
 windows)
-	# Extracts into the OBS Studio install folder; the DLL lands in
-	# obs-plugins\64bit. No w32-pthreads.dll: the Rust plugin never calls
-	# pthreads, which is what the C build needed it for.
+	# Extracts into C:\ProgramData\obs-studio\plugins\, which OBS 32 and 33
+	# both scan. A zip holds no symlinks, so the DLL is in it twice. No
+	# w32-pthreads.dll: the Rust plugin never calls pthreads, which is what the
+	# C build needed it for.
 	archive="${out_dir}/obs-irl-source-${version}-windows-x64.zip"
-	mkdir -p "${staging}/obs-plugins/64bit"
-	cp "$(artifact obs_irl_source.dll)" \
-		"${staging}/obs-plugins/64bit/obs-irl-source.dll"
-	stage_data "${staging}/data/obs-plugins/obs-irl-source"
+	mkdir -p "${staging}/obs-irl-source/bin/64bit"
+	cp "$(artifact obs_irl_source.dll)" "${staging}/obs-irl-source/obs-irl-source.dll"
+	cp "$(artifact obs_irl_source.dll)" "${staging}/obs-irl-source/bin/64bit/obs-irl-source.dll"
+	stage_data "${staging}/obs-irl-source/data"
 	rm -f "${archive}"
-	(cd "${staging}" && zip -qr "${archive}" obs-plugins data)
+	(cd "${staging}" && zip -qr "${archive}" obs-irl-source)
 	;;
 macos)
 	# Extracts into ~/Library/Application Support/obs-studio/plugins/.
@@ -131,17 +140,25 @@ macos)
 	fi
 	;;
 deb)
-	# A Debian package installing system-wide, next to distro OBS:
-	# /usr/lib/<multiarch>/obs-plugins + /usr/share/obs/obs-plugins/<id>.
+	# A Debian package installing system-wide, next to distro OBS. OBS 33
+	# scans /usr/lib/<multiarch>/obs-modules/plugins with data under
+	# /usr/share/obs/obs-modules/plugins/<id>; OBS 32 knows only
+	# obs-plugins in both places, which 33 flags as Legacy. The OBS 32 paths
+	# are symlinks to the OBS 33 ones.
 	command -v dpkg-deb >/dev/null || die "dpkg-deb not found"
 	deb="${out_dir}/obs-irl-source_${version}_amd64.deb"
 	pkgroot="${staging}/pkg"
-	libdir="${pkgroot}/usr/lib/x86_64-linux-gnu/obs-plugins"
-	datadir="${pkgroot}/usr/share/obs/obs-plugins/obs-irl-source"
+	libdir="${pkgroot}/usr/lib/x86_64-linux-gnu/obs-modules/plugins"
+	datadir="${pkgroot}/usr/share/obs/obs-modules/plugins/obs-irl-source"
+	legacy_libdir="${pkgroot}/usr/lib/x86_64-linux-gnu/obs-plugins"
+	legacy_datadir="${pkgroot}/usr/share/obs/obs-plugins"
 	docdir="${pkgroot}/usr/share/doc/obs-irl-source"
-	mkdir -p "${libdir}" "${datadir}" "${docdir}" "${pkgroot}/DEBIAN"
+	mkdir -p "${libdir}" "${datadir}" "${legacy_libdir}" "${legacy_datadir}" \
+		"${docdir}" "${pkgroot}/DEBIAN"
 	cp "$(artifact libobs_irl_source.so)" "${libdir}/obs-irl-source.so"
+	ln -s ../obs-modules/plugins/obs-irl-source.so "${legacy_libdir}/obs-irl-source.so"
 	stage_data "${datadir}"
+	ln -s ../obs-modules/plugins/obs-irl-source "${legacy_datadir}/obs-irl-source"
 	# Debian wants licenses under /usr/share/doc; keep copies with the
 	# plugin data too, matching the tarball layout.
 	cp "${repo_root}/LICENSE" "${docdir}/copyright"

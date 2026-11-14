@@ -21,8 +21,8 @@ Releases are tag driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.
 
 4. Wait for the Release workflow to finish. It creates a draft release containing:
 
-   * `obs-irl-source-X.Y.Z-linux-x64.tar.gz` (extract into `~/.config/obs-studio/plugins/`)
-   * `obs-irl-source-X.Y.Z-windows-x64.zip` (extract into the OBS install folder)
+   * `obs-irl-source-X.Y.Z-linux-x64.tar.gz` (extract into `~/.local/share/obs-studio/plugins/` for OBS 33, `~/.config/obs-studio/plugins/` for OBS 32)
+   * `obs-irl-source-X.Y.Z-windows-x64.zip` (extract into `C:\ProgramData\obs-studio\plugins\`)
    * `obs-irl-source-X.Y.Z-windows-x64-setup.exe` (same payload as the zip, installed by `installer/obs-irl-source.iss`)
    * `obs-irl-source-X.Y.Z-macos-arm64.zip` (extract into `~/Library/Application Support/obs-studio/plugins/`)
    * `sha256sums.txt`

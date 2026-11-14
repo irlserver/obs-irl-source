@@ -86,7 +86,7 @@ Releases are tag driven (`RELEASING.md`). Pushing `vX.Y.Z` checks the tag agains
 - `data/locale/en-US.ini` must ship: the lookup falls back to the key, so a package without it shows bare identifiers in the dialog.
 - `data/providers.json` is the Provider dropdown's list; a deployment edits it to show only its own provider. `crates/irl-provider/tests/catalog.rs` parses the repo copy.
 - `THIRD_PARTY_NOTICES.md` ships in every archive, because LGPLv3 FFmpeg wants its notices conveyed with the object code.
-- `installer/obs-irl-source.iss` resolves the OBS folder from the registry and requires OBS 32.1 or newer (a minimum, not an exact match).
+- `installer/obs-irl-source.iss` installs into `C:\ProgramData\obs-studio\plugins\obs-irl-source`, with the DLL at the folder root for OBS 33 and in `bin\64bit` for OBS 32 (`scripts/package.sh` stages the same layout). It resolves the OBS folder from the registry to require OBS 32.1 or newer (a minimum, not an exact match) and to remove the copy releases up to 2.2 put there.
 - `irl-stats.lua` is an example overlay script that reads the stats proc.
 
 ## Contributing
