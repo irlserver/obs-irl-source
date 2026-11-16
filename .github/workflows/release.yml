@@ -72,6 +72,18 @@ jobs:
           # DLLs into Program Files.
           cp artifacts/obs-irl-source-windows-installer/*.exe dist/
 
+          # A copy of each download without the version in its name, so
+          # releases/latest/download/<name> is a direct link that never goes
+          # stale (irlserver.com links to these). The source tarball gets no
+          # copy because it belongs to its tag.
+          (
+            cd dist
+            for f in obs-irl-source*; do
+              [[ ${f} == *-source.tar.gz ]] && continue
+              cp "${f}" "$(sed -E "s/[-_]${version//./\\.}([-_])/\1/" <<<"${f}")"
+            done
+          )
+
           (cd dist && sha256sum ./* > sha256sums.txt)
           ls -l dist
 

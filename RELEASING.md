@@ -25,9 +25,14 @@ Releases are tag driven. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.
    * `obs-irl-source-X.Y.Z-windows-x64.zip` (extract into `C:\ProgramData\obs-studio\plugins\`)
    * `obs-irl-source-X.Y.Z-windows-x64-setup.exe` (same payload as the zip, installed by `installer/obs-irl-source.iss`)
    * `obs-irl-source-X.Y.Z-macos-arm64.zip` (extract into `~/Library/Application Support/obs-studio/plugins/`)
+   * `obs-irl-source_X.Y.Z_amd64.deb`
+   * `obs-irl-source-X.Y.Z-source.tar.gz`
+   * a copy of each download except the source tarball without the version in its name, such as `obs-irl-source-windows-x64-setup.exe`
    * `sha256sums.txt`
 
-   The three archives are staged by `scripts/package.sh`, so a maintainer can reproduce any of them locally from a `cargo build --release`.
+   The archives are staged by `scripts/package.sh`, so a maintainer can reproduce any of them locally from a `cargo build --release`.
+
+   The copies without a version exist so that `https://github.com/irlserver/obs-irl-source/releases/latest/download/<name>` always points at the newest published release. irlserver.com links to them directly, so keep those names stable.
 
    The release body starts with install instructions (from `.github/release-notes-header.md`) followed by a changelog built from the commits since the previous tag.
 
