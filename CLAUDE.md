@@ -58,7 +58,7 @@ scripts/package.sh linux target/release dist       # the release archive, locall
 - **Panics** never cross an FFI boundary: `obs::panic::guard` wraps every `extern "C"` shim and `shared::spawn_worker` wraps every worker thread.
 - **Logging** goes through `irl_info!` / `irl_warn!` / `irl_error!` / `irl_debug!`, never `blog` directly.
 - **URLs** never reach the log whole. Plugin lines go through `log::redacted_input_url`, FFmpeg's through `log::redacted_log_line`, because FFmpeg prints the user's URL (with `passphrase=` and `streamid=`) in its own errors.
-- **UI strings** never pass English to `module_text`. A new string goes in the call site and `data/locale/en-US.ini`; `tests/locale_keys.rs` checks both directions.
+- **UI strings** never pass English to `module_text`. A new string goes in the call site and `data/locale/en-US.ini`; `tests/locale_keys.rs` checks both directions. Translations (`de-DE.ini`, `tr-TR.ini`) sit next to it and may lag, since a missing key falls back to English. The same test rejects a translation key en-US lacks, a dropped `%1`, and an `.ini` not listed in its `TRANSLATIONS`. A new language is a `locale!("<code>")` line there, an entry in the `.config/codespellrc` skip list (codespell knows only English) and a row in the README's Languages table.
 - **Stats** are one table: a new stat is one line in `irl_core::stats::FIELDS` plus its `StatsSnapshot` field and `values()`. The proc, the calldata writer and the websocket loop walk the table. Update the README table too. A stat stays only if it diagnoses real issues.
 - **Tuning values** live in `irl_core::consts`, pinned by `consts_are_pinned`. Nothing else hardcodes a threshold.
 - **Frozen interface:** settings keys and defaults, the names of the stats, and the media-control behavior that NOALBS's `!fix` relies on. Log text is free to change.
@@ -83,7 +83,7 @@ Releases are tag driven (`RELEASING.md`). Pushing `vX.Y.Z` checks the tag agains
 
 ## Shipped files
 
-- `data/locale/en-US.ini` must ship: the lookup falls back to the key, so a package without it shows bare identifiers in the dialog.
+- `data/locale/*.ini` must ship: the lookup falls back to the key, so a package without `en-US.ini` shows bare identifiers in the dialog, and one without a translation shows English to that language's users. `scripts/package.sh` and the installer copy the whole folder.
 - `data/providers.json` is the Provider dropdown's list; a deployment edits it to show only its own provider. `crates/irl-provider/tests/catalog.rs` parses the repo copy.
 - `THIRD_PARTY_NOTICES.md` ships in every archive, because LGPLv3 FFmpeg wants its notices conveyed with the object code.
 - `installer/obs-irl-source.iss` installs into `C:\ProgramData\obs-studio\plugins\obs-irl-source`, with the DLL at the folder root for OBS 33 and in `bin\64bit` for OBS 32 (`scripts/package.sh` stages the same layout). It resolves the OBS folder from the registry to require OBS 32.1 or newer (a minimum, not an exact match) and to remove the copy releases up to 2.2 put there.
