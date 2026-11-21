@@ -20,9 +20,10 @@
 # carry the binary in both places over one shared `data/`, and each OBS loads
 # the copy it looks for first (33 skips the second with a log line).
 #
-# The locale file is not optional packaging: obs_module_text() falls back to
-# the lookup key, so a build shipped without it renders the properties dialog
-# as bare identifiers. THIRD_PARTY_NOTICES.md travels with the binary because
+# The locale files are not optional packaging: obs_module_text() falls back
+# to the lookup key, so a build shipped without en-US.ini renders the
+# properties dialog as bare identifiers. Every translation in data/locale/
+# ships with it. THIRD_PARTY_NOTICES.md travels with the binary because
 # the bundled stack includes LGPL FFmpeg, which wants its notices conveyed
 # alongside the object code.
 
@@ -70,7 +71,7 @@ artifact() {
 # data directory the platform's obs_module_file() resolves to.
 stage_data() {
 	mkdir -p "$1/locale"
-	cp "${repo_root}/data/locale/en-US.ini" "$1/locale/"
+	cp "${repo_root}"/data/locale/*.ini "$1/locale/"
 	cp "${repo_root}/data/providers.json" "$1/"
 	cp "${repo_root}/LICENSE" "${repo_root}/THIRD_PARTY_NOTICES.md" "$1/"
 }

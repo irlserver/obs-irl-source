@@ -126,6 +126,20 @@ The ingest list never contains stream keys. Picking an entry asks the provider f
 
 The Provider dropdown's list is `providers.json`, next to the plugin's `locale` folder. If you host OBS for others and want the dropdown to offer only your own service, edit that file: it can list any providers and hide Custom provider. The format is in [docs/provider-protocol.md](docs/provider-protocol.md#what-the-user-sees). Upgrading the plugin writes the stock file again, so keep your copy and re-apply it.
 
+### Languages
+
+The properties dialog follows the language OBS is set to (Settings > General > Language).
+
+| Language | File |
+| --- | --- |
+| English | `en-US.ini` |
+| German (Deutsch) | `de-DE.ini` |
+| Turkish (Türkçe) | `tr-TR.ini` |
+
+Any other language shows the English text. A string a translation does not have yet also falls back to English, so a translation that lags behind a release still opens a complete dialog.
+
+To add a language, copy `data/locale/en-US.ini` to `data/locale/<code>.ini`, using the code OBS uses for that language (`fr-FR`, `es-ES`, `pt-BR`, …), translate the values and keep the keys. Keep every `%1` and `\n`. Then add `locale!("<code>")` to `TRANSLATIONS` in `crates/irl-source/tests/locale_keys.rs`, and add the file to the codespell skip list in `.config/codespellrc`, since codespell only knows English. The test fails if a translation keeps a key English no longer has, drops a `%1`, or sits in `data/locale/` without being listed. The release archives and the Windows installer pick up every file in that folder.
+
 ### Buffered or low latency?
 
 `Low Latency Audio` does more than flip an OBS flag. It changes how the plugin buffers.

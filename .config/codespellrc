@@ -1,6 +1,9 @@
 [codespell]
 # Vendored trees, build output and lockfiles are not ours to spell-check.
-skip = ./.git,./target,./deps/.build,./build,./dist,Cargo.lock,*.log,*.svg,*.png,*.ico
+# The translations are skipped one by one, because codespell's dictionary is
+# English and reads German "oder" or Turkish "bu" as typos; en-US.ini, the
+# source of every string, stays checked. A new translation is added here.
+skip = ./.git,./target,./deps/.build,./build,./dist,Cargo.lock,*.log,*.svg,*.png,*.ico,./data/locale/de-DE.ini,./data/locale/tr-TR.ini
 
 # Real words here that codespell's dictionary reads as typos:
 #   trough    - the low half of "peak and trough", in the controller simulation

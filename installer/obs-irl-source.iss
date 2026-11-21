@@ -84,8 +84,9 @@ SelectDirBrowseLabel=To continue, click Next. If OBS Studio is in a different fo
 [Files]
 Source: "{#PayloadDir}\{#PluginId}\obs-irl-source.dll"; DestDir: "{#PluginDir}"; Flags: ignoreversion
 Source: "{#PayloadDir}\{#PluginId}\obs-irl-source.dll"; DestDir: "{#PluginDir}\bin\64bit"; Flags: ignoreversion
-; Not optional: obs_module_text() falls back to the lookup key, so without the
-; locale file the properties dialog renders as bare identifiers.
+; Not optional: obs_module_text() falls back to the lookup key, so without
+; en-US.ini the properties dialog renders as bare identifiers. The wildcard
+; carries every translation along with it.
 Source: "..\data\locale\*"; DestDir: "{#PluginDir}\data\locale"; Flags: ignoreversion
 ; The Provider dropdown's list. A host that edited it re-applies its copy after
 ; an upgrade; see docs/provider-protocol.md.
