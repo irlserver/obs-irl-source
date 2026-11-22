@@ -119,6 +119,9 @@ pub struct VideoThread {
     last_frame: Option<Paced>,
     /// The newest timestamp libobs has received.
     handed_until_ns: u64,
+    /// The last render tick that still finds a frame in libobs's async queue.
+    /// See [`Self::keep_play_head_running`].
+    queued_through_ns: u64,
     /// Frames handed to libobs since its last render tick. See
     /// [`Self::libobs_has_room`].
     handed_since_tick: HandedSinceTick,
@@ -194,6 +197,7 @@ impl VideoThread {
             anchor_wait: AnchorWait::Idle,
             last_frame: None,
             handed_until_ns: 0,
+            queued_through_ns: 0,
             handed_since_tick: HandedSinceTick::default(),
             held_for_render: false,
             delay: VideoDelay::default(),
@@ -368,6 +372,7 @@ impl VideoThread {
         self.anchor_wait = AnchorWait::Idle;
         self.last_frame = None;
         self.handed_until_ns = 0;
+        self.queued_through_ns = 0;
         // The floor was sized for the connection that just ended.
         self.reset_delay();
         self.publish_delay();
@@ -538,6 +543,14 @@ impl VideoThread {
             let submitted = self.output_frame(paced.frame(), timestamp);
             if submitted {
                 self.handed_until_ns = timestamp;
+                // An unanchored libobs takes the frame on the first tick that
+                // finds it, so the anchor covers that tick alone. Any other
+                // frame stays queued until the first tick past its timestamp.
+                self.queued_through_ns = if self.anchor_pending {
+                    timestamp
+                } else {
+                    timestamp + tick_ns
+                };
                 self.handed_since_tick.frames += 1;
             }
             // The play head is only anchored by a frame libobs actually
@@ -572,7 +585,7 @@ impl VideoThread {
         let Some(next_tick_ns) = self.next_render_tick() else {
             return;
         };
-        if self.handed_until_ns + self.canvas_tick_ns() >= next_tick_ns {
+        if self.queued_through_ns >= next_tick_ns {
             return;
         }
         if let Some(due_ns) = self.pacing.next_due()
@@ -587,6 +600,7 @@ impl VideoThread {
         if let Some(last) = self.last_frame.take() {
             if self.output_frame(last.frame(), next_tick_ns) {
                 self.handed_until_ns = next_tick_ns;
+                self.queued_through_ns = next_tick_ns + self.canvas_tick_ns();
                 self.handed_since_tick.frames += 1;
             }
             self.last_frame = Some(last);
