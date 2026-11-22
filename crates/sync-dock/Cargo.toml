@@ -1,0 +1,18 @@
+[package]
+name = "sync-dock"
+description = "The IRL Sync dock: the C plugin's Qt widget, compiled in when Qt6 is found, behind a Rust backend trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+links = "irl-sync-dock"
+
+[lib]
+name = "sync_dock"
+
+[dependencies]
+
+[build-dependencies]
+cc = { workspace = true }
